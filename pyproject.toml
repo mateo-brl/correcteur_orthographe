@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "correcteur"
 version = "0.1.0"
-description = "Correcteur d'orthographe et de grammaire pour tout le système (Windows et Linux) : Grammalecte + LanguageTool + IA locale optionnelle."
+description = "Correcteur d'orthographe et de grammaire pour tout le système (Windows et Linux) : Grammalecte + LanguageTool, sans IA."
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = ["orthographe", "grammaire", "correcteur", "grammalecte", "languagetool", "français"]
