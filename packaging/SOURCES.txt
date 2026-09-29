@@ -1,0 +1,11 @@
+Correcteur est un logiciel libre, distribué sous licence GNU GPL version 3 ou ultérieure
+(texte complet dans le fichier LICENSE).
+
+Code source de ce qui est inclus dans ce paquet :
+
+- Correcteur : https://github.com/mateo-brl/correcteur_orthographe
+  Chaque version publiée a son archive de sources sur https://github.com/mateo-brl/correcteur_orthographe/releases
+- Grammalecte 2.3.0 (GPL v3) : https://grammalecte.net/zip/Grammalecte-fr-v2.3.0.zip
+- Qt for Python, PySide6 (LGPL v3) : https://code.qt.io/cgit/pyside/pyside-setup.git
+- Autres bibliothèques Python (httpx, platformdirs, et sous Linux pynput et python-xlib) :
+  sources et licences sur https://pypi.org

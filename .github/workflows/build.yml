@@ -110,3 +110,6 @@ jobs:
         with:
           files: paquets/*
           generate_release_notes: true
+          # Versions 0.x (pas encore testées sur un vrai bureau Windows) et tags du type v1.0.0-beta :
+          # affichées comme pré-versions.
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
