@@ -122,8 +122,6 @@ kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
 kernel32.GlobalFree.restype = wintypes.HGLOBAL
 
 
-# -- raccourcis globaux --------------------------------------------------
-
 def _to_native(hotkey: Hotkey) -> tuple[int, int]:
     mods = MOD_NOREPEAT
     mods |= MOD_CONTROL if "ctrl" in hotkey.modifiers else 0
@@ -193,8 +191,6 @@ class HotkeyListener:
             self._thread.join(1)
 
 
-# -- clavier -------------------------------------------------------------
-
 def _key_input(vk: int, up: bool) -> INPUT:
     inp = INPUT()
     inp.type = INPUT_KEYBOARD
@@ -230,8 +226,6 @@ def send_ctrl(letter: str) -> None:
     vk = ord(letter.upper())
     _send([_key_input(VK_CONTROL, False), _key_input(vk, False), _key_input(vk, True), _key_input(VK_CONTROL, True)])
 
-
-# -- fenêtres ------------------------------------------------------------
 
 def foreground_window() -> int:
     return int(user32.GetForegroundWindow() or 0)
@@ -270,8 +264,6 @@ def activate_window(hwnd: int) -> bool:
             user32.AttachThreadInput(fg_tid, this_tid, False)
     return int(user32.GetForegroundWindow() or 0) == hwnd
 
-
-# -- presse-papiers ------------------------------------------------------
 
 def clipboard_sequence() -> int:
     return int(user32.GetClipboardSequenceNumber())

@@ -98,8 +98,6 @@ def desktop_entry(cmd: list[str], autostart: bool = False) -> str:
     return "\n".join(lines) + "\n"
 
 
-# -- raccourcis GNOME (Wayland) --------------------------------------------
-
 _GNOME_SCHEMA = "org.gnome.settings-daemon.plugins.media-keys"
 _GNOME_BASE = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
 

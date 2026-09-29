@@ -119,8 +119,6 @@ class Controller(QObject):
         elif not startup:
             QTimer.singleShot(300, lambda: self.notify(self._ready_message()))
 
-    # -- utilitaires ---------------------------------------------------
-
     def _defer(self, ms: int, fn) -> None:
         QTimer.singleShot(ms, fn)
 
@@ -155,8 +153,6 @@ class Controller(QObject):
         return (f"Correcteur prêt : sélectionnez du texte puis {hotkey_display(self.settings.general.hotkey_check)} "
                 f"(fenêtre) ou {hotkey_display(self.settings.general.hotkey_autocorrect)} (correction express).")
 
-    # -- zone de notification ------------------------------------------
-
     def _build_tray_menu(self) -> None:
         g = self.settings.general
         menu = QMenu()
@@ -181,8 +177,6 @@ class Controller(QObject):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
             self.command.emit("ouvrir", "")
 
-    # -- raccourcis ----------------------------------------------------
-
     def _start_hotkeys(self) -> None:
         self.bridge.stop_hotkeys()
         g = self.settings.general
@@ -198,8 +192,6 @@ class Controller(QObject):
         if failed:
             self.notify("Raccourci déjà utilisé par une autre application : " + ", ".join(hotkey_display(f) for f in failed)
                         + ". Changez-le dans les paramètres.", error=True)
-
-    # -- commandes -----------------------------------------------------
 
     def _on_command(self, command: str, data: str) -> None:
         if command == "verifier-selection":
@@ -281,8 +273,6 @@ class Controller(QObject):
         if rule_id and rule_id not in self.settings.ignored_rules:
             self.settings.ignored_rules.append(rule_id)
             self.store.save(self.settings)
-
-    # -- paramètres ----------------------------------------------------
 
     def open_settings(self) -> None:
         from correcteur.ui.settings import SettingsDialog
