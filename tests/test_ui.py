@@ -61,19 +61,31 @@ def wait_until(qapp, predicate, timeout=5.0):
 
 
 @pytest.fixture
-def window(qapp, home):
+def make_window(qapp, home):
+    """make_window(grammalecte={...}, languagetool={...}) : arguments de FakeEngine pour chaque moteur."""
     from correcteur.ui.popup import CorrectionWindow
     from correcteur.ui.theme import LIGHT
 
-    settings = Settings()
-    engines = [FakeEngine(settings, "grammalecte", g_issues), FakeEngine(settings, "languagetool", lt_issues, delay=0.05)]
-    dictionary = PersonalDictionary()
-    checker = Checker(settings, dictionary, engines=engines)
-    w = CorrectionWindow(checker, FakeController(settings, dictionary), LIGHT)
-    yield w
-    w.runner.shutdown()
-    w.close()
-    checker.close()
+    made = []
+
+    def make(**engines):
+        settings = Settings()
+        dictionary = PersonalDictionary()
+        checker = Checker(settings, dictionary, engines=[FakeEngine(settings, name, **kw) for name, kw in engines.items()])
+        w = CorrectionWindow(checker, FakeController(settings, dictionary), LIGHT)
+        made.append((w, checker))
+        return w
+
+    yield make
+    for w, checker in made:
+        w.runner.shutdown()
+        w.close()
+        checker.close()
+
+
+@pytest.fixture
+def window(make_window):
+    return make_window(grammalecte=dict(found=g_issues), languagetool=dict(found=lt_issues, delay=0.05))
 
 
 def open_and_wait(qapp, w, text=TEXT, capture=None):
@@ -210,3 +222,97 @@ def test_theme_switch(qapp, window):
     open_and_wait(qapp, window)
     window.set_theme(DARK)
     assert len(window._cards) == len(window._issues)
+
+
+def test_loading_text_until_first_issues(qapp, make_window):
+    w = make_window(grammalecte=dict(delay=0.3), languagetool=dict(found=lt_issues, delay=1.0))
+    w.open_with(TEXT, None)
+    qapp.processEvents()
+    assert not w.placeholder.isHidden()
+    assert w.placeholder.text() == "Vérification en cours…"
+    # Grammalecte ne trouve rien, LanguageTool travaille encore : le texte reste affiché.
+    assert wait_until(qapp, lambda: "grammalecte" in w._statuses)
+    assert w._running == {"languagetool"}
+    assert w.placeholder.text() == "Vérification en cours…"
+    assert wait_until(qapp, lambda: not w._running)
+    assert w.placeholder.isHidden()
+    assert len(w._cards) == len(w._issues) > 0
+
+
+def test_loading_text_on_recheck(qapp, make_window):
+    w = make_window(grammalecte=dict(delay=0.2), languagetool=dict(delay=0.2))
+    open_and_wait(qapp, w, "Bonjour à tous.")
+    assert w.placeholder.text() == "✓ Aucune faute trouvée."
+    w._start_check()  # Ctrl+R : la liste vide doit annoncer la vérification
+    assert w.placeholder.text() == "Vérification en cours…"
+    assert wait_until(qapp, lambda: not w._running)
+    assert w.placeholder.text() == "✓ Aucune faute trouvée."
+
+
+def test_engine_error_is_shown_in_window(qapp, make_window):
+    cause = "LanguageTool injoignable (pas de connexion Internet ?)."
+    w = make_window(grammalecte=dict(found=g_issues), languagetool=dict(found=lt_issues, error=cause))
+    open_and_wait(qapp, w)
+    assert not w.notice.isHidden()
+    assert cause in w.notice.text()
+    assert "Texte vérifié par Grammalecte seul." in w.notice.text()
+    assert w._cards  # les fautes de Grammalecte restent affichées
+    # Le moteur répond de nouveau : l'avertissement disparaît.
+    w.checker.engine("languagetool").error = None
+    w._start_check()
+    assert wait_until(qapp, lambda: not w._running)
+    assert w._statuses["languagetool"].ok
+    assert w.notice.isHidden()
+
+
+def test_all_engines_failed_lists_causes(qapp, make_window):
+    w = make_window(grammalecte=dict(error="Grammalecte n'est pas installé."),
+                    languagetool=dict(error="Limite de l'API publique LanguageTool atteinte, réessayez dans une minute."))
+    open_and_wait(qapp, w)
+    assert w.placeholder.text() == (
+        "Aucun moteur n'a pu vérifier le texte.\n"
+        "Grammalecte n'est pas installé.\n"
+        "Limite de l'API publique LanguageTool atteinte, réessayez dans une minute."
+    )
+    assert not w.placeholder.isHidden()
+    assert w.notice.isHidden()  # les causes sont déjà dans la liste
+
+
+def test_list_text_before_first_check(qapp, make_window):
+    w = make_window(grammalecte=dict(), languagetool=dict())
+    w.open_with("", None)
+    w.editor.insertPlainText("Bonjour.")
+    assert w.placeholder.isHidden()  # texte pas encore vérifié : la liste n'affirme rien
+    assert wait_until(qapp, lambda: w.placeholder.text() == "✓ Aucune faute trouvée.")
+
+
+def test_no_active_engine(qapp, make_window):
+    w = make_window()
+    w.open_with("Bonjour.", None)
+    assert wait_until(qapp, lambda: w.placeholder.text() == "Aucun moteur actif pour ce texte (Paramètres, onglet Moteurs).")
+    assert w.notice.isHidden()
+
+
+def test_next_card_is_scrolled_into_view_after_a_fix(qapp, make_window):
+    """Après une correction, la liste est reconstruite puis la faute suivante est
+    sélectionnée : sa carte doit être visible, pas la liste remontée en haut."""
+    import re
+
+    from PySide6.QtCore import QPoint
+
+    def all_ecole(text):
+        return [Issue(m.start(), m.end(), "Mot inconnu.", ["école", "écoles"], Category.SPELLING, "ORTHO", "grammalecte")
+                for m in re.finditer(r"\becole\b", text)]
+
+    w = make_window(grammalecte=dict(found=all_ecole))
+    text = "\n".join(f"Ligne {n} : ecole" for n in range(25))
+    w.open_with(text, None)
+    w.resize(640, 540)
+    assert wait_until(qapp, lambda: not w._running and len(w._cards) == 25)
+    w.apply(w._issues[18], "école")
+    assert wait_until(qapp, lambda: len(w._cards) == 24, 3)
+    for _ in range(5):
+        qapp.processEvents()
+    selected = next(c for c in w._cards if c.uid == w._selected.uid)
+    top = selected.mapTo(w.scroll.viewport(), QPoint(0, 0)).y()
+    assert 0 <= top < w.scroll.viewport().height()
