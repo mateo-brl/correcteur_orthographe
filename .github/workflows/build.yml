@@ -1,8 +1,11 @@
 name: Construction
 
-# Une version est publiée automatiquement quand on pousse un tag v* (ex. v0.1.0).
+# À chaque push sur master : paquets construits, testés et téléchargeables
+# depuis la page du run (rubrique "Artifacts").
+# Tag v* (ex. v0.1.0) : en plus, publication d'une version sur GitHub.
 on:
   push:
+    branches: [master]
     tags: ["v*"]
   workflow_dispatch:
 
