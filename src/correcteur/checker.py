@@ -80,8 +80,6 @@ class Checker:
         self._closed = threading.Event()
         self._lock = threading.Lock()
 
-    # -- configuration -------------------------------------------------
-
     def configure(self, settings: Settings) -> None:
         self.settings = settings
         for engine in self.engines:
@@ -130,8 +128,6 @@ class Checker:
         if self.server is not None:
             self.server.stop()
         self._closed.set()
-
-    # -- vérification --------------------------------------------------
 
     def _run(self, engine: Engine, text: str, language: str) -> tuple[list[Issue], EngineStatus]:
         t0 = time.perf_counter()
@@ -186,8 +182,6 @@ class Checker:
                 on_update(result)
         return result
 
-    # -- post-traitement -----------------------------------------------
-
     def post_process(self, text: str, raw: dict[str, list[Issue]], solo: bool = False) -> list[Issue]:
         strict = self.settings.strict_typography
         ignored_rules = set(self.settings.ignored_rules)
@@ -236,8 +230,6 @@ class Checker:
             return None  # remarque purement typographique en mode standard
         start, end, replacements = narrow_edit(text, issue.start, issue.end, replacements)
         return replace(issue, start=start, end=end, replacements=replacements)
-
-    # -- actions -------------------------------------------------------
 
     def ignore_once(self, text: str, issue: Issue) -> None:
         """Ignore cette remarque sur ce texte (tous moteurs confondus) jusqu'à la fermeture."""

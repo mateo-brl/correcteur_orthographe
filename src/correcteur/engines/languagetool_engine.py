@@ -77,8 +77,6 @@ class LanguageToolEngine(Engine):
         self._rate_lock = threading.Lock()
         self.server = server  # LocalLanguageToolServer, pour le mode "local"
 
-    # -- configuration -------------------------------------------------
-
     def is_enabled(self) -> bool:
         return self.settings.languagetool.enabled
 
@@ -128,8 +126,6 @@ class LanguageToolEngine(Engine):
             if self._client is not None:
                 self._client.close()
                 self._client = None
-
-    # -- vérification --------------------------------------------------
 
     def _throttle(self) -> None:
         if self.mode != "public":

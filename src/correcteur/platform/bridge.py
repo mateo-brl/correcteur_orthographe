@@ -77,8 +77,6 @@ class Bridge:
         return [f"Session : {session_type()}"]
 
 
-# -- Windows ---------------------------------------------------------------
-
 class WindowsBridge(Bridge):
     name = "windows"
 
@@ -159,8 +157,6 @@ class WindowsBridge(Bridge):
     def diagnostics(self) -> list[str]:
         return ["Session : Windows", "Raccourcis : RegisterHotKey", "Sélection : Ctrl+C simulé (presse-papiers restauré)"]
 
-
-# -- Linux X11 -------------------------------------------------------------
 
 class X11Bridge(Bridge):
     name = "x11"
@@ -359,8 +355,6 @@ class X11Bridge(Bridge):
             "xdotool : " + ("oui" if which("xdotool") else "non (facultatif)"),
         ]
 
-
-# -- Linux Wayland -----------------------------------------------------------
 
 class WaylandBridge(Bridge):
     """Wayland interdit aux applications d'espionner le clavier ou les autres
