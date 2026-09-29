@@ -288,9 +288,10 @@ xvfb-run -a env QT_QPA_PLATFORM=xcb XDG_SESSION_TYPE=x11 python -m pytest    # +
 Tests optionnels : `CORRECTEUR_TESTS_RESEAU=1` (vraie API LanguageTool),
 `CORRECTEUR_TEST_LT_DIR=…/LanguageTool-6.6` (serveur LanguageTool local).
 
-Pour publier une version : `git tag v0.1.0 && git push --tags`. La CI construit alors l'installateur Windows, la
-version portable et l'archive Linux, les teste, puis les publie. Les versions 0.x sont publiées comme
-pré-versions.
+Pour publier une version, on change le numéro dans `pyproject.toml` et `src/correcteur/__init__.py`, puis on
+pousse sur master. La CI construit l'installateur Windows, la version portable et l'archive Linux, les teste, puis
+crée le tag et la version sur GitHub. Pousser un tag `v…` à la main fonctionne aussi. Les versions 0.x sont
+publiées comme pré-versions.
 
 Les choix visuels de l'interface sont expliqués dans [DESIGN.md](DESIGN.md).
 
