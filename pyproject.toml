@@ -7,9 +7,11 @@ name = "correcteur"
 version = "0.1.0"
 description = "Correcteur d'orthographe et de grammaire pour tout le système (Windows et Linux) : Grammalecte + LanguageTool, sans IA."
 readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
 requires-python = ">=3.10"
 keywords = ["orthographe", "grammaire", "correcteur", "grammalecte", "languagetool", "français"]
 classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",

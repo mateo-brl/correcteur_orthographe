@@ -289,7 +289,8 @@ Tests optionnels : `CORRECTEUR_TESTS_RESEAU=1` (vraie API LanguageTool),
 `CORRECTEUR_TEST_LT_DIR=…/LanguageTool-6.6` (serveur LanguageTool local).
 
 Pour publier une version : `git tag v0.1.0 && git push --tags`. La CI construit alors l'installateur Windows, la
-version portable et l'archive Linux, les teste, puis les publie.
+version portable et l'archive Linux, les teste, puis les publie. Les versions 0.x sont publiées comme
+pré-versions.
 
 Les choix visuels de l'interface sont expliqués dans [DESIGN.md](DESIGN.md).
 
@@ -315,5 +316,7 @@ tests/                tests unitaires, interface et intégration bureau
 
 ## Licence
 
-Grammalecte est distribué sous licence GPL v3 et LanguageTool sous LGPL. Les versions empaquetées incluent
-Grammalecte : le code de ce dépôt doit donc être diffusé sous une licence compatible avec la GPL v3.
+Correcteur est distribué sous licence [GNU GPL v3 ou ultérieure](LICENSE). Ce choix est imposé par Grammalecte
+(GPL v3), inclus dans les versions empaquetées. LanguageTool (LGPL) n'est pas inclus : il est téléchargé à part
+si on active le serveur local. Chaque paquet contient le texte de la licence et un fichier `SOURCES.txt` qui
+indique où trouver le code source de tout ce qu'il inclut.

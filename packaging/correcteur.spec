@@ -2,6 +2,7 @@
 # Construction : pyinstaller packaging/correcteur.spec  (depuis la racine du dépôt)
 # Prérequis : Grammalecte dans vendor/ (python -m correcteur installer grammalecte --dossier vendor)
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -53,3 +54,7 @@ else:
     exes = [EXE(pyz, a.scripts, options, exclude_binaries=True, name="correcteur", console=True, **common)]
 
 coll = COLLECT(*exes, a.binaries, a.datas, strip=False, upx=False, name="Correcteur")
+
+# Licence GPL et adresse des sources, à côté de l'exécutable (obligatoire pour diffuser Grammalecte).
+for name in ("LICENSE", "packaging/SOURCES.txt"):
+    shutil.copy(ROOT / name, Path(DISTPATH) / "Correcteur")
