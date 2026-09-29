@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 from conftest import needs_grammalecte
 
+from correcteur import __version__
 from correcteur.cli import build_parser, main
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,3 +68,9 @@ def test_diagnostic_runs():
     out = run_cli("diagnostic")
     assert out.returncode == 0, out.stderr
     assert "Grammalecte" in out.stdout
+
+
+def test_version_matches_pyproject():
+    # La CI publie la version lue dans pyproject.toml : l'application doit afficher la même.
+    pyproject = (Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    assert re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1) == __version__
