@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "correcteur"
+version = "0.1.0"
+description = "Correcteur d'orthographe et de grammaire pour tout le système (Windows et Linux) : Grammalecte + LanguageTool + IA locale optionnelle."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["orthographe", "grammaire", "correcteur", "grammalecte", "languagetool", "français"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Natural Language :: French",
+    "Topic :: Text Processing :: Linguistic",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: Win32 (MS Windows)",
+]
+dependencies = [
+    "PySide6-Essentials>=6.6",
+    "httpx>=0.27",
+    "platformdirs>=4.0",
+    "pynput>=1.7; sys_platform == 'linux'",
+    "python-xlib>=0.33; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyinstaller>=6.5"]
+
+[project.scripts]
+correcteur = "correcteur.cli:main"
+
+[project.gui-scripts]
+correcteur-app = "correcteur.cli:main_gui"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+correcteur = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
