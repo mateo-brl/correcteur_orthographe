@@ -9,7 +9,7 @@ On sélectionne un texte dans une application (navigateur, Word, Discord…), on
 <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>X</kbd> et il est remplacé par sa version corrigée.
 <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>C</kbd> ouvre plutôt une fenêtre pour voir chaque faute avant de corriger.
 
-[![Tests](https://github.com/mateo-brl/correcteur_orthographe/actions/workflows/tests.yml/badge.svg)](https://github.com/mateo-brl/correcteur_orthographe/actions/workflows/tests.yml)
+[![Tests](https://github.com/mateo-brl/correcteur_orthographe/actions/workflows/tests.yml/badge.svg?branch=master)](https://github.com/mateo-brl/correcteur_orthographe/actions/workflows/tests.yml?query=branch%3Amaster)
 ![Windows et Linux](https://img.shields.io/badge/Windows%20%7C%20Linux-compatible-2f6fed)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776ab?logo=python&logoColor=white)
 
