@@ -130,8 +130,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
         self._refresh_engine_status()
 
-    # -- onglets -------------------------------------------------------
-
     def _general_tab(self) -> QWidget:
         g = self.settings.general
         page = QWidget()
@@ -320,8 +318,6 @@ class SettingsDialog(QDialog):
         layout.addWidget(open_dir)
         layout.addStretch(1)
         return page
-
-    # -- actions -------------------------------------------------------
 
     def _refresh_engine_status(self) -> None:
         from correcteur.engines.grammalecte_engine import import_grammalecte

@@ -3,6 +3,7 @@ l'application d'origine."""
 
 from __future__ import annotations
 
+import html
 import logging
 import threading
 from typing import TYPE_CHECKING, Iterable
@@ -215,6 +216,7 @@ class CorrectionWindow(QWidget):
         self._issues: list[Issue] = []
         self._statuses: dict[str, EngineStatus] = {}
         self._running: set[str] = set()
+        self._no_engine = False  # dernière vérification complète lancée sans aucun moteur actif
         self._generation = 0
         self._selected: Issue | None = None
         self._cards: list[IssueCard] = []
@@ -243,8 +245,6 @@ class CorrectionWindow(QWidget):
         timer.timeout.connect(callback)
         return timer
 
-    # -- construction --------------------------------------------------
-
     def _build(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 10, 12, 12)
@@ -264,6 +264,14 @@ class CorrectionWindow(QWidget):
         gear.clicked.connect(self.settingsRequested.emit)
         head.addWidget(gear)
         root.addLayout(head)
+
+        # Cause d'un échec de moteur, en toutes lettres (l'infobulle de l'état ne suffit pas).
+        self.notice = QLabel("")
+        self.notice.setObjectName("notice")
+        self.notice.setWordWrap(True)
+        self.notice.setTextFormat(Qt.TextFormat.RichText)
+        self.notice.hide()
+        root.addWidget(self.notice)
 
         self.editor = CheckEditor(self.theme)
         self.editor.setPlaceholderText(
@@ -292,6 +300,13 @@ class CorrectionWindow(QWidget):
         self.list_layout = QVBoxLayout(self.list_host)
         self.list_layout.setContentsMargins(0, 0, 4, 0)
         self.list_layout.setSpacing(6)
+        self.placeholder = QLabel("")
+        self.placeholder.setObjectName("muted")
+        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.placeholder.setWordWrap(True)
+        self.placeholder.setTextFormat(Qt.TextFormat.PlainText)
+        self.placeholder.hide()
+        self.list_layout.addWidget(self.placeholder)
         self.list_layout.addStretch(1)
         self.scroll.setWidget(self.list_host)
         root.addWidget(self.scroll, 4)
@@ -339,8 +354,7 @@ class CorrectionWindow(QWidget):
         self.theme = theme
         self.editor.set_theme(theme)
         self._rebuild_cards(force=True)
-
-    # -- ouverture -----------------------------------------------------
+        self._update_status()  # les pastilles d'état portent les couleurs du thème
 
     def open_with(self, text: str, capture: "Capture | None" = None) -> None:
         if self.isVisible() and self.capture is not None and self.capture is not capture:
@@ -349,6 +363,7 @@ class CorrectionWindow(QWidget):
         self._closing_handled = False
         self._issues = []
         self._statuses = {}
+        self._no_engine = False
         self._selected = None
         self.editor.blockSignals(True)
         self.editor.setPlainText(text)
@@ -385,17 +400,19 @@ class CorrectionWindow(QWidget):
             y = max(area.top() + 8, pos.y() - self.height() - 24)
         self.move(QPoint(x, y))
 
-    # -- vérification --------------------------------------------------
-
     def _start_check(self, only: Iterable[str] | None = None) -> None:
         self._fast_timer.stop()
         if only is None:
             self._full_timer.stop()
         if not self._text.strip():
+            # Les réponses pour l'ancien texte seront ignorées : rien ne tourne plus pour celui-ci.
+            self._running.clear()
             self._issues = []
             self._refresh_issues()
             return
         engines = [e.name for e in self.checker.active_engines(self._text, self.checker.resolve_language(self._text), only)]
+        if only is None:
+            self._no_engine = not engines
         self._running.update(engines)
         self._update_status()
         self.runner.request(self._generation, self._text, only)
@@ -436,8 +453,6 @@ class CorrectionWindow(QWidget):
     def _by_uid(self, uid: int) -> Issue | None:
         return next((i for i in self._issues if i.uid == uid), None)
 
-    # -- affichage -----------------------------------------------------
-
     def _refresh_issues(self) -> None:
         self.editor.set_issues(self._issues, self._text)
         self.editor.select_issue(self._selected, reveal=False)
@@ -455,17 +470,12 @@ class CorrectionWindow(QWidget):
             card.setParent(None)
             card.deleteLater()
         self._cards = []
-        while self.list_layout.count() > 1:
-            item = self.list_layout.takeAt(0)
+        # Garde le texte d'état (premier élément) et le ressort (dernier).
+        while self.list_layout.count() > 2:
+            item = self.list_layout.takeAt(1)
             if item.widget():
                 item.widget().deleteLater()
         if not self._issues:
-            if self._text.strip() and not self._running:
-                ok = any(s.ok for s in self._statuses.values())
-                label = QLabel("✓ Aucune faute trouvée." if ok else "Aucun moteur n'a pu vérifier le texte (voir l'état en haut).")
-                label.setObjectName("muted")
-                label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.list_layout.insertWidget(0, label)
             self._update_summary()
             return
         self.list_host.setUpdatesEnabled(False)
@@ -473,11 +483,15 @@ class CorrectionWindow(QWidget):
             card = IssueCard(self, issue, self._text, self.theme)
             card.selected.connect(lambda uid: self._select(self._by_uid(uid)))
             self.list_layout.insertWidget(self.list_layout.count() - 1, card)
+            # Visible tout de suite (sinon Qt attend le tour de boucle suivant) : la mise en page
+            # et le défilement vers la faute sélectionnée peuvent se faire immédiatement.
+            card.show()
             self._cards.append(card)
         if len(self._issues) > _MAX_CARDS:
             more = QLabel(f"… et {len(self._issues) - _MAX_CARDS} autres (corrigez les premières pour voir la suite).")
             more.setObjectName("muted")
             self.list_layout.insertWidget(self.list_layout.count() - 1, more)
+            more.show()
         self.list_host.setUpdatesEnabled(True)
         self._sync_card_selection()
         self._update_summary()
@@ -526,16 +540,78 @@ class CorrectionWindow(QWidget):
                 tips.append(f"{label} : {status.detail}")
         self.status.setText("  ".join(parts))
         self.status.setToolTip("\n".join(tips))
+        self._update_notice()
+        self._update_placeholder()
 
-    # -- sélection d'une faute -----------------------------------------
+    def _engine_report(self) -> tuple[list[str], list[str]]:
+        """(moteurs qui ont vérifié le texte, causes des échecs) d'après les derniers états reçus."""
+        ok: list[str] = []
+        failed: list[str] = []
+        for engine in self.checker.engines:
+            status = self._statuses.get(engine.name)
+            if status is None or not engine.is_enabled():
+                continue
+            label = ENGINE_LABELS.get(engine.name, engine.name)
+            if status.ok:
+                ok.append(label)
+                continue
+            cause = status.detail.strip() or "échec de la vérification."
+            if label not in cause:
+                cause = f"{label} : {cause}"
+            if not cause.endswith((".", "!", "?", "…")):
+                cause += "."
+            failed.append(cause)
+        return ok, failed
+
+    def _nothing_checked(self, ok: list[str]) -> bool:
+        """Vérification terminée sans aucun moteur valide : la liste affiche les causes."""
+        return bool(self._text.strip()) and not self._running and not self._issues and not ok
+
+    def _update_notice(self) -> None:
+        ok, failed = self._engine_report()
+        if not failed or self._nothing_checked(ok):
+            self.notice.hide()
+            self.notice.clear()
+            return
+        text = " ".join(failed)
+        if ok:
+            text += f" Texte vérifié par {' et '.join(ok)}{' seul' if len(ok) == 1 else ''}."
+        self.notice.setText(f"<span style='color:{self.theme.warn}'>▲</span> {html.escape(text, quote=False)}")
+        self.notice.show()
+
+    def _update_placeholder(self) -> None:
+        text = ""
+        if self._text.strip() and not self._issues:
+            ok, failed = self._engine_report()
+            if self._running:
+                text = "Vérification en cours…"
+            elif ok:
+                text = "✓ Aucune faute trouvée."
+            elif failed:
+                text = "\n".join(["Aucun moteur n'a pu vérifier le texte."] + failed)
+            elif self._no_engine:
+                text = "Aucun moteur actif pour ce texte (Paramètres, onglet Moteurs)."
+        self.placeholder.setText(text)
+        self.placeholder.setVisible(bool(text))
 
     def _select(self, issue: Issue | None, reveal: bool = True) -> None:
         self._selected = issue
         self.editor.select_issue(issue, reveal=reveal)
         self._sync_card_selection()
-        for card in self._cards:
-            if issue is not None and card.uid == issue.uid:
-                self.scroll.ensureWidgetVisible(card)
+        card = next((c for c in self._cards if issue is not None and c.uid == issue.uid), None)
+        if card is not None:
+            self._fit_list()
+            self.scroll.ensureWidgetVisible(card)
+
+    def _fit_list(self) -> None:
+        """Donne tout de suite à la liste sa hauteur réelle. Juste après une reconstruction, Qt ne
+        la recalcule qu'aux tours de boucle suivants, et le défilement viserait des positions périmées."""
+        width = self.scroll.viewport().width()
+        layout = self.list_layout
+        layout.activate()
+        height = layout.heightForWidth(width) if layout.hasHeightForWidth() else layout.sizeHint().height()
+        self.list_host.resize(width, max(height, self.scroll.viewport().height()))
+        layout.activate()
 
     def _select_relative(self, step: int) -> None:
         if not self._issues:
@@ -569,8 +645,6 @@ class CorrectionWindow(QWidget):
         if issue.category is Category.SPELLING:
             menu.addAction("Ajouter au dictionnaire", lambda: self.add_to_dictionary(issue))
         menu.addAction("Ne plus signaler cette règle", lambda: self.ignore_rule(issue))
-
-    # -- actions sur les fautes ----------------------------------------
 
     def _replace_range(self, edits: list[tuple[Issue, str]]) -> None:
         cursor = QTextCursor(self.editor.document())
@@ -679,8 +753,6 @@ class CorrectionWindow(QWidget):
         from PySide6.QtGui import QDesktopServices
 
         QDesktopServices.openUrl(QUrl(url))
-
-    # -- sortie --------------------------------------------------------
 
     def copy_text(self) -> None:
         self.controller.copy_text(self.editor.toPlainText())
