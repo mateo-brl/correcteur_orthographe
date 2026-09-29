@@ -62,14 +62,16 @@ def set_autostart(enabled: bool) -> None:
     if sys.platform == "win32":
         import winreg
 
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            if enabled:
+        if enabled:
+            # La clé "Run" n'existe pas toujours sur un profil Windows neuf : on la crée.
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, _command_line(cmd))
-            else:
-                try:
+        else:
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
                     winreg.DeleteValue(key, APP_NAME)
-                except FileNotFoundError:
-                    pass
+            except FileNotFoundError:
+                pass  # rien à désactiver
         return
     path = _autostart_file()
     if not enabled:

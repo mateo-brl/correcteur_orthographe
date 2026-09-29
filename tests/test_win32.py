@@ -101,8 +101,10 @@ def test_autostart_registry(monkeypatch):
     from correcteur.platform import autostart
 
     monkeypatch.setattr(autostart, "APP_NAME", APP_NAME + "-test")
+    autostart.set_autostart(False)  # jamais activé : ne doit pas échouer
+    assert not autostart.autostart_enabled()
     try:
-        autostart.set_autostart(True)
+        autostart.set_autostart(True)  # crée la clé "Run" si elle n'existe pas
         assert autostart.autostart_enabled()
     finally:
         autostart.set_autostart(False)
