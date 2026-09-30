@@ -236,6 +236,11 @@ flowchart LR
 4. Une faute signalée par les deux moteurs devient une seule remarque, qui garde en mémoire leur accord.
 5. Une correction est considérée comme sûre si les deux moteurs proposent la même, si c'est un accent
    (« ecole » → « école ») ou une ponctuation évidente.
+   Quand Grammalecte est seul (hors ligne, ou LanguageTool injoignable), personne ne peut confirmer ses
+   corrections de grammaire. Il fait alors une contre-épreuve : il applique la correction, revérifie la phrase,
+   et ne la garde que si elle ne fait pas disparaître une autre lecture possible. « Ils on mangé » devient
+   « Ils ont mangé », mais dans « les résultats que j'ai obtenu sont bon », « son bon » et « sont bons » font
+   chacun disparaître l'autre faute : la phrase reste à vérifier dans la fenêtre.
 6. Les corrections sûres s'appliquent en cascade. Dans « les enfant était ravis », les deux moteurs voudraient
    « ravi » (accord avec « était »), ce qui serait faux. Le correcteur corrige d'abord « enfants » et revérifie
    localement (c'est instantané). Il corrige ensuite « étaient », et « ravis » redevient juste. Dans une même
