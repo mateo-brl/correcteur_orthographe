@@ -13,7 +13,7 @@ from typing import Callable, Iterable
 
 from correcteur.config import PersonalDictionary, Settings
 from correcteur.engines.base import Engine, EngineError
-from correcteur.models import ENGINE_PRIORITY, Category, CheckResult, EngineStatus, Issue
+from correcteur.models import ENGINE_LABELS, ENGINE_PRIORITY, Category, CheckResult, EngineStatus, Issue
 from correcteur.textutils import (
     adapt_to_user_style,
     apply_edits,
@@ -54,6 +54,9 @@ def guess_language(text: str) -> str:
 
 
 Callback = Callable[[CheckResult], None]
+
+# Correction express : attente maximale d'un moteur lent quand un moteur local peut suffire.
+EXPRESS_SLOW_TIMEOUT = 8.0
 
 
 def _spawn(target, *args, name: str) -> threading.Thread:
@@ -144,10 +147,15 @@ class Checker:
             return [], EngineStatus(engine.name, False, f"Erreur interne : {exc}", (time.perf_counter() - t0) * 1000)
 
     def check(self, text: str, language: str | None = None, on_update: Callback | None = None,
-              only: Iterable[str] | None = None, allow_solo: bool = True) -> CheckResult:
+              only: Iterable[str] | None = None, allow_solo: bool = True,
+              timeout: float | None = None) -> CheckResult:
         """Vérifie `text` avec les moteurs actifs (ou seulement ceux de `only`).
         `on_update` est appelé à chaque moteur terminé (résultats partiels),
-        depuis un thread de travail. Renvoie le résultat final."""
+        depuis un thread de travail. Renvoie le résultat final.
+
+        Passé `timeout` secondes, les moteurs qui n'ont pas répondu sont comptés
+        en échec pour cette vérification. Ils finissent quand même en arrière-plan
+        et gardent leur réponse en cache pour la fois suivante."""
         language = self.resolve_language(text, language)
         engines = self.active_engines(text, language, only)
         raw: dict[str, list[Issue]] = {}
@@ -164,16 +172,25 @@ class Checker:
         answers: queue.Queue = queue.Queue()
         for engine in engines:
             _spawn(lambda e=engine: answers.put((e, self._run(e, text, language))), name=f"moteur-{engine.name}")
-        for _ in engines:
-            while True:
-                try:
-                    engine, (issues, status) = answers.get(timeout=0.25)
-                    break
-                except queue.Empty:
-                    if self._closed.is_set():
-                        return result
-            raw[engine.name] = issues
-            statuses[engine.name] = status
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while len(statuses) < len(names):
+            wait = 0.25 if deadline is None else max(0.0, min(0.25, deadline - time.monotonic()))
+            try:
+                engine, (issues, status) = answers.get(timeout=wait)
+            except queue.Empty:
+                if self._closed.is_set():
+                    return result
+                if deadline is None or time.monotonic() < deadline:
+                    continue
+                for name in names:
+                    if name not in statuses:
+                        label = ENGINE_LABELS.get(name, name)
+                        raw[name] = []
+                        statuses[name] = EngineStatus(name, False, f"{label} a mis plus de {timeout:g} s à répondre.",
+                                                      timeout * 1000)
+            else:
+                raw[engine.name] = issues
+                statuses[engine.name] = status
             pending = tuple(n for n in names if n not in statuses)
             # Un seul moteur a pu vérifier (l'autre est désactivé ou hors ligne) : règle "solo".
             solo = allow_solo and not pending and sum(1 for st in statuses.values() if st.ok) == 1
@@ -235,8 +252,8 @@ class Checker:
         """Ignore cette remarque sur ce texte (tous moteurs confondus) jusqu'à la fermeture."""
         self.session_ignored.add((issue.category.value, issue.original(text)))
 
-    def autocorrect(self, text: str, language: str | None = None,
-                    max_passes: int = 6) -> tuple[str, list[Issue], list[Issue], CheckResult]:
+    def autocorrect(self, text: str, language: str | None = None, max_passes: int = 6,
+                    slow_timeout: float | None = EXPRESS_SLOW_TIMEOUT) -> tuple[str, list[Issue], list[Issue], CheckResult]:
         """Correction express : n'applique que des corrections sûres, en plusieurs passes.
 
         Dans une phrase, deux corrections de grammaire proches dépendent souvent
@@ -253,10 +270,16 @@ class Checker:
         Une correction que le moteur local proposait seul et que l'autre moteur
         n'a pas confirmée à la 1re passe n'est jamais appliquée.
 
+        Si un moteur local peut vérifier seul, on n'attend pas les moteurs lents
+        plus de `slow_timeout` secondes (réseau lent, serveur local qui démarre).
+
         Renvoie (texte corrigé, appliquées, restantes, dernier résultat)."""
         language = self.resolve_language(text, language)
         current = text
-        result = self.check(current, language)
+        local = [e.name for e in self.active_engines(current, language) if e.name in _LOCAL_ENGINES]
+        can_go_alone = any(e.available()[0] for e in self.engines if e.name in local)
+        result = self.check(current, language, timeout=slow_timeout if can_go_alone else None)
+        first_statuses = result.statuses
         confirmed = {(i.original(current), i.replacements[0]) for i in result.issues if i.confident}
         # Qui proposait quoi à la 1re passe : une correction proposée par le seul
         # moteur lent puis confirmée par le moteur local devient sûre ; une
@@ -264,7 +287,6 @@ class Checker:
         first_sources = {(i.original(current), i.replacements[0]): set(i.sources)
                          for i in result.issues if i.replacements}
         # Remarques de la 1re passe venant uniquement des moteurs lents : gardées pour le bilan.
-        local = [e.name for e in self.active_engines(current, language) if e.name in _LOCAL_ENGINES]
         slow_only = [i for i in result.issues if not set(i.sources) & set(local)] if local else []
         applied_all: list[Issue] = []
         touched: set[int] = set()
@@ -282,7 +304,8 @@ class Checker:
                     if i.confident or key in confirmed:
                         return True
                     if before is not None:
-                        return not before & set(local)  # confirmation par l'autre moteur
+                        # Confirmation par le moteur local ; sans moteur local, personne ne peut confirmer.
+                        return bool(local) and not before & set(local)
                     return (i.category is Category.GRAMMAR and len(i.replacements) == 1
                             and sent(i.start) in touched)
 
@@ -318,6 +341,8 @@ class Checker:
                 delta += len(rep) - (end - start)
             applied_all.extend(chosen)
             result = self.check(current, language, only=local or None, allow_solo=not local)
+        # Les moteurs lents n'ont tourné qu'à la 1re passe : leur état reste dans le bilan.
+        result.statuses = {**first_statuses, **result.statuses}
         remaining = [i for i in result.issues if not i.confident]
         remaining += [i for i in slow_only if not i.confident and not any(i.overlaps(r) for r in remaining)]
         remaining.sort(key=lambda i: i.start)
@@ -360,6 +385,11 @@ def _match_score(text: str, a: Issue, b: Issue) -> int:
     if same_span and a.category is Category.SPELLING and b.category is Category.SPELLING:
         return 1
     return 0
+
+
+def _rules_to_ignore(issue: Issue) -> tuple[str, ...]:
+    # Une règle d'orthographe couvre tous les mots : on ne la coupe jamais pour une seule faute.
+    return () if issue.category is Category.SPELLING else issue.rules
 
 
 def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
@@ -406,6 +436,7 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
             replacements=replacements,
             sources=tuple(dict.fromkeys(cand.sources + issue.sources)),
             rule_id=lead.rule_id,
+            rules=tuple(dict.fromkeys((lead.rule_id,) + _rules_to_ignore(cand) + _rules_to_ignore(issue))),
             source=lead.source,
             category=lead.category,
             agreed=cand.agreed or best_score >= 2,

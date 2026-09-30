@@ -8,16 +8,18 @@ import sys
 import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QSystemTrayIcon
 
 from correcteur import APP_NAME, __version__
 from correcteur.checker import Checker
 from correcteur.config import PersonalDictionary, Settings, SettingsStore, resource_path
+from correcteur.models import ENGINE_LABELS, EngineStatus
 from correcteur.platform import autostart, session_type
 from correcteur.platform.bridge import Capture, create_bridge
 from correcteur.platform.ipc import IpcServer
 from correcteur.platform.keys import display as hotkey_display
+from correcteur.textutils import diff_edits
 from correcteur.ui.popup import CorrectionWindow
 from correcteur.ui.theme import apply_theme, current_theme
 
@@ -47,12 +49,48 @@ def make_icon() -> QIcon:
     return QIcon(pix)
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} " + " ".join(w + "s" for w in word.split())
+
+
+def express_message(before: str, after: str, applied: int, remaining: int,
+                    statuses: dict[str, EngineStatus], check_hotkey: str) -> tuple[str, bool]:
+    """Bilan d'une correction express : (texte de la notification, erreur ?).
+
+    On montre les premières corrections ("aller → allé") pour qu'on sache ce qui
+    a changé dans l'application sans avoir à relire tout le texte."""
+    failures = []
+    for status in statuses.values():
+        if not status.ok:
+            label = ENGINE_LABELS.get(status.name, status.name)
+            detail = status.detail.strip() or "échec de la vérification."
+            failures.append(detail if label in detail else f"{label} : {detail}")
+    if not applied:
+        if remaining:
+            return (f"{_plural(remaining, 'remarque')} à vérifier, aucune correction sûre : "
+                    f"{check_hotkey} pour les voir."), False
+        if failures:
+            return "Vérification incomplète : " + failures[0], True
+        return "Aucune faute trouvée ✓", False
+    changes = [(before[s:e].strip(), rep.strip()) for s, e, rep in diff_edits(before, after)]
+    changes = [f"{old} → {new}" for old, new in changes if old.split() != new.split()]
+    summary = _plural(applied, "correction appliquée")
+    if changes:
+        summary += " : " + ", ".join(changes[:3]) + ("…" if len(changes) > 3 else ".")
+    lines = [summary if changes else summary + "."]
+    if remaining:
+        lines.append(f"{_plural(remaining, 'remarque')} à vérifier ({check_hotkey}).")
+    lines += failures
+    return "\n".join(lines), False
+
+
 class Toast(QLabel):
     """Petite notification quand la zone de notification n'existe pas (GNOME sans extension)."""
 
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setWordWrap(True)
+        self.setTextFormat(Qt.TextFormat.PlainText)  # le texte cite des extraits de l'utilisateur
         self.setMargin(12)
         self.setMaximumWidth(420)
         self._timer = QTimer(self)
@@ -95,7 +133,12 @@ class Controller(QObject):
         self.window.replaceRequested.connect(self._replace)
         self.window.finished.connect(self._window_finished)
         self.window.settingsRequested.connect(self.open_settings)
-        self.window.ignoreRuleRequested.connect(self._ignore_rule)
+        self.window.ignoreRulesRequested.connect(self._ignore_rules)
+
+        # Thème "comme le système" : suit le passage clair / sombre sans redémarrer (Qt 6.5 et plus).
+        scheme_changed = getattr(QGuiApplication.styleHints(), "colorSchemeChanged", None)
+        if scheme_changed is not None:
+            scheme_changed.connect(lambda *_: self._follow_theme())
 
         self.command.connect(self._on_command, Qt.ConnectionType.QueuedConnection)
         self.expressDone.connect(self._express_done, Qt.ConnectionType.QueuedConnection)
@@ -239,22 +282,14 @@ class Controller(QObject):
             self.notify(f"Correction impossible : {outcome}", error=True)
             return
         new_text, applied, remaining, result = outcome
-        failed = [s for s in result.statuses.values() if not s.ok]
+        text, error = express_message(capture.text, new_text, len(applied), len(remaining), result.statuses,
+                                      hotkey_display(self.settings.general.hotkey_check))
         if not applied:
             self.release_capture(capture)
-            if remaining:
-                self.notify(f"{len(remaining)} remarque(s) à vérifier, aucune correction sûre : "
-                            f"{hotkey_display(self.settings.general.hotkey_check)} pour les voir.")
-            elif failed:
-                self.notify("Vérification incomplète : " + failed[0].detail, error=True)
-            else:
-                self.notify("Aucune faute trouvée ✓")
+            self.notify(text, error=error)
             return
         ok, message = self.bridge.replace(capture, new_text)
-        text = f"{len(applied)} correction(s) appliquée(s)"
-        if remaining:
-            text += f", {len(remaining)} à vérifier ({hotkey_display(self.settings.general.hotkey_check)})"
-        self.notify(text + "." if ok else message)
+        self.notify(text if ok else message)
 
     def _replace(self, capture: Capture, text: str) -> None:
         # Laisse le temps à la fenêtre de disparaître avant de rendre la main à l'application.
@@ -269,9 +304,10 @@ class Controller(QObject):
         if capture is not None and not replaced:
             self.bridge.release(capture)
 
-    def _ignore_rule(self, rule_id: str) -> None:
-        if rule_id and rule_id not in self.settings.ignored_rules:
-            self.settings.ignored_rules.append(rule_id)
+    def _ignore_rules(self, rule_ids: list[str]) -> None:
+        added = [r for r in dict.fromkeys(rule_ids) if r and r not in self.settings.ignored_rules]
+        if added:
+            self.settings.ignored_rules.extend(added)
             self.store.save(self.settings)
 
     def open_settings(self) -> None:
@@ -288,17 +324,15 @@ class Controller(QObject):
         self.bring_to_front(dialog)
 
     def apply_settings(self, settings: Settings, words: list[str] | None = None) -> None:
-        previous = self.settings
         settings.general.first_run_done = True
         self.settings = settings
         self.store.save(settings)
         if words is not None:
             self.dictionary.set_words(words)
         self.checker.configure(settings)
-        if previous.general.theme != settings.general.theme:
-            self.theme = current_theme(settings.general.theme)
-            apply_theme(self.app, self.theme)
-            self.window.set_theme(self.theme)
+        self._follow_theme()
+        if self.window.isVisible():
+            self.window.recheck()  # langue, typographie, dictionnaire ou règles ont pu changer
         if settings.general.autostart != self.autostart_enabled():
             try:
                 autostart.set_autostart(settings.general.autostart)
@@ -308,6 +342,14 @@ class Controller(QObject):
         if self.tray is not None:
             self._build_tray_menu()
         self.checker.warmup()
+
+    def _follow_theme(self) -> None:
+        theme = current_theme(self.settings.general.theme)
+        if theme is self.theme:
+            return
+        self.theme = theme
+        apply_theme(self.app, theme)
+        self.window.set_theme(theme)
 
     def _first_run(self) -> None:
         from correcteur.engines.grammalecte_engine import import_grammalecte

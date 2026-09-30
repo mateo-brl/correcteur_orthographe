@@ -63,6 +63,12 @@ def shift_issues(issues: list[Issue], old: str, new: str) -> list[Issue]:
     return kept
 
 
+def can_ignore_rule(issue: Issue) -> bool:
+    """L'orthographe tient en une seule règle par moteur : la désactiver couperait toute
+    la vérification des mots. Pour un mot correct, c'est le dictionnaire qui convient."""
+    return issue.category is not Category.SPELLING
+
+
 class CheckRunner(QObject):
     """Exécute les vérifications en arrière-plan ; ne garde que la dernière demande en attente."""
 
@@ -148,6 +154,7 @@ class IssueCard(QFrame):
                 btn = QPushButton(rep if rep.strip() else "(supprimer)")
                 btn.setObjectName("suggestion")
                 btn.setProperty("first", i == 0)
+                btn.setToolTip(f"Alt+{i + 1} quand la faute est sélectionnée (F8 : faute suivante)")
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn.clicked.connect(lambda _=False, r=rep: window.apply_uid(uid, r))
                 row.addWidget(btn)
@@ -180,10 +187,11 @@ class IssueCard(QFrame):
         more.setAutoRaise(True)
         more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(more)
-        menu.addAction("Ne plus signaler cette règle", lambda: window.ignore_rule_uid(uid))
+        if can_ignore_rule(issue):
+            menu.addAction("Ne plus signaler cette règle", lambda: window.ignore_rule_uid(uid))
         if issue.url:
             menu.addAction("En savoir plus…", lambda: window.open_url(issue.url))
-        rule = menu.addAction(f"Règle : {issue.rule_id}")
+        rule = menu.addAction(f"Règle : {', '.join(issue.rules)}")
         rule.setEnabled(False)
         more.setMenu(menu)
         actions.addWidget(more)
@@ -204,7 +212,7 @@ class CorrectionWindow(QWidget):
     finished = Signal(object, bool)          # (capture, remplacé ?)
     replaceRequested = Signal(object, str)   # (capture, texte)
     settingsRequested = Signal()
-    ignoreRuleRequested = Signal(str)
+    ignoreRulesRequested = Signal(list)     # identifiants des règles à ne plus signaler
 
     def __init__(self, checker: Checker, controller, theme: Theme) -> None:
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
@@ -349,6 +357,13 @@ class CorrectionWindow(QWidget):
         for keys, callback in bindings:
             shortcut = QShortcut(QKeySequence(keys), self)
             shortcut.activated.connect(callback)
+        # Alt+1…Alt+5 : suggestion n° 1 à 5. Sur un clavier AZERTY, la rangée du haut donne & é " ' ( sans Maj.
+        for number, azerty in enumerate("&é\"'(", start=1):
+            shortcut = QShortcut(self)
+            shortcut.setKeys([QKeySequence(f"Alt+{number}"), QKeySequence(f"Alt+{azerty}")])
+            # Les deux combinaisons peuvent correspondre à la même frappe : Qt la dit alors "ambiguë".
+            shortcut.activated.connect(lambda n=number: self.apply_suggestion(n))
+            shortcut.activatedAmbiguously.connect(lambda n=number: self.apply_suggestion(n))
 
     def set_theme(self, theme: Theme) -> None:
         self.theme = theme
@@ -416,6 +431,10 @@ class CorrectionWindow(QWidget):
         self._running.update(engines)
         self._update_status()
         self.runner.request(self._generation, self._text, only)
+
+    def recheck(self) -> None:
+        """Revérifie tout le texte (après un changement de paramètres, par exemple)."""
+        self._start_check()
 
     def _on_text_changed(self) -> None:
         new = self.editor.toPlainText()
@@ -634,8 +653,9 @@ class CorrectionWindow(QWidget):
         title = QAction(issue.message if len(issue.message) < 90 else issue.message[:87] + "…", menu)
         title.setEnabled(False)
         menu.addAction(title)
-        for rep in issue.replacements[:6]:
-            action = menu.addAction(f"→ {rep}" if rep.strip() else "→ (supprimer)")
+        for number, rep in enumerate(issue.replacements[:6], start=1):
+            label = f"→ {rep}" if rep.strip() else "→ (supprimer)"
+            action = menu.addAction(label + (f"\tAlt+{number}" if number <= 5 else ""))
             font = action.font()
             font.setBold(True)
             action.setFont(font)
@@ -644,7 +664,8 @@ class CorrectionWindow(QWidget):
         menu.addAction("Ignorer", lambda: self.ignore(issue))
         if issue.category is Category.SPELLING:
             menu.addAction("Ajouter au dictionnaire", lambda: self.add_to_dictionary(issue))
-        menu.addAction("Ne plus signaler cette règle", lambda: self.ignore_rule(issue))
+        if can_ignore_rule(issue):
+            menu.addAction("Ne plus signaler cette règle", lambda: self.ignore_rule(issue))
 
     def _replace_range(self, edits: list[tuple[Issue, str]]) -> None:
         cursor = QTextCursor(self.editor.document())
@@ -668,6 +689,15 @@ class CorrectionWindow(QWidget):
         after = issue.start + len(replacement)
         nxt = [i for i in self._issues if i.start >= after]
         self._select(nxt[0] if nxt else (self._issues[0] if self._issues else None))
+
+    def apply_suggestion(self, number: int) -> None:
+        """Alt+1…Alt+5 : applique la suggestion n° `number` de la faute sélectionnée
+        (sinon de celle où se trouve le curseur), puis passe à la faute suivante."""
+        issue = self._by_uid(self._selected.uid) if self._selected is not None else None
+        issue = issue or self.editor.issue_at_cursor()
+        if issue is None or not 0 < number <= len(issue.replacements):
+            return
+        self.apply_uid(issue.uid, issue.replacements[number - 1])
 
     def apply_confident(self) -> None:
         """Corrections sûres, en plusieurs passes (voir Checker.autocorrect), en arrière-plan."""
@@ -740,8 +770,10 @@ class CorrectionWindow(QWidget):
             self.add_to_dictionary(issue)
 
     def ignore_rule(self, issue: Issue) -> None:
-        self.ignoreRuleRequested.emit(issue.rule_id)
-        self._drop(lambda i: i.rule_id == issue.rule_id)
+        # Toutes les règles de la faute : sinon l'autre moteur la resignalerait à la vérification suivante.
+        rules = set(issue.rules)
+        self.ignoreRulesRequested.emit(list(issue.rules))
+        self._drop(lambda i: bool(rules & set(i.rules)))
 
     def ignore_rule_uid(self, uid: int) -> None:
         issue = self._by_uid(uid)
