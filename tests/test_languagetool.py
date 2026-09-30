@@ -178,3 +178,15 @@ def test_public_api_really_works(settings):
     assert flagged & {"viens", "les enfant", "enfant"}
     assert "Julie" not in flagged and "Bonjour" not in flagged
     json.dumps([i.to_dict(text) for i in issues], ensure_ascii=False)
+
+
+@pytest.mark.parametrize("typed, root", [
+    ("http://localhost:8081", "http://localhost:8081"),
+    ("localhost:8081/", "http://localhost:8081"),
+    ("https://lt.example.org/v2/check", "https://lt.example.org"),
+    (" http://192.168.1.20:8010/v2 ", "http://192.168.1.20:8010"),
+])
+def test_personal_server_address_is_forgiving(settings, typed, root):
+    settings.languagetool.mode = "perso"
+    settings.languagetool.url = typed
+    assert LanguageToolEngine(settings).base_url() == root
