@@ -111,6 +111,32 @@ def test_apply_suggestion_updates_text_and_shifts(qapp, window):
     assert window._text[ecole.start:ecole.end] == "ecole"
 
 
+def test_keyboard_applies_suggestions(qapp, window):
+    """F8 pour aller à une faute, Alt+1…5 pour choisir la suggestion (Alt+& … sur AZERTY)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    open_and_wait(qapp, window)
+    window.activateWindow()
+    assert wait_until(qapp, lambda: qapp.activeWindow() is window)
+    window._select(next(i for i in window._issues if window._text[i.start:i.end] == "obtenu"))
+    QTest.keyClick(window.editor, Qt.Key.Key_1, Qt.KeyboardModifier.AltModifier)
+    assert "obtenus sont" in window.editor.toPlainText()
+    # La faute suivante est sélectionnée : on enchaîne sans la souris.
+    assert window._text[window._selected.start:window._selected.end] == "sont"
+    QTest.keyClick(window.editor, Qt.Key.Key_Ampersand, Qt.KeyboardModifier.AltModifier)
+    assert "obtenus son bon" in window.editor.toPlainText()
+
+    # Sans faute sélectionnée : celle où se trouve le curseur.
+    window._select(None)
+    cursor = window.editor.textCursor()
+    cursor.setPosition(window.editor.toPlainText().index("fesait") + 2)
+    window.editor.setTextCursor(cursor)
+    window.apply_suggestion(2)
+    assert "vessait-il" in window.editor.toPlainText()
+    window.apply_suggestion(9)  # pas de 9e suggestion : rien ne se passe
+
+
 def test_apply_confident_and_undo(qapp, window):
     open_and_wait(qapp, window)
     window.apply_confident()
@@ -130,6 +156,26 @@ def test_ignore_and_dictionary(qapp, window):
     sont = next(i for i in window._issues if window._text[i.start:i.end] == "sont")
     window.ignore(sont)
     assert all(window._text[i.start:i.end] != "sont" for i in window._issues)
+
+
+def test_ignore_rule_covers_both_engines_and_spares_spelling(qapp, window):
+    from PySide6.QtWidgets import QMenu
+
+    open_and_wait(qapp, window)
+    requested = []
+    window.ignoreRulesRequested.connect(requested.append)
+    obtenu = next(i for i in window._issues if window._text[i.start:i.end] == "obtenu")
+    window.ignore_rule(obtenu)
+    assert requested == [["G_PPAS", "QUE_AVOIR"]]
+    assert all(window._text[i.start:i.end] != "obtenu" for i in window._issues)
+
+    # Orthographe : une seule règle par moteur pour tous les mots, on propose le dictionnaire à la place.
+    fesait = next(i for i in window._issues if window._text[i.start:i.end] == "fesait")
+    menu = QMenu()
+    window._fill_issue_menu(menu, fesait)
+    labels = [a.text() for a in menu.actions()]
+    assert "Ajouter au dictionnaire" in labels and "Ne plus signaler cette règle" not in labels
+    menu.deleteLater()
 
 
 def test_live_recheck_after_typing(qapp, window):
@@ -187,6 +233,27 @@ def test_emoji_positions_in_editor(qapp, window):
     window._refresh_issues()
     window.apply(issue, "école")
     assert window.editor.toPlainText() == "Super 😀 et école fermée"
+
+
+def test_express_message_lists_changes_and_missing_engines():
+    from correcteur.models import EngineStatus
+    from correcteur.ui.app import express_message
+
+    before = "Je suis aller a la réunion, les résultats que j'ai obtenu sont bon et on a bien rigoler."
+    after = "Je suis allé à la réunion, les résultats que j'ai obtenus sont bons et on a bien rigolé."
+    slow = {"languagetool": EngineStatus("languagetool", False, "LanguageTool a mis plus de 8 s à répondre.")}
+    text, error = express_message(before, after, 5, 1, slow, "Ctrl+Alt+C")
+    assert not error
+    assert text.splitlines() == [
+        "5 corrections appliquées : aller → allé, a → à, obtenu → obtenus…",
+        "1 remarque à vérifier (Ctrl+Alt+C).",
+        "LanguageTool a mis plus de 8 s à répondre.",
+    ]
+    # Une espace en trop n'a rien de lisible à montrer : seulement le nombre.
+    assert express_message("le  mail", "le mail", 1, 0, {}, "X") == ("1 correction appliquée.", False)
+    assert express_message("ok", "ok", 0, 0, {}, "X") == ("Aucune faute trouvée ✓", False)
+    offline = {"grammalecte": EngineStatus("grammalecte", False, "non installé.")}
+    assert express_message("ok", "ok", 0, 0, offline, "X") == ("Vérification incomplète : Grammalecte : non installé.", True)
 
 
 def test_shift_issues():

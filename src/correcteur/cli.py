@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import logging
 import os
@@ -123,7 +124,7 @@ def cmd_verifier(args) -> int:
     for line in lines[:-1]:
         starts.append(starts[-1] + len(line) + 1)
     for issue in result.issues:
-        line_no = max(i for i, s in enumerate(starts) if s <= issue.start)
+        line_no = bisect.bisect_right(starts, issue.start) - 1
         col = issue.start - starts[line_no]
         sugg = ", ".join(issue.replacements[:4]) or "(pas de suggestion)"
         sure = " [sûre]" if issue.confident else ""

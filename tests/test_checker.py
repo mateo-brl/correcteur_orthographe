@@ -113,6 +113,25 @@ def test_merge_and_confidence(checker):
     assert not found["fesait"].confident
 
 
+def test_merged_issue_keeps_every_rule(checker):
+    """Pour ne plus signaler une faute, il faut couper la règle de chaque moteur :
+    sinon l'autre moteur la resignale à la vérification suivante."""
+    found = by_text(checker.check(TEXT).issues, TEXT)
+    assert found["obtenu"].rule_id == "G_PPAS"
+    assert found["obtenu"].rules == ("G_PPAS", "QUE_AVOIR")
+    checker.settings.ignored_rules = list(found["obtenu"].rules)
+    assert "obtenu" not in by_text(checker.check(TEXT).issues, TEXT)
+
+
+def test_spelling_rule_never_joins_a_grammar_fault():
+    text = "Il a mangé la tarte a la crème."
+    g = issue(text, "a", ["à"], "grammalecte", rule="CONF_A", occurrence=1)
+    lt = issue(text, "a", ["à"], "languagetool", Category.SPELLING, "MORFOLOGIK_RULE_FR", occurrence=1)
+    merged = merge_issues(text, [g, lt])
+    assert len(merged) == 1 and merged[0].category is Category.GRAMMAR
+    assert merged[0].rules == ("CONF_A",)
+
+
 def test_autocorrect_only_applies_confident(checker):
     new_text, applied, remaining, _ = checker.autocorrect(TEXT)
     assert new_text == "Les résultats que j'ai obtenus sont bons et école ferme, fesait-il."
@@ -152,6 +171,49 @@ def test_autocorrect_never_touches_a_fixed_passage_twice(home):
     new_text, applied, _, _ = c.autocorrect("abc def")
     assert new_text == "abcx def" and len(applied) == 1
     c.close()
+
+
+def test_autocorrect_without_local_engine_stays_cautious(home):
+    """Sans moteur local (texte anglais, Grammalecte désactivé), les passes
+    suivantes n'ont personne pour confirmer : une correction douteuse de la
+    1re passe ne devient jamais sûre."""
+    s = Settings()
+
+    def lt(t):
+        return present([
+            issue(t, "teh", ["the", "ten", "tea"], "languagetool", Category.SPELLING, "SPELL"),
+            issue(t, " ,", [","], "languagetool", Category.TYPOGRAPHY, "COMMA_WS"),
+        ])
+
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "languagetool", lt, languages=("en",))])
+    new_text, applied, remaining, _ = c.autocorrect("I saw teh car , then left.", "en-US")
+    c.close()
+    assert new_text == "I saw teh car, then left."
+    assert len(applied) == 1
+    assert [new_text[i.start:i.end] for i in remaining] == ["teh"]
+
+
+def test_autocorrect_does_not_wait_forever_for_a_slow_engine(home):
+    """Réseau lent : la correction express part avec Grammalecte seul (règle
+    "solo") au lieu de laisser l'utilisateur attendre sans rien voir."""
+    s = Settings()
+    text = "Je vais a la plage demain."
+    g = FakeEngine(s, "grammalecte", lambda t: present([issue(t, "a", ["à"], "grammalecte", rule="CONF_A")]))
+    slow = FakeEngine(s, "languagetool", lambda t: [], delay=3)
+    c = Checker(s, PersonalDictionary(), engines=[g, slow])
+    t0 = time.monotonic()
+    new_text, _, _, final = c.autocorrect(text, slow_timeout=0.3)
+    assert time.monotonic() - t0 < 2
+    assert new_text == "Je vais à la plage demain."
+    assert not final.statuses["languagetool"].ok  # le bilan dit pourquoi LanguageTool manque
+
+    t0 = time.monotonic()
+    result = c.check(text, timeout=0.3)
+    assert time.monotonic() - t0 < 2
+    c.close()
+    assert result.done and result.statuses["grammalecte"].ok
+    assert not result.statuses["languagetool"].ok
+    assert "0.3 s" in result.statuses["languagetool"].detail
 
 
 def test_partial_updates_are_streamed(home):
