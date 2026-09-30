@@ -32,7 +32,7 @@ class FakeEngine(Engine):
         time.sleep(self.delay)
         if self.error:
             raise EngineError(self.error)
-        return self.found(text)
+        return present(self.found(text))  # un mot absent du texte (déjà corrigé) : pas de remarque
 
 
 def find(text, word, occurrence=0):
@@ -358,22 +358,108 @@ def test_checker_is_thread_safe(checker):
     assert not errors
 
 
+def when(context, word, repl, rule="R", category=Category.GRAMMAR, source="grammalecte"):
+    """Remarque sur `word` tant que le texte contient `context` : comme un vrai moteur,
+    qui juge un mot d'après ses voisins (corriger l'un peut faire disparaître l'autre)."""
+    import re
+
+    def found(t):
+        match = re.search(r"(?<!\w)" + re.escape(context) + r"(?!\w)", t)
+        if match is None:
+            return None
+        start = match.start() + context.index(word)
+        return Issue(start, start + len(word), "msg", list(repl), category, rule, source)
+    return found
+
+
+def solo_checker(s, *rules, name="grammalecte"):
+    """Un seul moteur répond (l'autre est hors ligne)."""
+    other = "languagetool" if name == "grammalecte" else "grammalecte"
+    engines = [FakeEngine(s, name, lambda t: [r(t) for r in rules]), FakeEngine(s, other, error="hors ligne")]
+    return Checker(s, PersonalDictionary(), engines=engines)
+
+
+def sure(checker, text):
+    return {w: i.confident for w, i in by_text(checker.check(text).issues, text).items()}
+
+
 def test_solo_engine_accepts_isolated_single_grammar_fix(home):
-    s = Settings()
-    text = "Je vais a la plage demain. Les résultats sont bon et sont là."
-    found = lambda t: [
-        issue(t, "a", ["à"], "grammalecte", rule="CONF_A"),
-        issue(t, "sont", ["son"], "grammalecte", rule="G_SON"),
-        issue(t, "bon", ["bons"], "grammalecte", rule="G_ACCORD"),
-    ]
-    # LanguageTool en panne : Grammalecte est seul.
-    engines = [FakeEngine(s, "grammalecte", found), FakeEngine(s, "languagetool", error="hors ligne")]
-    c = Checker(s, PersonalDictionary(), engines=engines)
-    result = c.check(text)
-    got = by_text(result.issues, text)
-    assert got["a"].confident
-    # Deux corrections voisines : ambigu, rien d'automatique.
-    assert not got["sont"].confident and not got["bon"].confident
+    c = solo_checker(Settings(), when("vais a la", "a", ["à"]), when("sont bon", "sont", ["son"]),
+                     when("sont bon", "bon", ["bons"]))
+    got = sure(c, "Je vais a la plage demain. Les résultats sont bon et sont là.")
+    assert got["a"]
+    # Chaque correction fait disparaître l'autre : deux lectures possibles, rien d'automatique.
+    assert not got["sont"] and not got["bon"]
+    c.close()
+
+
+def test_solo_recheck_applies_the_cause_not_the_consequence(home):
+    """"Ils on mangé" : "ont" règle aussi "mangé" ; corriger "mangé" laisse "on"."""
+    c = solo_checker(Settings(), when("Ils on", "on", ["ont"]), when("on mangé", "mangé", ["mange", "mangeait"]))
+    text = "Ils on mangé au restaurant."
+    got = sure(c, text)
+    assert got["on"] and not got["mangé"]
+    assert c.autocorrect(text)[0] == "Ils ont mangé au restaurant."
+    c.close()
+
+
+def test_solo_recheck_applies_independent_neighbours(home):
+    c = solo_checker(Settings(), when("avons manger", "manger", ["mangé"]), when("des pomme", "pomme", ["pommes"]))
+    text = "Nous avons manger des pomme hier."
+    assert sure(c, text) == {"manger": True, "pomme": True}
+    assert c.autocorrect(text)[0] == "Nous avons mangé des pommes hier."
+    c.close()
+
+
+def test_solo_recheck_ignores_an_alternative_that_breaks_something_else(home):
+    """"Quel belle journée" : "beau" ferait disparaître "Quel" mais rendrait "journée" fautive."""
+    c = solo_checker(Settings(), when("Quel belle", "Quel", ["Quelle"]), when("Quel belle", "belle", ["beau"]),
+                     when("beau journée", "journée", []))
+    assert sure(c, "Quel belle journée !") == {"Quel": True, "belle": False}
+    c.close()
+
+
+def test_solo_recheck_rejects_a_fix_the_engine_flags_again(home):
+    c = solo_checker(Settings(), when("faut mangé", "mangé", ["mangez"]), when("faut mangez", "mangez", ["manger"]))
+    assert sure(c, "Il faut mangé.") == {"mangé": False}
+    c.close()
+
+
+def test_solo_accepts_masculine_among_gender_variants(home):
+    from correcteur.checker import solo_candidate
+
+    c = solo_checker(Settings(), when("suis aller", "aller", ["allé", "allée"]))
+    assert c.autocorrect("Je suis aller au cinéma.")[0] == "Je suis allé au cinéma."
+    c.close()
+    grammar = lambda *repl: Issue(0, 1, "", list(repl), Category.GRAMMAR, "R", "grammalecte")
+    assert solo_candidate(grammar("allés", "allées"))
+    assert not solo_candidate(grammar("mange", "manges"))  # personne du verbe : pas un simple accord
+    assert not solo_candidate(grammar("ait", "est"))
+
+
+def test_solo_never_trusts_agreement_guessed_from_the_verb(home):
+    """"Il a pris sont manteau" : l'accord avec "sont" donnerait "sont manteaux"."""
+    c = solo_checker(Settings(), when("sont manteau", "manteau", ["manteaux"], rule="gv1__ppas_être_accord_plur__b1"))
+    text = "Il a pris sont manteau."
+    assert sure(c, text) == {"manteau": False}
+    assert c.autocorrect(text)[0] == text
+    c.close()
+
+
+def test_solo_recheck_failure_leaves_the_fix_to_the_user(home):
+    rules = [when("Ils on", "on", ["ont"]), when("on mangé", "mangé", ["mange"])]
+    c = solo_checker(Settings(), *rules)
+    engine = c.engine("grammalecte")
+    engine.recheck = lambda text, language: (_ for _ in ()).throw(RuntimeError("moteur planté"))
+    assert sure(c, "Ils on mangé au restaurant.") == {"on": False, "mangé": False}
+    c.close()
+
+
+def test_solo_without_local_engine_keeps_the_distance_rule(home):
+    """LanguageTool seul : pas de revérification instantanée, deux remarques voisines restent à vérifier."""
+    c = solo_checker(Settings(), when("Ils on", "on", ["ont"], source="languagetool"),
+                     when("on mangé", "mangé", ["mange"], source="languagetool"), name="languagetool")
+    assert sure(c, "Ils on mangé au restaurant.") == {"on": False, "mangé": False}
     c.close()
 
 

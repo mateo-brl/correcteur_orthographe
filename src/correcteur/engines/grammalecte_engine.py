@@ -52,6 +52,11 @@ _CATEGORY_BY_TYPE = {
 _import_lock = threading.Lock()
 
 
+def _imperfect_subjunctive_only(morphs: list[str]) -> bool:
+    # Étiquettes Grammalecte : ":Sp" subjonctif présent, ":Sq" subjonctif imparfait.
+    return bool(morphs) and all(":Sq" in m and ":Sp" not in m for m in morphs)
+
+
 def _candidate_paths() -> list[Path]:
     paths = []
     env = os.environ.get("CORRECTEUR_GRAMMALECTE")
@@ -148,21 +153,26 @@ class GrammalecteEngine(Engine):
             self._options_cache[strict] = opts
         return opts
 
-    def _check_paragraph(self, paragraph: str, strict: bool) -> list[tuple]:
-        key = (paragraph, strict)
-        cached = self._cache.get(key)
-        if cached is not None:
-            self._cache.move_to_end(key)
-            return cached
+    def _check_paragraph(self, paragraph: str, strict: bool, spelling_suggestions: bool = True) -> list[tuple]:
+        # Une analyse complète sert aussi quand les suggestions d'orthographe ne sont pas demandées.
+        for key in {(paragraph, strict, True), (paragraph, strict, spelling_suggestions)}:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
+        key = (paragraph, strict, spelling_suggestions)
         checker = self._ensure_loaded()
-        gram, spell = checker.getParagraphErrors(paragraph, self._options(strict), False, True)
+        gram, spell = checker.getParagraphErrors(paragraph, self._options(strict), False, spelling_suggestions)
         found: list[tuple] = []
         for err in gram:
             rule = err.get("sRuleId", "")
             if not strict and rule.startswith(_STANDARD_RULE_PREFIXES):
                 continue
+            suggestions = tuple(err.get("aSuggestions") or ())
+            if not strict:
+                suggestions = self._current_usage(suggestions)
             found.append((
-                err["nStart"], err["nEnd"], err.get("sMessage", ""), tuple(err.get("aSuggestions") or ()),
+                err["nStart"], err["nEnd"], err.get("sMessage", ""), suggestions,
                 _CATEGORY_BY_TYPE.get(err.get("sType", ""), Category.GRAMMAR), rule, err.get("URL", ""),
             ))
         for err in spell:
@@ -176,14 +186,31 @@ class GrammalecteEngine(Engine):
             self._cache.popitem(last=False)
         return found
 
+    def _current_usage(self, suggestions: tuple[str, ...]) -> tuple[str, ...]:
+        """Écarte l'imparfait du subjonctif ("que tu viens" -> "viennes", pas "vinsses"),
+        hors d'usage à l'écrit courant, quand une autre forme est proposée."""
+        if len(suggestions) < 2:
+            return suggestions
+        spell = self._ensure_loaded().getSpellChecker()
+        kept = tuple(s for s in suggestions if not _imperfect_subjunctive_only(spell.getMorph(s)))
+        return kept or suggestions
+
     def check(self, text: str, language: str) -> list[Issue]:
+        return self._issues(text, spelling_suggestions=True)
+
+    def recheck(self, text: str, language: str) -> list[Issue]:
+        # Les suggestions d'orthographe coûtent l'essentiel du temps d'analyse (~60 ms par mot inconnu).
+        return self._issues(text, spelling_suggestions=False)
+
+    def _issues(self, text: str, spelling_suggestions: bool) -> list[Issue]:
         strict = self.settings.strict_typography
         issues: list[Issue] = []
         with self._lock:
             for offset, paragraph in split_paragraphs(text):
                 if not paragraph.strip():
                     continue
-                for start, end, message, suggestions, category, rule, url in self._check_paragraph(paragraph, strict):
+                found = self._check_paragraph(paragraph, strict, spelling_suggestions)
+                for start, end, message, suggestions, category, rule, url in found:
                     issues.append(Issue(
                         start=offset + start, end=offset + end, message=message,
                         replacements=list(suggestions), category=category, rule_id=rule,
