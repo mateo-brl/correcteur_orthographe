@@ -207,13 +207,20 @@ class Checker:
         return result
 
     def _settle_partial(self, text: str, raw: dict[str, list[Issue]], issues: list[Issue], language: str) -> None:
-        """Accord partiel : la correction de Grammalecte n'est que le 2e choix de LanguageTool. Un score ne
+        """Accord partiel : la correction de Grammalecte n'est que le 2e choix de LanguageTool (ou LanguageTool
+        ne dit rien de ce passage). Un score ne
         peut pas trancher (« les enfant » : LanguageTool préfère « l'enfant », à tort ; « on joué » : il préfère
         « ont joué », à raison). On reprend donc la décision hors ligne, Grammalecte seul avec contre-épreuve :
         la correction en ligne n'en fait jamais moins que hors ligne quand l'autre moteur la propose aussi."""
-        partial = [i for i in issues if i.partly_agreed and not i.confident and i.replacements]
         local = [name for name in raw if name in _LOCAL_ENGINES and raw[name]]
-        if not partial or len(local) != 1:
+        if len(local) != 1:
+            return
+        # Aussi quand l'autre moteur ne dit rien de ce passage : il ne contredit pas, et la correction en ligne
+        # ne doit pas en faire moins que hors ligne (« Tu à raison », que LanguageTool laisse passer).
+        partial = [i for i in issues if not i.confident and i.replacements and (
+            i.partly_agreed or (i.sources == (local[0],) and not any(
+                o is not i and o.overlaps(i) and local[0] not in o.sources for o in issues)))]
+        if not partial:
             return
         offline = self.post_process(text, {local[0]: raw[local[0]]}, True, self._recheck(local[0], language))
         settled = {_corrected(text, o) for o in offline if o.confident and o.replacements}
@@ -237,8 +244,14 @@ class Checker:
                 if fixed is not None:
                     cleaned.append(fixed)
         merged = merge_issues(text, cleaned)
+        if doubtful_text(text, merged, self.settings.general.language):
+            return merged  # tout reste à vérifier : rien n'est sûr
         for issue in merged:
-            issue.confident = is_confident(text, issue)
+            # L'accord des deux moteurs n'exclut pas une autre lecture qu'ils manquent tous les deux
+            # (« Son seul plaisir est manger » : tous deux veulent « mangé »).
+            issue.confident = is_confident(text, issue) and (
+                issue.category is not Category.GRAMMAR or not issue.replacements
+                or solo_context_ok(text, issue, agreed=issue.agreed))
         if solo:
             mark_solo_confident(text, merged, recheck)
         return merged
@@ -279,22 +292,33 @@ class Checker:
 
     def ignore_once(self, text: str, issue: Issue) -> None:
         """Ignore cette remarque (tous moteurs confondus) jusqu'à la fermeture : un mot inconnu partout ;
-        une remarque de grammaire seulement dans sa phrase, avec ses règles. Ignorer « a » -> « à » une fois
-        ne doit pas faire taire « sac a dos » dans un autre texte."""
+        une remarque de grammaire seulement à cet endroit, repéré par le passage et ses deux mots voisins.
+        Ignorer « a » -> « à » une fois ne fait pas taire « sac a dos » ailleurs, et corriger une autre faute
+        de la même phrase ne fait pas revenir la remarque."""
         original = issue.original(text)
         if issue.category is Category.SPELLING:
             self.session_ignored.add((issue.category.value, original))
             return
-        sentence = _sentence_at(text, issue.start, issue.end)
+        anchor = _anchor(text, issue.start, issue.end)
         for rule in issue.rules:
-            self.session_ignored.add((rule, original, sentence))
+            self.session_ignored.add((rule, anchor))
 
     def _ignored(self, text: str, issue: Issue, original: str) -> bool:
         if not self.session_ignored:
             return False
         if issue.category is Category.SPELLING:
             return (issue.category.value, original) in self.session_ignored
-        return (issue.rule_id, original, _sentence_at(text, issue.start, issue.end)) in self.session_ignored
+        # La zone d'un moteur peut être plus étroite que la remarque fusionnée qu'on a ignorée : il suffit
+        # qu'elle tienne dans un passage ignoré, à sa place.
+        for rule, anchor in self.session_ignored:
+            if rule != issue.rule_id:
+                continue
+            pos = text.find(anchor, max(0, issue.end - len(anchor)))
+            while pos != -1 and pos <= issue.start:
+                if issue.end <= pos + len(anchor):
+                    return True
+                pos = text.find(anchor, pos + 1)
+        return False
 
     def autocorrect(self, text: str, language: str | None = None, max_passes: int = 6,
                     slow_timeout: float | None = EXPRESS_SLOW_TIMEOUT) -> tuple[str, list[Issue], list[Issue], CheckResult]:
@@ -311,7 +335,8 @@ class Checker:
           confirmées ensuite par le moteur local ;
         - dans une phrase déjà corrigée, une nouvelle correction de grammaire à
           suggestion unique (conséquence directe de la correction précédente), d'une
-          famille de règles fiable (`_SOLO_RULES`).
+          famille de règles fiable (`_SOLO_RULES`) et sans autre lecture possible
+          (`solo_context_ok`).
         Une correction que le moteur local proposait seul et que l'autre moteur
         n'a pas confirmée à la 1re passe n'est jamais appliquée.
 
@@ -351,7 +376,7 @@ class Checker:
                         # Confirmation par le moteur local ; sans moteur local, personne ne peut confirmer.
                         return bool(local) and not {s for j in same for s in j.sources} & set(local)
                     return (i.category is Category.GRAMMAR and len(i.replacements) == 1
-                            and sent(i.start) in touched and solo_rule(i))
+                            and sent(i.start) in touched and solo_rule(i) and solo_context_ok(current, i))
 
                 candidates = [i for i in result.issues if i.replacements and acceptable(i)]
                 candidates = split_confident([replace(i, confident=True) for i in candidates])[0]
@@ -420,8 +445,8 @@ def _translate(text: str, rep_effect: str, target: Issue, lo: int, hi: int) -> s
 def _match_score(text: str, a: Issue, b: Issue) -> int:
     """À quel point deux signalements décrivent la même faute :
     3 = même correction principale, 2 = la correction principale de l'un fait
-    partie des suggestions de l'autre, 1 = une suggestion en commun ou même mot
-    inconnu, 0 = rien à voir."""
+    partie des suggestions de l'autre, 1 = une suggestion en commun ou le même
+    passage, 0 = rien à voir."""
     same_span = (a.start, a.end) == (b.start, b.end)
     if same_span and not a.replacements and not b.replacements:
         return 1 if a.category == b.category else 0
@@ -439,7 +464,9 @@ def _match_score(text: str, a: Issue, b: Issue) -> int:
         return 2
     if set(eff_a) & set(eff_b):
         return 1
-    if same_span and a.category is Category.SPELLING and b.category is Category.SPELLING:
+    if same_span:
+        # Même passage, corrections différentes (« tu à » : « as » pour l'un, « a » pour l'autre) : une seule
+        # remarque qui propose les deux, plutôt que deux remarques contradictoires. Jamais un accord.
         return 1
     return 0
 
@@ -513,6 +540,21 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
     return merged
 
 
+def _next_to_number(text: str, issue: Issue) -> bool:
+    return bool(re.search(r"\d\W*$", text[max(0, issue.start - 12):issue.start])
+                or re.match(r"\W*\d", text[issue.end:issue.end + 12]))
+
+
+def doubtful_text(text: str, issues: list[Issue], language: str) -> bool:
+    """Texte où rien ne doit être corrigé d'office : réglé en français mais qui n'en a pas l'air (« at the
+    cafe » deviendrait « at thé café »), ou plein de mots inconnus (autre langue, jargon, noms propres)."""
+    if language.startswith("fr") and guess_language(text) != "fr":
+        return True
+    words = _WORD_RE.findall(text)
+    unknown = sum(1 for i in issues if i.category is Category.SPELLING)
+    return len(words) >= 4 and unknown > 0.3 * len(words)
+
+
 def is_confident(text: str, issue: Issue) -> bool:
     """Une correction est "sûre" (appliquée par la correction express) si :
     - c'est une faute d'accent ou de majuscule avec une suggestion évidente ;
@@ -525,6 +567,8 @@ def is_confident(text: str, issue: Issue) -> bool:
     original = text[issue.start:issue.end]
     first = issue.replacements[0]
     if issue.category is Category.SPELLING:
+        if first.casefold() == original.casefold() and _next_to_number(text, issue):
+            return False  # « place du 8 Mai 1945 », « rue du 14 Juillet » : un nom propre, pas une date
         # "ecole" -> "école" est sûr ; "tache" -> "tâche"/"tachè" ne l'est pas.
         rivals = [r for r in issue.replacements[1:] if same_letters(original, r) and r.casefold() != first.casefold()]
         if same_letters(original, first) and not rivals:
@@ -538,21 +582,50 @@ def is_confident(text: str, issue: Issue) -> bool:
 
 
 _SOLO_WINDOW = 12
+# Contre-épreuves de la règle solo : 3 par phrase (120 au moins), et 10 s au plus pour un texte énorme.
+# Un plafond fixe laissait la fin d'un long texte sans correction (400 lignes : seules les 120 premières).
 _SOLO_MAX_TRIALS = 120
-# Familles de règles Grammalecte dont la correction est fiable sans un second moteur pour la confirmer :
-# chacune a été vérifiée sur des phrases réelles (tests/test_offline_express.py). Les autres corrigent
-# trop souvent le mauvais mot : « Mes parents son partis » -> « son parti » (gn_mon_ton_son prend « son »
-# pour un déterminant), « on faim » -> « on feint » (conf_on_non_verbe), « Ses parents son » -> « sons »
-# (gn_det_epi_plur_2m), « Il a pris sont manteau » -> « sont manteaux » (ppas_être_accord_plur).
-_SOLO_RULES = (
-    "conf_à_a_", "conf_ces_ses_c_est", "conf_ont", "conf_ils_non_verbe", "vmode_verbes_que_subjonctif",
-    "gn_quel_", "gn_ce_1m", "gn_les_1m", "gn_det_epi_plur_1m", "conj_les_nom", "ppas_être_confusion",
-    "ppas_sujet_être_accord_", "ppas_ne_me_te_se_être", "ppas_avoir", "ppas_3pl_fem_verbe_état",
-)
+_SOLO_TRIALS_PER_SENTENCE = 3
+_SOLO_TRIALS_SECONDS = 10.0
+# Familles de règles Grammalecte dont la correction est fiable sans un second moteur pour la confirmer.
+# Mesurées en injectant des fautes typiques (a/à, son/sont, on/ont, é/er, pluriels…) dans 2 500 phrases
+# justes de la suite de tests de Grammalecte : chacune y a rétabli la phrase d'origine au moins 95 fois
+# sur 100, sans rien toucher dans les phrases justes. Les autres corrigent trop souvent le mauvais mot :
+# « Mes parents son partis » -> « son parti » (gn_mon_ton_son : 0 sur 43), « c'étais » -> « s'étais »
+# (conf_c_s_verbe : 5 sur 12), « Nous les avons finis » -> « fini » (ppas_nous_vous_avoir : 0 sur 3).
+_SOLO_RULES = frozenset({
+    # à / a
+    "conf_à_a", "conf_à_a_après_verbes", "conf_à_a_infinitif", "conf_à_a_locutions", "conf_à_a_verbes_locutions",
+    "conf_a_à_verbe", "conf_a_à_substantifs",
+    # homophones
+    "conf_ces_ses_c_est", "conf_ce_ceux_se", "conf_se_ceux_ce", "conf_ce_se_verbe", "conf_ont", "conf_on_ont",
+    "conf_ils_non_verbe", "conf_tu_non_verbe", "conf_son_sont", "conf_peu_peut_peux", "conf_la_là", "conf_est_et",
+    "conf_et_est2", "conf_mai_mais_mes", "conf_où_ou", "conf_quand_quant_qu_en", "conf_quant_quand_qu_en",
+    "conf_dans_dan_d_en", "conf_nôtre_notre", "conf_ça_çà_sa", "conf_déterminant_fem_sing_verbe", "conf_leurs_verbe",
+    "conf_c_est_était", "conf_près_prêt_pré", "conf_peut_être", "conf_peut_être2",
+    # déterminant + nom
+    "gn_les_1m", "gn_det_epi_plur_1m", "gn_ces_aux_pluriel_1m", "gn_quel_1m", "gn_quelle_1m", "gn_ce_1m", "gn_tout_det",
+    "gn_toute_det", "gn_tous_det_nom", "gn_plusieurs_1m", "gn_quelque_1m", "gn_certains_1m", "gn_certaines_1m",
+    "gn_nombre_chiffres_1m",
+    # conjugaison, mode, infinitif
+    "conj_je", "conj_tu", "conj_1s_2s_sans_sujet_xxxs", "conj_les_nom", "vmode_verbes_que_subjonctif",
+    "vmode_j_aimerais_vinfi", "infi_falloir", "infi_vouloir", "infi_devoir", "infi_ne_pas_jamais_etc", "infi_qqch_de",
+    "infi_par_pour_sans", "infi_verbe_de_verbe", "imp_verbe_groupe3_d",
+    # participes passés (voir aussi solo_context_ok)
+    "ppas_avoir", "ppas_être_confusion", "ppas_sujet_être_accord_pluriel", "ppas_ne_me_te_se_être",
+    "ppas_3pl_mas_verbe_état", "ppas_3pl_fem_verbe_état", "ppas_3sg_fem_verbe_état", "ppas_nous_verbe_état",
+})
 # Jamais sûres, même avec l'accord des deux moteurs : le participe d'un verbe pronominal s'accorde selon
 # son complément (« nous nous sommes lavés », mais « nous nous sommes téléphoné »), ce qu'aucun ne sait voir.
-_NEVER_SURE_RULES = ("ppas_nous_nous_être", "ppas_vous_vous_être")
+# Un nom propre (« Helene ») n'est pas accentué d'office : la personne l'écrit peut-être ainsi.
+_NEVER_SURE_RULES = ("ppas_nous_nous_être", "ppas_vous_vous_être", "grammalecte_nom_propre")
 _RULE_FAMILY_RE = re.compile(r"^gv?\d+__(.+?)(?:__b\d+_a\d+(?:_\d+)?)?$")
+# Participe imposé après un « a » ou un « est » qui sont peut-être « à » ou « et » : « Il y a manger »
+# (« à manger »), « Son seul plaisir est manger », « Il a appris a nager ». Sauf juste après un sujet.
+_PARTICIPLE_FAMILIES = frozenset({"ppas_avoir", "ppas_être_confusion", "ppas_ne_me_te_se_être"})
+_CONFUSABLE_AUXILIARIES = frozenset({"a", "est"})
+_SUBJECTS = frozenset({"il", "elle", "on", "ça", "cela", "qui", "lui", "tout", "rien", "personne"})
+_WORD_BEFORE_RE = re.compile(r"([\w'’-]+)\W*$")
 
 
 def rule_family(rule_id: str) -> str:
@@ -562,11 +635,52 @@ def rule_family(rule_id: str) -> str:
 
 
 def solo_rule(issue: Issue) -> bool:
-    return rule_family(issue.rule_id).startswith(_SOLO_RULES)
+    """Moteur seul : Grammalecte n'est cru que pour les familles mesurées ; LanguageTool seul (texte anglais,
+    Grammalecte désactivé) garde la règle d'avant, une suggestion unique sans voisine."""
+    return issue.source != "grammalecte" or rule_family(issue.rule_id) in _SOLO_RULES
 
 
 def never_sure(issue: Issue) -> bool:
     return rule_family(issue.rule_id).startswith(_NEVER_SURE_RULES)
+
+
+def _words_before(text: str, pos: int, count: int) -> list[str]:
+    words = []
+    for _ in range(count):
+        m = _WORD_BEFORE_RE.search(text, 0, pos)
+        if not m:
+            break
+        words.append(m.group(1).lower().replace("’", "'"))
+        pos = m.start()
+    return words
+
+
+def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
+    """Ce qui entoure la faute laisse-t-il une autre lecture, que Grammalecte seul ne peut pas exclure ?
+    `agreed` : les deux moteurs proposent cette correction (le genre choisi n'est alors plus un hasard)."""
+    family = rule_family(issue.rule_id)
+    before = _words_before(text, issue.start, 2)
+    if family in _PARTICIPLE_FAMILIES and before and before[0] in _CONFUSABLE_AUXILIARIES:
+        if len(before) < 2 or before[1] not in _SUBJECTS:
+            return False
+    if family == "ppas_ne_me_te_se_être":
+        # « Se serait attaquer », « s'est être » : « se » mis pour « ce » en tête de phrase, sans sujet.
+        if text[issue.start:issue.end].lower() == "être" or re.match(r"[Ss]e\b|[Ss]['’]", _sentence_at(text, issue.start, issue.end)):
+            return False
+    if family == "conj_les_nom":
+        # « Les Misérables est un roman » : un titre ; « Les contes est légendes » : « est » mis pour « et ».
+        if text[issue.start:issue.end].lower() == "est":
+            return False
+        m = re.search(r"\b[Ll]es\s+(\w)", text[max(0, issue.start - 80):issue.start])
+        if m and m.group(1).isupper():
+            return False
+    first = issue.replacements[0] if issue.replacements else ""
+    if not agreed and len(issue.replacements) > 1 and first.endswith("s"):
+        # Masculin pluriel proposé au hasard (« Ma mère et ma sœur sont partit » : « partis » ou « parties » ?) :
+        # seulement quand le sujet le dit (« ils »).
+        if "ils" not in _words_before(text, issue.start, 3):
+            return False
+    return True
 
 
 def solo_candidate(issue: Issue) -> bool:
@@ -599,7 +713,7 @@ def mark_solo_confident(text: str, issues: list[Issue], recheck: Recheck | None 
     ce sont deux lectures possibles ("sont bon") : aucune n'est appliquée."""
     trials = _Trials(text, issues, recheck) if recheck is not None else None
     for issue in issues:
-        if not solo_candidate(issue):
+        if not solo_candidate(issue) or not solo_context_ok(text, issue):
             continue
         neighbours = [
             other for other in issues
@@ -622,8 +736,9 @@ class _Trials:
         self.text = text
         self.issues = issues
         self.recheck = recheck
-        self.budget = _SOLO_MAX_TRIALS
         self._ends = [m.end() for m in _SENTENCE_END_RE.finditer(text)]
+        self.budget = max(_SOLO_MAX_TRIALS, _SOLO_TRIALS_PER_SENTENCE * (len(self._ends) + 1))
+        self.deadline = time.monotonic() + _SOLO_TRIALS_SECONDS
         self._done: dict[tuple[int, int, str], tuple[int, str, list[Issue]] | None] = {}
 
     def _bounds(self, issue: Issue) -> tuple[int, int]:
@@ -645,7 +760,7 @@ class _Trials:
         """(début de la phrase, phrase corrigée, remarques trouvées), ou None hors budget."""
         key = (issue.start, issue.end, issue.replacements[0])
         if key not in self._done:
-            if self.budget <= 0:
+            if self.budget <= 0 or time.monotonic() > self.deadline:
                 return None
             self.budget -= 1
             lo, hi = self._bounds(issue)
@@ -737,6 +852,13 @@ def number_direction(original: str, replacement: str) -> int:
     if plural_of(b, a):
         return -1
     return 0
+
+
+def _anchor(text: str, start: int, end: int) -> str:
+    """Le passage [start, end] avec le mot qui le précède et celui qui le suit."""
+    before = re.search(r"[\w'’-]+\W*$", text[max(0, start - 40):start])
+    after = re.match(r"\W*[\w'’-]+", text[end:end + 40])
+    return text[start - (len(before.group(0)) if before else 0):end + (len(after.group(0)) if after else 0)]
 
 
 def _sentence_at(text: str, start: int, end: int) -> str:

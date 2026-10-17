@@ -26,7 +26,10 @@ from correcteur import APP_NAME, __version__
 
 # Aucun moteur n'a vérifié le texte (langue non gérée, moteurs en échec) : ce n'est pas « aucune faute ».
 EXIT_UNCHECKED = 3
-_LANGUAGE_RE = re.compile(r"([a-z]{2})(?:-([a-z]{2}))?", re.IGNORECASE)
+# « fr », « en-US », et les variantes de LanguageTool : « ca-ES-valencia », « de-DE-x-simple-language ».
+# Langue sur 2 lettres seule, ou sur 2-3 lettres suivie d'un pays sur 2 lettres (« en-US », « ast-ES »), puis
+# d'éventuelles variantes.
+_LANGUAGE_RE = re.compile(r"[a-z]{2}|[a-z]{2,3}-[a-z]{2}(?:-[a-z0-9]+)*", re.IGNORECASE)
 
 _GUI_COMMANDS = {
     "selection": "verifier-selection",
@@ -112,9 +115,9 @@ def _normalize_language(value: str | None) -> str | None:
     match = _LANGUAGE_RE.fullmatch(value)
     if not match:
         raise ValueError(f"langue « {value} » non reconnue : utilisez « auto », « fr » ou un code de la forme "
-                         "« en » ou « en-US ».")
-    lang, region = match.groups()
-    return lang.lower() + (f"-{region.upper()}" if region else "")
+                         "« en », « en-US » ou « ca-ES-valencia ».")
+    lang, *rest = value.split("-")
+    return "-".join([lang.lower()] + [p.upper() if i == 0 and len(p) == 2 else p for i, p in enumerate(rest)])
 
 
 def _make_checker(args):
@@ -150,6 +153,21 @@ def _unchecked_reason(args, checker, result) -> str | None:
     return reason
 
 
+def _counts(issues) -> bool:
+    """Le code 1 (fautes trouvées) ne vient pas d'une simple remarque de style (« futur proche… »)."""
+    from correcteur.models import Category
+
+    return any(i.category is not Category.STYLE for i in issues)
+
+
+def _partial_warning(result) -> str | None:
+    """Un moteur a échoué mais un autre a vérifié : le dire (LanguageTool trop lent, par exemple)."""
+    failed = [s.detail for s in result.statuses.values() if not s.ok and s.detail]
+    if failed and any(s.ok for s in result.statuses.values()):
+        return "Vérification partielle : " + " ; ".join(failed)
+    return None
+
+
 def cmd_verifier(args) -> int:
     args.langue = _normalize_language(args.langue)
     text = _read_text(args)
@@ -169,7 +187,7 @@ def cmd_verifier(args) -> int:
         if unchecked:
             print(unchecked, file=sys.stderr)
             return EXIT_UNCHECKED
-        return 1 if result.issues else 0
+        return 1 if _counts(result.issues) else 0
     if unchecked:
         print(unchecked, file=sys.stderr)
         return EXIT_UNCHECKED
@@ -181,10 +199,7 @@ def cmd_verifier(args) -> int:
     if not result.issues:
         print("Aucune faute trouvée.")
         return 0
-    lines = text.split("\n")
-    starts = [0]
-    for line in lines[:-1]:
-        starts.append(starts[-1] + len(line) + 1)
+    starts = [0] + [m.end() for m in re.finditer(r"\r\n|\r|\n", text)]  # débuts de ligne, toutes fins comprises
     for issue in result.issues:
         line_no = bisect.bisect_right(starts, issue.start) - 1
         col = issue.start - starts[line_no]
@@ -193,7 +208,7 @@ def cmd_verifier(args) -> int:
         print(f"{bold}{line_no + 1}:{col + 1}{reset} {red}{issue.original(text)!r}{reset} → {sugg}{sure}")
         print(f"    {issue.message} {dim}({issue.category.value}, {'+'.join(issue.sources)}){reset}")
     print(f"\n{len(result.issues)} remarque(s).")
-    return 1
+    return 1 if _counts(result.issues) else 0
 
 
 def cmd_corriger(args) -> int:
@@ -224,6 +239,9 @@ def cmd_corriger(args) -> int:
     if unchecked:
         print(unchecked, file=sys.stderr)
         return EXIT_UNCHECKED
+    partial = _partial_warning(result)
+    if partial:
+        print(partial, file=sys.stderr)
     return 0
 
 

@@ -201,25 +201,36 @@ class LanguageToolEngine(Engine):
             raise EngineError("Réponse illisible de LanguageTool.")
         to_index = utf16_to_index(text)
         found = []
-        for match in payload.get("matches", []):
-            rule = match.get("rule") or {}
-            # Le serveur public intègre Grammalecte ; ces remarques font doublon avec
-            # notre Grammalecte local et leurs positions sont fausses sur plusieurs paragraphes.
-            if str(rule.get("id", "")).startswith("grammalecte_"):
-                continue
-            offset = int(match.get("offset", 0))
-            length = int(match.get("length", 0))
-            start, end = to_index(offset), to_index(offset + length)
-            if not _matches_context(match, text[start:end]):
-                log.debug("Remarque LanguageTool ignorée (position incohérente) : %s", rule.get("id"))
-                continue
-            replacements = tuple(r["value"] for r in match.get("replacements", [])[:8] if "value" in r)
-            urls = rule.get("urls") or []
-            found.append((
-                start, end, match.get("message", ""), replacements, _category(match),
-                rule.get("id", "LT"), urls[0].get("value", "") if urls else "",
-            ))
-        return found
+        for match in payload.get("matches") or []:
+            try:
+                found.append(self._parse_match(match, text, to_index))
+            except (TypeError, ValueError, KeyError, AttributeError) as exc:  # remarque mal formée : on passe
+                log.debug("Remarque LanguageTool illisible ignorée : %s", exc)
+        return [f for f in found if f is not None]
+
+    @staticmethod
+    def _parse_match(match: dict, text: str, to_index) -> tuple | None:
+        """Une remarque de la réponse, ou None si elle est à écarter."""
+        rule = match.get("rule") or {}
+        # Le serveur public intègre Grammalecte ; ces remarques font doublon avec
+        # notre Grammalecte local et leurs positions sont fausses sur plusieurs paragraphes.
+        if str(rule.get("id", "")).startswith("grammalecte_"):
+            return None
+        offset = int(match.get("offset", 0))
+        length = int(match.get("length", 0))
+        if offset < 0 or length < 0 or offset + length > len(text) * 2:
+            return None
+        start, end = to_index(offset), to_index(offset + length)
+        if not _matches_context(match, text[start:end]):
+            log.debug("Remarque LanguageTool ignorée (position incohérente) : %s", rule.get("id"))
+            return None
+        replacements = tuple(str(r["value"]) for r in (match.get("replacements") or [])[:8]
+                             if isinstance(r, dict) and "value" in r)
+        urls = rule.get("urls") or []
+        return (
+            start, end, str(match.get("message") or ""), replacements, _category(match),
+            str(rule.get("id", "LT")), urls[0].get("value", "") if urls else "",
+        )
 
     def check(self, text: str, language: str) -> list[Issue]:
         if not text.strip():

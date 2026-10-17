@@ -29,6 +29,19 @@ FIXED = [
     # Une correction sûre à un endroit ne l'est pas ailleurs pour le même mot (« Il ce lave » : ce -> se).
     ("J'aime ce voiture rouge. Il ce lave les mains.", "J'aime cette voiture rouge. Il ce lave les mains."),
     ("Les manteau sont rangés. Il a pris sont manteau.", "Les manteaux sont rangés. Il a pris sont manteau."),
+    # Familles de règles ajoutées après mesure sur corpus (rapport de test de la 0.1.5 : couverture trop faible).
+    ("Elle à mangé.", "Elle a mangé."),
+    ("Tu à raison.", "Tu as raison."),
+    ("Ont va au cinéma.", "On va au cinéma."),
+    ("Il peu le faire.", "Il peut le faire."),
+    ("Je leurs parle.", "Je leur parle."),
+    ("Il faut mangé.", "Il faut manger."),
+    ("Sa va ?", "Ça va ?"),
+    ("Quand à lui, il reste.", "Quant à lui, il reste."),
+    ("Il viendra peut être demain.", "Il viendra peut-être demain."),
+    ("Il pense a toi.", "Il pense à toi."),
+    ("Merci a vous.", "Merci à vous."),
+    ("Il a appris a nager.", "Il a appris à nager."),
 ]
 
 UNTOUCHED = [
@@ -41,6 +54,16 @@ UNTOUCHED = [
     "Les filles son belles.",
     "Ses parents son très gentils.",
     "Nous nous sommes téléphoné.",
+    # Autre lecture possible, que Grammalecte seul ne peut pas exclure (rapport de test de la 0.1.5).
+    "Il y a manger et manger.",           # « à manger »
+    "Son seul plaisir est manger.",
+    "Les Misérables est un roman de Hugo.",
+    "Les Échos a publié un article.",
+    "Rendez-vous place du 8 Mai 1945.",
+    "Ma mère et ma sœur sont partit.",    # « parties » : le masculin par défaut serait faux
+    "Helene est arrivée.",                 # un nom propre n'est pas accentué d'office
+    "I have à cat.",                       # pas du français
+    "Il peut être fatigué.",
     "Les enfants sont partis en vacances avec leurs parents.",
     "Elle a mangé les pommes qu'elle avait achetées.",
     "stp envoie-moi le rdv par mail, merci !",

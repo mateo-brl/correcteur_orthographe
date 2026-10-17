@@ -201,3 +201,27 @@ def test_file_not_in_utf8_gives_a_french_message(home, tmp_path, capsys):
     assert "n'est pas en UTF-8" in err and "codec" not in err
     assert main(["corriger", "-f", str(tmp_path / "absent.txt")]) == 2
     assert "introuvable" in capsys.readouterr().err
+
+
+def test_language_codes_accept_languagetool_variants():
+    from correcteur.cli import _normalize_language
+
+    assert _normalize_language("EN-us") == "en-US"
+    assert _normalize_language("ca-ES-valencia") == "ca-ES-valencia"
+    assert _normalize_language("de-DE-x-simple-language") == "de-DE-x-simple-language"
+
+
+def test_old_mac_line_endings_split_paragraphs():
+    from correcteur.textutils import split_paragraphs
+
+    assert list(split_paragraphs("Un.\rDeux.\r\nTrois.")) == [(0, "Un."), (4, "Deux."), (11, "Trois.")]
+
+
+def test_partial_check_is_reported():
+    from correcteur.cli import _partial_warning
+    from correcteur.models import CheckResult, EngineStatus
+
+    statuses = {"grammalecte": EngineStatus("grammalecte", True), "languagetool": EngineStatus(
+        "languagetool", False, "LanguageTool a mis plus de 8 s à répondre.")}
+    assert "plus de 8 s" in _partial_warning(CheckResult("t", [], statuses, ()))
+    assert _partial_warning(CheckResult("t", [], {"grammalecte": statuses["grammalecte"]}, ())) is None
