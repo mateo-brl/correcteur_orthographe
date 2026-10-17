@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import codecs
 import dataclasses
 import json
+import logging
 import os
 import sys
 import threading
@@ -12,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from correcteur import APP_NAME
+
+log = logging.getLogger(__name__)
 
 
 def _base_dirs() -> tuple[Path, Path]:
@@ -192,18 +196,35 @@ class PersonalDictionary:
         self._lock = threading.Lock()
         self._words: set[str] = set()
         self._folded: set[str] = set()
+        self._unreadable = False
         self.reload()
+
+    @staticmethod
+    def _decode(line: bytes) -> str:
+        """UTF-8, sinon Windows-1252 (fichier modifié avec un ancien éditeur) : aucun mot n'est perdu, et
+        l'enregistrement suivant réécrit le fichier en UTF-8."""
+        try:
+            return line.decode("utf-8")
+        except UnicodeDecodeError:
+            return line.decode("cp1252", errors="replace")
 
     def reload(self) -> None:
         words: set[str] = set()
+        data, unreadable = b"", False
         try:
-            with open(self.path, encoding="utf-8") as fh:
-                for line in fh:
-                    word = line.strip()
-                    if word and not word.startswith("#"):
-                        words.add(word)
+            data = self.path.read_bytes()
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            # Illisible (droits, dossier à la place du fichier...) : dictionnaire vide pour cette session,
+            # et on ne l'écrase pas en enregistrant.
+            log.warning("Dictionnaire personnel illisible (%s) : %s", self.path, exc)
+            unreadable = True
+        self._unreadable = unreadable
+        for line in data.removeprefix(codecs.BOM_UTF8).splitlines():
+            word = self._decode(line).strip()
+            if word and not word.startswith("#"):
+                words.add(word)
         with self._lock:
             self._words = words
             self._folded = {w for w in words if w == w.lower()}
@@ -241,5 +262,8 @@ class PersonalDictionary:
         self._save()
 
     def _save(self) -> None:
+        if self._unreadable:
+            log.warning("Dictionnaire personnel illisible : modification gardée pour cette session seulement.")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(self.path, "\n".join(self.words()) + "\n")

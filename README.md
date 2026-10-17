@@ -167,7 +167,10 @@ correcteur corriger --tout < brouillon.txt              # applique toutes les pr
 correcteur diagnostic                                    # état de l'installation
 ```
 
-`--hors-ligne` n'utilise que les moteurs locaux. Sous Windows, la commande s'appelle `correcteur-cli.exe`.
+`--hors-ligne` n'utilise que les moteurs locaux (Grammalecte, et LanguageTool seulement en mode « serveur local »).
+`-l` accepte `auto`, `fr` ou un code comme `en` ou `en-US`. Codes de retour de `verifier` et `corriger` : 0 (aucune
+faute, ou texte corrigé), 1 (fautes trouvées), 2 (erreur), 3 (aucun moteur n'a pu vérifier le texte : langue non gérée,
+moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
 
 </details>
 

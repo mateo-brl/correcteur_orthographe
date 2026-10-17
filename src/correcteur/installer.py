@@ -94,9 +94,11 @@ def install_grammalecte(progress: Progress | None = None, target: Path | None = 
         archive = download(GRAMMALECTE_URL, Path(tmp) / "grammalecte.zip", progress, GRAMMALECTE_SHA256)
         _extract(archive, target, member_prefix="grammalecte/")
     # Précompilation : sinon le premier lancement compile 4 Mo de règles (plusieurs secondes).
+    # Dans le paquet PyInstaller, pas de processus parallèles : l'exécutable relancé par multiprocessing
+    # recevrait des arguments de Python au lieu des nôtres.
     import compileall
 
-    compileall.compile_dir(str(target), quiet=1, workers=0)
+    compileall.compile_dir(str(target), quiet=1, workers=1 if getattr(sys, "frozen", False) else 0)
     return target
 
 

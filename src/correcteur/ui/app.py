@@ -152,7 +152,13 @@ class Controller(QObject):
             self.tray.show()
 
         self.ipc = IpcServer(lambda cmd, data: self.command.emit(cmd, data))
-        self.ipc.start()
+        if not self.ipc.start():
+            if self.ipc.other_instance:
+                QTimer.singleShot(0, self.quit)  # lancée en même temps qu'une autre : celle-là répond déjà
+            else:
+                QTimer.singleShot(1500, lambda: self.notify(
+                    f"{self.ipc.error} Les raccourcis du bureau et « correcteur quitter » ne fonctionneront pas.",
+                    error=True))
         self._hotkey_failures: list[str] = []
         self._start_hotkeys()
         self.checker.warmup()

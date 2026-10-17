@@ -1,6 +1,10 @@
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-from correcteur.config import PersonalDictionary, Settings, SettingsStore
+from correcteur.config import PersonalDictionary, Settings, SettingsStore, config_dir
 
 
 def test_settings_roundtrip(home):
@@ -65,3 +69,33 @@ def test_dictionary_set_words(home):
     d = PersonalDictionary()
     d.set_words(["  un ", "", "Deux"])
     assert d.words() == ["Deux", "un"]
+
+
+def test_dictionary_not_in_utf8_keeps_every_word(home):
+    """Fichier modifié avec un éditeur en Latin-1 / Windows-1252 : plus de plantage au démarrage, et aucun mot
+    perdu (une ligne illisible en UTF-8 est relue en Windows-1252)."""
+    d = PersonalDictionary()
+    d.path.write_bytes("Zorglub\ncafé\nmaïs\n".encode("utf-8") + "crème\nœuvrette\n".encode("cp1252"))
+    d.reload()
+    assert {"Zorglub", "café", "maïs", "crème", "œuvrette"} <= set(d.words())
+    d.add("nouveau")  # réécrit en UTF-8
+    assert set(PersonalDictionary().words()) == {"Zorglub", "café", "maïs", "crème", "œuvrette", "nouveau"}
+    d.path.write_bytes(b"\xef\xbb\xbfbom\r\nfin\r\n")  # BOM et fins de ligne Windows
+    d.reload()
+    assert d.words() == ["bom", "fin"]
+
+
+def test_unreadable_dictionary_is_neither_fatal_nor_overwritten(home):
+    (config_dir() / "dictionnaire.txt").mkdir()  # illisible comme fichier
+    d = PersonalDictionary()
+    assert d.words() == []
+    d.add("mot")  # gardé pour la session, sans écraser le fichier
+    assert "mot" in d and d.path.is_dir()
+
+
+def test_cli_survives_latin1_dictionary(home):
+    (config_dir() / "dictionnaire.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"), PYTHONIOENCODING="utf-8")
+    out = subprocess.run([sys.executable, "-m", "correcteur", "verifier", "--hors-ligne", "Bonjour."],
+                         capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
+    assert out.returncode != 2 and "codec" not in out.stderr, out.stderr
