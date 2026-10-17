@@ -202,9 +202,14 @@ def cmd_gnome(args) -> int:
 
 
 def cmd_demarrage(args) -> int:
+    from correcteur.config import SettingsStore
     from correcteur.platform.autostart import set_autostart
 
     set_autostart(args.etat == "oui")
+    store = SettingsStore()
+    settings = store.load()
+    settings.general.autostart = args.etat == "oui"  # même état dans les paramètres que sur le disque
+    store.save(settings)
     print("Démarrage automatique " + ("activé." if args.etat == "oui" else "désactivé."))
     return 0
 

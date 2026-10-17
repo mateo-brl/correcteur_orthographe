@@ -71,3 +71,20 @@ def test_imperfect_subjunctive_left_out_in_standard_mode():
     strict_settings = Settings()
     strict_settings.general.typography = "stricte"
     assert found(engine(strict_settings).check(text, "fr"), text)["viens"].replacements == ["viennes", "vinsses"]
+
+
+def test_spelling_suggestions_skip_invented_capitals():
+    """Grammalecte départage par ordre alphabétique, majuscules d'abord : « vien » proposait « VIe »."""
+    text = "Il faut que tu vien demain."
+    sugg = found(engine().check(text, "fr"), text)["vien"].replacements
+    assert sugg[:2] == ["viens", "vient"]
+    assert sugg.index("vie") < sugg.index("VIe") and sugg.index("vienne") < sugg.index("Vienne")
+
+
+def test_spelling_ranking_keeps_grammalecte_distances():
+    from correcteur.engines.grammalecte_engine import rank_spelling
+
+    # Inversion de lettres (« chein ») ou lettre en trop (« bonjoure ») : l'ordre de Grammalecte reste.
+    assert rank_spelling("bonjoure", ("bonjour", "bonjours", "conjure")) == ("bonjour", "bonjours", "conjure")
+    assert rank_spelling("tres", ("très", "Dres", "ares")) == ("très", "ares", "Dres")
+    assert rank_spelling("Vien", ("VIe", "Vie", "Viens")) == ("Viens", "Vie", "VIe")

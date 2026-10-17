@@ -132,6 +132,34 @@ def test_spelling_rule_never_joins_a_grammar_fault():
     assert merged[0].rules == ("CONF_A",)
 
 
+ON_JOUE = "Les enfants on joué ensemble."
+
+
+def on_joue_engines(s):
+    """Signalements réels des deux moteurs pour « on joué » (rapport d'un utilisateur, Debian 13)."""
+    g = lambda t: present([issue(t, "joué", ["joue", "jouait", "joua"], "grammalecte", rule="g2__conj_on")])
+    lt = lambda t: present([issue(t, "on joué", ["ont joué", "on joue"], "languagetool", rule="ON_ONT")])
+    return [FakeEngine(s, "grammalecte", g), FakeEngine(s, "languagetool", lt)]
+
+
+def test_second_choice_is_not_an_agreement():
+    """Grammalecte veut « on joue », LanguageTool « ont joué » et n'a « on joue » qu'en 2e choix :
+    ce n'est pas un accord. La correction n'est pas sûre, et « ont joué » n'est pas perdue."""
+    [merged] = merge_issues(ON_JOUE, [e.check(ON_JOUE, "fr")[0] for e in on_joue_engines(Settings())])
+    assert merged.original(ON_JOUE) == "on joué"  # zone élargie : « ont joué » change aussi « on »
+    assert merged.replacements[:2] == ["on joue", "ont joué"]  # désaccord : les deux choix en tête
+    assert not merged.agreed and not is_confident(ON_JOUE, merged)
+
+
+def test_autocorrect_does_not_apply_a_second_choice(home):
+    s = Settings()
+    c = Checker(s, PersonalDictionary(), engines=on_joue_engines(s))
+    new_text, applied, remaining, _ = c.autocorrect(ON_JOUE)
+    assert new_text == ON_JOUE and not applied
+    assert [ON_JOUE[i.start:i.end] for i in remaining] == ["on joué"]
+    c.close()
+
+
 def test_autocorrect_only_applies_confident(checker):
     new_text, applied, remaining, _ = checker.autocorrect(TEXT)
     assert new_text == "Les résultats que j'ai obtenus sont bons et école ferme, fesait-il."

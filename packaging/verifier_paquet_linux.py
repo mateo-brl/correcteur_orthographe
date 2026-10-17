@@ -1,8 +1,9 @@
 """Vérifie le paquet Linux construit comme le ferait un utilisateur, sur un écran X11 (Xvfb en CI).
 
 L'application empaquetée est lancée, une fenêtre contient un texte sélectionné, on appuie sur
-Ctrl+Alt+X et la fenêtre doit contenir le texte corrigé. Ce test attrape ce que les tests du code
-source ne voient pas : un module oublié par PyInstaller.
+Ctrl+Alt+X et la fenêtre doit contenir le texte corrigé. Avant, on vérifie que les programmes du
+système lancés par le paquet n'héritent pas de ses bibliothèques. Ce test attrape ce que les tests
+du code source ne voient pas : ce qui tient à l'empaquetage.
 
     xvfb-run -a python packaging/verifier_paquet_linux.py dist/Correcteur/correcteur
 """
@@ -22,9 +23,33 @@ TEXT = "Je vais a la plage , et ecole est fermée."
 EXPECTED = "Je vais à la plage, et école est fermée."
 
 
+def child_environment_is_clean(exe: Path, env: dict[str, str]) -> bool:
+    """Les programmes du système lancés par le paquet (ici gsettings, remplacé par un faux qui note son
+    environnement) ne doivent pas hériter des bibliothèques du paquet : sous Debian 13, gsettings échouait."""
+    tools = Path(tempfile.mkdtemp(prefix="correcteur-outils-"))
+    log = tools / "gsettings.log"
+    fake = tools / "gsettings"
+    fake.write_text('#!/bin/sh\necho "LD_LIBRARY_PATH=${LD_LIBRARY_PATH-}" >> "%s"\n'
+                    '[ "$1" = get ] && echo "@as []"\nexit 0\n' % log, encoding="utf-8")
+    fake.chmod(0o755)
+    out = subprocess.run([str(exe), "raccourcis-gnome"], env=dict(env, PATH=f"{tools}:{env['PATH']}"),
+                         capture_output=True, text=True)
+    seen = log.read_text(encoding="utf-8") if log.exists() else ""
+    print(f"raccourcis-gnome : {out.stdout.strip() or out.stderr.strip()}")
+    if out.returncode != 0 or not seen:
+        print("gsettings n'a pas été appelé correctement.")
+        return False
+    if "_internal" in seen:
+        print("gsettings a hérité des bibliothèques du paquet :\n" + seen)
+        return False
+    return True
+
+
 def main(exe: Path) -> int:
     home = tempfile.mkdtemp(prefix="correcteur-paquet-")
     env = dict(os.environ, CORRECTEUR_HOME=home, XDG_SESSION_TYPE="x11", QT_QPA_PLATFORM="xcb")
+    if not child_environment_is_clean(exe, env):
+        return 1
     os.environ["CORRECTEUR_HOME"] = home
     sys.path.insert(0, str(ROOT / "src"))
     from correcteur.config import SettingsStore

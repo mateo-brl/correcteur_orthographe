@@ -69,6 +69,8 @@ if [ "$session" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
         *GNOME*|*gnome*)
             if "$BIN/correcteur" raccourcis-gnome >/dev/null 2>&1; then
                 info "Raccourcis GNOME créés : Ctrl+Alt+C (vérifier) et Ctrl+Alt+X (correction express)"
+            else
+                warn "Raccourcis GNOME non créés : lancez « correcteur raccourcis-gnome » pour voir l'erreur."
             fi ;;
         *) warn "Wayland : créez deux raccourcis dans les paramètres du bureau : « correcteur selection » et « correcteur express »." ;;
     esac

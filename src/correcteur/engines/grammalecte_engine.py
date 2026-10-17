@@ -52,6 +52,38 @@ _CATEGORY_BY_TYPE = {
 _import_lock = threading.Lock()
 
 
+def _case_shape(word: str) -> str:
+    if len(word) > 1 and word.isupper():
+        return "upper"
+    if word[1:] != word[1:].lower():
+        return "mixed"  # « VIe », « McDo »
+    return "title" if word[:1].isupper() else "lower"
+
+
+def rank_spelling(word: str, suggestions: tuple[str, ...]) -> tuple[str, ...]:
+    """Reclasse les suggestions d'orthographe de Grammalecte.
+
+    Grammalecte les trie par distance au mot tapé puis, à distance égale, par ordre alphabétique, majuscules
+    d'abord : « vien » donnait « VIe, VIes, Vienne, vie, vienne, viens… ». On garde sa distance et son ordre,
+    mais une majuscule absente du mot tapé envoie la suggestion en fin de liste, et, à distance égale, un mot
+    qui complète celui tapé (« viens » : lettre oubliée à la fin) passe devant, le plus court d'abord."""
+    try:
+        from grammalecte.graphspell import str_transform as st
+    except ImportError:
+        return suggestions
+    shape, simple = _case_shape(word), st.simplifyWord(word)
+
+    def key(item: tuple[int, str]):
+        index, sugg = item
+        # La distance que Grammalecte a utilisée pour son tri (SuggResult.addSugg).
+        distance = min(st.distanceDamerauLevenshteinX(word, sugg),
+                       st.distanceDamerauLevenshteinX(simple, st.simplifyWord(sugg))) + (" " in sugg)
+        added = len(sugg) - len(word) if sugg.casefold().startswith(word.casefold()) else 0
+        return _case_shape(sugg) != shape, distance, added <= 0, added, index
+
+    return tuple(s for _, s in sorted(enumerate(suggestions), key=key))
+
+
 def _imperfect_subjunctive_only(morphs: list[str]) -> bool:
     # Étiquettes Grammalecte : ":Sp" subjonctif présent, ":Sq" subjonctif imparfait.
     return bool(morphs) and all(":Sq" in m and ":Sp" not in m for m in morphs)
@@ -179,7 +211,8 @@ class GrammalecteEngine(Engine):
             word = err.get("sValue", "")
             found.append((
                 err["nStart"], err["nEnd"], f"Mot inconnu du dictionnaire : « {word} ».",
-                tuple(err.get("aSuggestions") or ()), Category.SPELLING, "grammalecte_orthographe", "",
+                rank_spelling(word, tuple(err.get("aSuggestions") or ())), Category.SPELLING,
+                "grammalecte_orthographe", "",
             ))
         self._cache[key] = found
         if len(self._cache) > self._cache_size:
