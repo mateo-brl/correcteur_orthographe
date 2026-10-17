@@ -72,6 +72,7 @@ class GeneralSettings:
     hotkey_autocorrect: str = DEFAULT_HOTKEY_AUTOCORRECT
     hotkeys_enabled: bool = True
     live_check: bool = True         # revérifier pendant la saisie dans la fenêtre
+    auto_correct: bool = True       # appliquer les corrections sûres à l'ouverture de la fenêtre
     accept_abbreviations: bool = True  # ne pas signaler stp, svp, rdv, mdr...
     autostart: bool = False
     theme: str = "auto"             # "auto", "clair", "sombre"

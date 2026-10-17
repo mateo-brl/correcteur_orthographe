@@ -77,7 +77,7 @@ def express_message(before: str, after: str, applied: int, remaining: int,
     summary = _plural(applied, "correction appliquée")
     if changes:
         summary += " : " + ", ".join(changes[:3]) + ("…" if len(changes) > 3 else ".")
-    lines = [summary if changes else summary + "."]
+    lines = [summary if changes else summary + ".", "Ctrl+Z dans l'application pour annuler."]
     if remaining:
         lines.append(f"{_plural(remaining, 'remarque')} à vérifier ({check_hotkey}).")
     lines += failures
@@ -111,6 +111,7 @@ class Toast(QLabel):
 class Controller(QObject):
     command = Signal(str, str)            # commandes venant des raccourcis ou de l'IPC (autres threads)
     expressDone = Signal(object, object)  # (capture, (texte, appliquées, restantes, résultat) ou exception)
+    captured = Signal(str, object)        # (commande, capture) : sélection lue dans un fil de travail
 
     def __init__(self, app: QApplication, startup: bool = False) -> None:
         super().__init__()
@@ -142,6 +143,8 @@ class Controller(QObject):
 
         self.command.connect(self._on_command, Qt.ConnectionType.QueuedConnection)
         self.expressDone.connect(self._express_done, Qt.ConnectionType.QueuedConnection)
+        self.captured.connect(self._on_captured, Qt.ConnectionType.QueuedConnection)
+        self._capturing = False
 
         self.tray = None
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -244,13 +247,10 @@ class Controller(QObject):
 
     def _on_command(self, command: str, data: str) -> None:
         if command == "verifier-selection":
-            capture = self.bridge.capture()
-            self.window.open_with(capture.text, capture)
-            if not capture.text:
-                self.release_capture(capture)
-                self.window.capture = None
+            self._capture_for(command)
         elif command == "correction-express":
-            self._express()
+            if not self._busy_express:
+                self._capture_for(command)
         elif command == "presse-papiers":
             self.window.open_with(self.bridge.clipboard_text(), None)
         elif command == "ouvrir":
@@ -263,13 +263,40 @@ class Controller(QObject):
         elif command == "quitter":
             self.quit()
 
-    def _express(self) -> None:
-        if self._busy_express:
+    def _capture_for(self, command: str) -> None:
+        """Lit la sélection hors du fil de l'interface quand c'est possible (plusieurs secondes sous Wayland
+        quand rien n'est sélectionné), puis continue dans ce fil (_on_captured)."""
+        if self._capturing:
             return
-        capture = self.bridge.capture()
+        self._capturing = True
+        if not self.bridge.capture_in_thread:
+            self._on_captured(command, self._safe_capture())
+            return
+        threading.Thread(target=lambda: self.captured.emit(command, self._safe_capture()),
+                         name="capture", daemon=True).start()
+
+    def _safe_capture(self) -> Capture:
+        try:
+            return self.bridge.capture()
+        except Exception:
+            log.exception("Lecture de la sélection impossible")
+            return Capture("")
+
+    def _on_captured(self, command: str, capture: Capture) -> None:
+        self._capturing = False
         if not capture.text.strip():
+            # Pas de fenêtre vide sans explication : l'utilisateur sait tout de suite quoi faire.
             self.release_capture(capture)
-            self.notify("Aucun texte sélectionné.")
+            self.notify("Aucun texte sélectionné : sélectionnez un texte, puis recommencez.")
+            return
+        if command == "verifier-selection":
+            self.window.open_with(capture.text, capture)
+        else:
+            self._express(capture)
+
+    def _express(self, capture: Capture) -> None:
+        if self._busy_express:
+            self.release_capture(capture)
             return
         self._busy_express = True
 

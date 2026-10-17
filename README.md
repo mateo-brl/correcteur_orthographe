@@ -134,13 +134,17 @@ powershell -ExecutionPolicy Bypass -File scripts\installer-windows.ps1   # Windo
 | <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>C</kbd> | Ouvre la fenêtre de correction sur le texte sélectionné |
 | <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>X</kbd> | Correction express : corrige directement le texte sélectionné |
 
+À l'ouverture de la fenêtre, dès que les moteurs ont répondu, les corrections sûres sont appliquées d'office et
+surlignées (un seul <kbd>Ctrl</kbd> + <kbd>Z</kbd> les annule). Les fautes douteuses restent soulignées, à corriger
+d'un clic. Ce comportement se coupe dans les paramètres (« Corriger automatiquement les fautes sûres »).
+
 Dans la fenêtre :
 
 | Action | Effet |
 |---|---|
 | Clic sur un mot souligné | Suggestions, *Ignorer*, *Ajouter au dictionnaire* |
 | Bouton *Corrections sûres* | Applique d'un coup tout ce qui est confirmé (un seul <kbd>Ctrl</kbd> + <kbd>Z</kbd> pour annuler) |
-| <kbd>Ctrl</kbd> + <kbd>Entrée</kbd> | Remplace le texte dans l'application d'origine |
+| <kbd>Ctrl</kbd> + <kbd>Entrée</kbd> ou *Remplacer* | Remplace le texte dans l'application d'origine. Avant la fin des vérifications, attend les moteurs et applique les corrections sûres ; un texte inchangé n'est jamais recollé |
 | <kbd>F8</kbd> / <kbd>Maj</kbd> + <kbd>F8</kbd> | Faute suivante / précédente |
 | <kbd>Alt</kbd> + <kbd>1</kbd> … <kbd>5</kbd> | Applique la suggestion n° 1 à 5 de la faute sélectionnée (ou sous le curseur) et passe à la suivante |
 | <kbd>Échap</kbd> | Ferme la fenêtre et rend le presse-papiers d'origine |

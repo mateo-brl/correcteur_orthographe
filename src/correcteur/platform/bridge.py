@@ -24,6 +24,13 @@ _RESTORE_DELAY_MS = 1200
 _COPY_FAILED = "Copie du texte corrigé impossible (presse-papiers inaccessible) : rien n'a été collé."
 
 
+def _clipboard_marker() -> str:
+    """Contenu unique mis dans le presse-papiers juste avant un Ctrl+C simulé. Comparer au contenu d'avant ne
+    suffit pas : si l'utilisateur vient de copier le texte qu'il a sélectionné, la copie ne change rien et la
+    sélection passerait pour vide (« Aucun texte sélectionné »)."""
+    return f"\u2063correcteur {time.monotonic_ns()}"
+
+
 def _qt_set_clipboard(text: str) -> bool:
     """Presse-papiers via Qt, relu pour vérifier que l'écriture a pris."""
     from PySide6.QtGui import QGuiApplication
@@ -59,6 +66,10 @@ class Bridge:
         pass
 
     # sélection
+    # La capture peut tourner hors du fil de l'interface (elle dure jusqu'à quelques secondes sous Wayland) :
+    # vrai tant qu'elle n'utilise pas le presse-papiers de Qt, réservé à ce fil.
+    capture_in_thread = False
+
     def capture(self) -> Capture:
         return Capture("")
 
@@ -90,6 +101,7 @@ class Bridge:
 
 class WindowsBridge(Bridge):
     name = "windows"
+    capture_in_thread = True
 
     def __init__(self, defer: Defer | None = None) -> None:
         super().__init__(defer)
@@ -196,6 +208,14 @@ def xtest_key(letter: str):
 
 class X11Bridge(Bridge):
     name = "x11"
+
+    @property
+    def capture_in_thread(self) -> bool:  # type: ignore[override]
+        try:
+            import correcteur.platform.x11_selection  # noqa: F401  (sinon : repli sur le presse-papiers de Qt)
+        except ImportError:
+            return False
+        return True
 
     def __init__(self, defer: Defer | None = None) -> None:
         super().__init__(defer)
@@ -336,23 +356,25 @@ class X11Bridge(Bridge):
         text = self._read("PRIMARY") or ""
         if text.strip():
             return Capture(text, target=target, from_selection=True)
-        # Rien dans la sélection primaire : Ctrl+C simulé.
-        saved = self._read("CLIPBOARD")
+        # Rien dans la sélection primaire : Ctrl+C simulé, après avoir marqué le presse-papiers.
+        saved = self._read("CLIPBOARD") or ""
+        marker = _clipboard_marker()
+        before = marker if self._write(marker) else saved
         time.sleep(0.2)
         try:
             self._send_ctrl("c")
         except Exception:
-            return Capture("", target=target)
+            return Capture("", target=target, saved_clipboard=saved, clipboard_touched=before == marker)
         deadline = time.monotonic() + 0.8
-        text = saved
+        text = before
         while time.monotonic() < deadline:
             time.sleep(0.04)
             text = self._read("CLIPBOARD")
-            if text != saved:
+            if text != before:
                 break
-        changed = bool(text) and text != saved
+        changed = bool(text) and text != before
         return Capture(text if changed else "", target=target, from_selection=changed,
-                       saved_clipboard=saved, clipboard_touched=changed)
+                       saved_clipboard=saved, clipboard_touched=changed or before == marker)
 
     def release(self, capture: Capture) -> None:
         if capture.clipboard_touched and capture.saved_clipboard is not None:
@@ -399,6 +421,7 @@ class WaylandBridge(Bridge):
     fait avec wtype ou ydotool s'ils sont installés."""
 
     name = "wayland"
+    capture_in_thread = True  # wl-paste, wtype, ydotool : des programmes externes
 
     def hotkeys_supported(self) -> tuple[bool, str]:
         return False, ("Sous Wayland, le raccourci se crée dans les paramètres du bureau avec la commande "
@@ -451,16 +474,19 @@ class WaylandBridge(Bridge):
         text = self._paste(primary=True)
         if text.strip():
             return Capture(text, from_selection=True)
+        # Ctrl+C simulé, après avoir marqué le presse-papiers (voir _clipboard_marker).
         saved = self._paste(primary=False)
+        marker = _clipboard_marker()
+        before = marker if self._set_clipboard(marker) else saved
         time.sleep(0.2)
         if self._send_ctrl("c"):
             deadline = time.monotonic() + 0.6
             while time.monotonic() < deadline:
                 time.sleep(0.05)
                 text = self._paste(primary=False)
-                if text != saved:
+                if text and text != before:
                     return Capture(text, from_selection=True, saved_clipboard=saved, clipboard_touched=True)
-        return Capture("")
+        return Capture("", saved_clipboard=saved, clipboard_touched=before == marker)
 
     def release(self, capture: Capture) -> None:
         if capture.clipboard_touched and capture.saved_clipboard is not None:
