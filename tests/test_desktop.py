@@ -76,6 +76,22 @@ def test_capture_and_replace_selection(qapp, home):
     assert target.final_text() == "C'est un test"
 
 
+def test_capture_when_the_clipboard_already_holds_the_selection(qapp, home):
+    """Texte copié juste avant d'être sélectionné : le Ctrl+C simulé ne change pas le presse-papiers, et la
+    sélection passait pour vide (« Aucun texte sélectionné »). Le presse-papiers d'origine est rendu ensuite."""
+    from correcteur.platform.bridge import create_bridge
+
+    bridge = create_bridge(lambda ms, fn: None)
+    assert bridge.copy("Ces un test")
+    target = Target("Ces un test", 4000)
+    capture = bridge.capture()
+    assert capture.text == "Ces un test" and capture.from_selection
+    bridge.release(capture)
+    pump(qapp, 0.3)
+    assert bridge.clipboard_text() == "Ces un test"
+    target.final_text()
+
+
 def test_release_restores_clipboard(qapp, home):
     from correcteur.platform.bridge import create_bridge
 
@@ -161,7 +177,7 @@ def test_express_correction_end_to_end(qapp, home):
         target = Target("Je vais a la plage , et ecole est fermée.", 8000)
         controller.command.emit("correction-express", "")
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and (controller._busy_express or not controller.checker.engines):
+        while time.monotonic() < deadline and (controller._capturing or controller._busy_express or not controller.checker.engines):
             qapp.processEvents()
             time.sleep(0.02)
         pump(qapp, 1.5)

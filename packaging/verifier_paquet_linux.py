@@ -1,7 +1,8 @@
 """Vérifie le paquet Linux construit comme le ferait un utilisateur, sur un écran X11 (Xvfb en CI).
 
 L'application empaquetée est lancée, une fenêtre contient un texte sélectionné, on appuie sur
-Ctrl+Alt+X et la fenêtre doit contenir le texte corrigé. Avant, on vérifie que les programmes du
+Ctrl+Alt+X et la fenêtre doit contenir le texte corrigé ; puis Ctrl+Alt+C et Ctrl+Entrée, qui doivent
+donner le même résultat grâce à la correction automatique de la fenêtre. Avant, on vérifie que les programmes du
 système lancés par le paquet n'héritent pas de ses bibliothèques. Ce test attrape ce que les tests
 du code source ne voient pas : ce qui tient à l'empaquetage.
 
@@ -92,25 +93,41 @@ def main(exe: Path) -> int:
         print(subprocess.run([str(exe), "diagnostic"], env=env, capture_output=True, text=True).stdout)
         time.sleep(2)  # chargement de Grammalecte
 
-        target = subprocess.Popen([sys.executable, str(TARGET), TEXT, "10000"], env=env,
-                                  stdout=subprocess.PIPE, text=True, encoding="utf-8")
-        assert target.stdout.readline().strip() == "PRET"
-        time.sleep(1)
         from pynput.keyboard import Controller, Key
 
         from correcteur.platform.bridge import xtest_key
 
-        keyboard, x = Controller(), xtest_key("x")  # vraie frappe : le raccourci global doit la voir
-        with keyboard.pressed(Key.ctrl), keyboard.pressed(Key.alt):
-            keyboard.press(x)
-            keyboard.release(x)
-        out = target.communicate(timeout=30)[0]
-        final = next(line for line in out.splitlines() if line.startswith("FINAL:"))[len("FINAL:"):]
-        print(f"Avant : {TEXT}\nAprès : {final}")
-        if final != EXPECTED:
-            print(f"Attendu : {EXPECTED}")
-            return 1
-        print("Paquet Linux : correction express par Ctrl+Alt+X vérifiée.")
+        keyboard = Controller()
+
+        def press(*modifiers, key):
+            """Vraie frappe (XTEST) : le raccourci global doit la voir."""
+            for modifier in modifiers:
+                keyboard.press(modifier)
+            keyboard.press(key)
+            keyboard.release(key)
+            for modifier in reversed(modifiers):
+                keyboard.release(modifier)
+
+        # 1. Correction express : Ctrl+Alt+X remplace la sélection par le texte corrigé.
+        # 2. Fenêtre : Ctrl+Alt+C l'ouvre, les corrections sûres s'y appliquent seules, Ctrl+Entrée remplace.
+        steps = [("correction express par Ctrl+Alt+X", [((Key.ctrl, Key.alt), xtest_key("x"), 0)]),
+                 ("fenêtre par Ctrl+Alt+C puis Ctrl+Entrée",
+                  [((Key.ctrl, Key.alt), xtest_key("c"), 4), ((Key.ctrl,), Key.enter, 0)])]
+        for label, keys in steps:
+            target = subprocess.Popen([sys.executable, str(TARGET), TEXT, "12000"], env=env,
+                                      stdout=subprocess.PIPE, text=True, encoding="utf-8")
+            assert target.stdout.readline().strip() == "PRET"
+            time.sleep(1)
+            for modifiers, key, wait in keys:
+                press(*modifiers, key=key)
+                time.sleep(wait)
+            out = target.communicate(timeout=30)[0]
+            final = next(line for line in out.splitlines() if line.startswith("FINAL:"))[len("FINAL:"):]
+            print(f"{label}\n  Avant : {TEXT}\n  Après : {final}")
+            if final != EXPECTED:
+                print(f"  Attendu : {EXPECTED}")
+                return 1
+        print("Paquet Linux : correction express et fenêtre de correction vérifiées.")
         return 0
     finally:
         subprocess.run([str(exe), "quitter"], env=env, capture_output=True)

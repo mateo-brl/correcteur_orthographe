@@ -3,10 +3,11 @@ l'application d'origine."""
 
 from __future__ import annotations
 
+import bisect
 import html
 import logging
 import threading
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING, Collection, Iterable
 
 from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QCursor, QGuiApplication, QKeySequence, QShortcut, QTextCursor
@@ -23,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from correcteur.checker import Checker, split_confident
+from correcteur.checker import Checker
 from correcteur.models import ENGINE_LABELS, Category, CheckResult, EngineStatus, Issue
 from correcteur.platform.keys import display as hotkey_display
 from correcteur.textutils import diff_edits
@@ -39,10 +40,17 @@ _FAST_ENGINES = ("grammalecte",)   # moteurs locaux instantanés : relancés pen
 _FAST_DELAY_MS = 350
 _FULL_DELAY_MS = 1300
 _MAX_CARDS = 150
+_COPY_FAILED = "Copie impossible : le presse-papiers est inaccessible."
 
 
-def shift_issues(issues: list[Issue], old: str, new: str) -> list[Issue]:
-    """Recale les fautes après une modification du texte (sans revérifier)."""
+def shift_issues(issues: list[Issue], old: str, new: str, applied: Collection[int] = ()) -> list[Issue]:
+    """Recale les fautes après une modification du texte (sans revérifier).
+
+    `applied` : identifiants des fautes dont la correction vient d'être insérée. Elles disparaissent même
+    quand l'insertion ne fait que toucher leur bord (« enfant » -> « enfants » ajoute un « s » juste après
+    la faute) : gardée, la faute resterait soulignée et un second Alt+1 donnerait « enfantss »."""
+    if applied:
+        issues = [i for i in issues if i.uid not in applied]
     if old == new:
         return issues
     prefix = 0
@@ -63,14 +71,84 @@ def shift_issues(issues: list[Issue], old: str, new: str) -> list[Issue]:
     return kept
 
 
+def corrected_uids(issues: list[Issue], edits: list[tuple[int, int, str]]) -> set[int]:
+    """Identifiants des fautes que chevauchent des remplacements (début, fin, texte) triés et disjoints,
+    comme ceux de diff_edits : les fautes que ces remplacements corrigent."""
+    probes = [Issue(start, end, "", [], Category.TYPOGRAPHY, "", "") for start, end, _ in edits]
+    ends = [probe.end for probe in probes]
+    uids = set()
+    for issue in issues:
+        # Disjoints et triés : seuls les premiers remplacements qui finissent après le début de la faute comptent.
+        k = bisect.bisect_left(ends, issue.start)
+        while k < len(probes) and probes[k].start <= issue.end:
+            if probes[k].overlaps(issue):
+                uids.add(issue.uid)
+                break
+            k += 1
+    return uids
+
+
+def count_sure(issues: list[Issue]) -> int:
+    """Nombre de corrections sûres applicables ensemble, comme len(split_confident(issues)[0]) pour des
+    fautes triées par position, mais en un seul passage : split_confident compare chaque faute à toutes
+    les précédentes (1 200 fautes : 0,3 s à chaque frappe). Les corrections retenues ne se chevauchent
+    pas : une faute en chevauche une si et seulement si elle chevauche celle qui finit le plus loin."""
+    count = 0
+    far = -1            # fin la plus lointaine des corrections retenues
+    far_empty = False   # une correction vide (insertion) finit à cette position
+    for issue in sorted(issues, key=lambda i: (i.start, i.end)):
+        if not issue.confident:
+            continue
+        if issue.start == issue.end:
+            # Insertion : touche aussi une correction qui finit à sa position (voir Issue.overlaps).
+            if far >= issue.start:
+                continue
+            far, far_empty = issue.start, True
+        else:
+            if far > issue.start or (far == issue.start and far_empty):
+                continue
+            far, far_empty = issue.end, False
+        count += 1
+    return count
+
+
+def card_key(issue: Issue, text: str) -> tuple:
+    """Tout ce qu'affiche la carte d'une faute : tant que rien n'a changé, la carte existante sert."""
+    return (issue.uid, issue.original(text), issue.category, issue.sources, issue.confident,
+            tuple(issue.replacements[:5]), issue.message, issue.url, issue.rules)
+
+
 def can_ignore_rule(issue: Issue) -> bool:
     """L'orthographe tient en une seule règle par moteur : la désactiver couperait toute
     la vérification des mots. Pour un mot correct, c'est le dictionnaire qui convient."""
     return issue.category is not Category.SPELLING
 
 
+class _Superseded(Exception):
+    """Vérification rendue inutile par une demande plus récente."""
+
+
+class _Job:
+    def __init__(self, generation: int, text: str, only: frozenset[str] | None) -> None:
+        self.generation = generation
+        self.text = text
+        self.only = only
+        self.superseded = False
+
+    def covers(self, older: "_Job") -> bool:
+        """Les résultats de cette demande rendent inutiles ceux de `older` : autre texte, ou mêmes moteurs.
+        Une vérification rapide (moteurs locaux) ne remplace pas une complète du même texte."""
+        return self.text != older.text or self.only is None or (older.only is not None and older.only <= self.only)
+
+
 class CheckRunner(QObject):
-    """Exécute les vérifications en arrière-plan ; ne garde que la dernière demande en attente."""
+    """Exécute les vérifications en arrière-plan, chacune dans son propre fil : une vérification lente
+    (LanguageTool, plusieurs secondes, davantage quand le quota est atteint) ne retarde jamais la suivante,
+    et chaque moteur publie ses résultats dès qu'il a fini (Grammalecte, local, sans attendre les autres).
+
+    La dernière demande gagne : une vérification rendue inutile par une demande plus récente ne publie plus
+    rien et s'arrête à la réponse suivante de ses moteurs. Un moteur lent finit quand même en arrière-plan
+    et garde sa réponse en cache pour la fois suivante."""
 
     updated = Signal(int, object)  # (génération, CheckResult)
 
@@ -79,35 +157,42 @@ class CheckRunner(QObject):
         self.checker = checker
         self._lock = threading.Lock()
         self._stopped = False
-        self._busy = False
-        self._pending: tuple | None = None
+        self._jobs: list[_Job] = []
 
     def request(self, generation: int, text: str, only: Iterable[str] | None = None) -> None:
-        job = (generation, text, tuple(only) if only is not None else None)
+        job = _Job(generation, text, frozenset(only) if only is not None else None)
         with self._lock:
             if self._stopped:
                 return
-            if self._busy:
-                self._pending = job
-                return
-            self._busy = True
-        threading.Thread(target=self._loop, args=(job,), name="verification", daemon=True).start()
+            for older in self._jobs:
+                older.superseded = older.superseded or job.covers(older)
+            self._jobs = [j for j in self._jobs if not j.superseded] + [job]
+        threading.Thread(target=self._run, args=(job,), name="verification", daemon=True).start()
 
-    def _loop(self, job: tuple) -> None:
-        while job is not None:
-            generation, text, only = job
-            try:
-                self.checker.check(text, on_update=lambda r, g=generation: self.updated.emit(g, r), only=only)
-            except Exception:
-                log.exception("Vérification impossible")
+    def _run(self, job: _Job) -> None:
+        def publish(result: CheckResult) -> None:
             with self._lock:
-                job, self._pending = (None if self._stopped else self._pending), None
-                self._busy = job is not None
+                if self._stopped or job.superseded:
+                    raise _Superseded  # interrompt Checker.check : inutile d'attendre les autres moteurs
+            self.updated.emit(job.generation, result)
+
+        try:
+            self.checker.check(job.text, on_update=publish, only=job.only)
+        except _Superseded:
+            pass
+        except Exception:
+            log.exception("Vérification impossible")
+        finally:
+            with self._lock:
+                if job in self._jobs:
+                    self._jobs.remove(job)
 
     def shutdown(self) -> None:
         with self._lock:
             self._stopped = True
-            self._pending = None
+            for job in self._jobs:
+                job.superseded = True
+            self._jobs = []
 
 
 class IssueCard(QFrame):
@@ -116,6 +201,8 @@ class IssueCard(QFrame):
     def __init__(self, window: "CorrectionWindow", issue: Issue, text: str, theme: Theme) -> None:
         super().__init__()
         self.uid = issue.uid
+        self.key = card_key(issue, text)
+        self._selected = False
         uid = issue.uid
         self.setObjectName("card")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -198,6 +285,9 @@ class IssueCard(QFrame):
         layout.addLayout(actions)
 
     def set_selected(self, selected: bool) -> None:
+        if selected == self._selected:
+            return  # repolir chaque carte à chaque frappe coûte cher sur un long texte
+        self._selected = selected
         self.setProperty("selected", selected)
         self.style().unpolish(self)
         self.style().polish(self)
@@ -228,9 +318,16 @@ class CorrectionWindow(QWidget):
         self._generation = 0
         self._selected: Issue | None = None
         self._cards: list[IssueCard] = []
-        self._card_uids: list[tuple] = []
+        self._applying: set[int] = set()  # fautes dont la correction est en train d'être insérée
         self._closing_handled = False
         self._auto_running = False
+        # Correction automatique (réglage « Corriger automatiquement ») : à chaque ouverture, une fois la
+        # première vérification finie, les corrections sûres sont appliquées ; « Remplacer » attend ce moment.
+        self._original = ""            # texte capturé à l'ouverture
+        self._ready = True             # première vérification et correction automatique terminées
+        self._auto_pending = False     # correction automatique encore à faire pour cette ouverture
+        self._auto_kind = False        # la correction en cours est la correction automatique
+        self._replace_pending = False  # « Remplacer » demandé avant d'être prêt
 
         self.setWindowTitle("Correcteur")
         self.resize(640, 540)
@@ -281,6 +378,14 @@ class CorrectionWindow(QWidget):
         self.notice.hide()
         root.addWidget(self.notice)
 
+        # Bilan de la correction automatique, et ce qui reste à faire.
+        self.auto_note = QLabel("")
+        self.auto_note.setObjectName("notice")
+        self.auto_note.setWordWrap(True)
+        self.auto_note.setTextFormat(Qt.TextFormat.RichText)
+        self.auto_note.hide()
+        root.addWidget(self.auto_note)
+
         self.editor = CheckEditor(self.theme)
         self.editor.setPlaceholderText(
             "Sélectionnez du texte dans n'importe quelle application puis utilisez le raccourci, "
@@ -315,6 +420,11 @@ class CorrectionWindow(QWidget):
         self.placeholder.setTextFormat(Qt.TextFormat.PlainText)
         self.placeholder.hide()
         self.list_layout.addWidget(self.placeholder)
+        # Fautes au-delà de _MAX_CARDS : toujours après les cartes, qui s'insèrent avant lui.
+        self.more = QLabel("")
+        self.more.setObjectName("muted")
+        self.more.hide()
+        self.list_layout.addWidget(self.more)
         self.list_layout.addStretch(1)
         self.scroll.setWidget(self.list_host)
         root.addWidget(self.scroll, 4)
@@ -378,21 +488,28 @@ class CorrectionWindow(QWidget):
         self._closing_handled = False
         self._issues = []
         self._statuses = {}
+        # Vérification de l'ancien texte peut-être encore en cours (fenêtre fermée avant la réponse de
+        # LanguageTool) : sa réponse sera ignorée, l'indicateur « en cours » tournerait sans fin.
+        self._running = set()
         self._no_engine = False
         self._selected = None
         self.editor.blockSignals(True)
         self.editor.setPlainText(text)
         self.editor.blockSignals(False)
-        self._text = self.editor.toPlainText()
+        self._text = self.editor.plain_text()
+        self._original = self._text
         self._generation += 1
+        self.editor.clear_marks()
         self.editor.set_issues([], self._text)
+        self._auto_pending = bool(self.controller.settings.general.auto_correct and text.strip())
+        self._ready = not text.strip()
+        self._replace_pending = False
+        self.auto_note.hide()
         cursor = self.editor.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.editor.setTextCursor(cursor)
         has_target = capture is not None and capture.from_selection
-        self.replace_btn.setText("Remplacer" if has_target else "Copier et fermer")
-        self.replace_btn.setToolTip("Remplace le texte sélectionné dans l'application d'origine (Ctrl+Entrée)."
-                                    if has_target else "Copie le texte corrigé et ferme la fenêtre (Ctrl+Entrée).")
+        self._update_replace_button()
         self.hint.setText("Ctrl+Entrée : " + ("remplacer" if has_target else "copier") + " · Échap : fermer")
         self._rebuild_cards(force=True)
         self._position_near_cursor()
@@ -428,7 +545,10 @@ class CorrectionWindow(QWidget):
         engines = [e.name for e in self.checker.active_engines(self._text, self.checker.resolve_language(self._text), only)]
         if only is None:
             self._no_engine = not engines
-        self._running.update(engines)
+            # Les vérifications précédentes ne publient plus rien (CheckRunner) : seuls ces moteurs sont attendus.
+            self._running = set(engines)
+        else:
+            self._running.update(engines)
         self._update_status()
         self.runner.request(self._generation, self._text, only)
 
@@ -437,14 +557,23 @@ class CorrectionWindow(QWidget):
         self._start_check()
 
     def _on_text_changed(self) -> None:
-        new = self.editor.toPlainText()
-        self._issues = shift_issues(self._issues, self._text, new)
+        if not self._applying:
+            # Modification de l'utilisateur (frappe, Ctrl+Z) : le surlignage des corrections automatiques
+            # ne correspondrait plus, et il n'y a plus lieu de corriger d'office.
+            self.editor.clear_marks()
+            self._auto_pending = False
+        new = self.editor.plain_text()
+        self._issues = shift_issues(self._issues, self._text, new, self._applying)
         if self._selected is not None:
             self._selected = self._by_uid(self._selected.uid)
         self._text = new
         self._generation += 1
+        live = self.controller.settings.general.live_check
+        if not live:
+            # Aucune revérification ne suivra, et les réponses attendues concernent l'ancien texte.
+            self._running.clear()
         self._refresh_issues()
-        if self.controller.settings.general.live_check:
+        if live:
             self._fast_timer.start()
             self._full_timer.start()
 
@@ -468,6 +597,24 @@ class CorrectionWindow(QWidget):
             key = (self._selected.start, self._selected.end, self._selected.rule_id)
             self._selected = next((i for i in self._issues if (i.start, i.end, i.rule_id) == key), None)
         self._refresh_issues()
+        if not self._running and not self._ready:
+            self._first_check_done()
+
+    def _first_check_done(self) -> None:
+        """Première vérification de cette ouverture terminée (tous les moteurs ont répondu ou échoué)."""
+        if self._auto_pending and self._text == self._original and count_sure(self._issues):
+            self._auto_pending = False
+            self.apply_confident(auto=True)  # prêt une fois les corrections appliquées (_on_auto_done)
+            return
+        self._auto_pending = False
+        self._set_ready()
+
+    def _set_ready(self) -> None:
+        self._ready = True
+        self._update_replace_button()
+        if self._replace_pending:
+            self._replace_pending = False
+            self.replace_text()
 
     def _by_uid(self, uid: int) -> Issue | None:
         return next((i for i in self._issues if i.uid == uid), None)
@@ -479,38 +626,42 @@ class CorrectionWindow(QWidget):
         self._update_status()
 
     def _rebuild_cards(self, force: bool = False) -> None:
-        uids = [(i.uid, i.sources, i.confident, tuple(i.replacements[:5]), i.message) for i in self._issues[:_MAX_CARDS]]
-        if not force and uids and uids == self._card_uids:
+        """Met la liste à jour en ne construisant que les cartes des fautes nouvelles ou modifiées : une
+        frappe dans un long texte ne change qu'une faute, et reconstruire les 150 cartes figeait la fenêtre.
+        `force` reconstruit tout (changement de thème : les couleurs sont dans chaque carte)."""
+        shown = self._issues[:_MAX_CARDS]
+        keys = [card_key(i, self._text) for i in shown]
+        hidden = len(self._issues) - len(shown)
+        self.more.setText(f"… et {hidden} autres (corrigez les premières pour voir la suite)." if hidden > 0 else "")
+        self.more.setVisible(hidden > 0)
+        if not force and keys == [c.key for c in self._cards]:
             self._sync_card_selection()
             self._update_summary()
             return
-        self._card_uids = uids
-        for card in self._cards:
-            card.setParent(None)
-            card.deleteLater()
-        self._cards = []
-        # Garde le texte d'état (premier élément) et le ressort (dernier).
-        while self.list_layout.count() > 2:
-            item = self.list_layout.takeAt(1)
-            if item.widget():
-                item.widget().deleteLater()
-        if not self._issues:
-            self._update_summary()
-            return
         self.list_host.setUpdatesEnabled(False)
-        for issue in self._issues[:_MAX_CARDS]:
-            card = IssueCard(self, issue, self._text, self.theme)
-            card.selected.connect(lambda uid: self._select(self._by_uid(uid)))
-            self.list_layout.insertWidget(self.list_layout.count() - 1, card)
-            # Visible tout de suite (sinon Qt attend le tour de boucle suivant) : la mise en page
-            # et le défilement vers la faute sélectionnée peuvent se faire immédiatement.
-            card.show()
-            self._cards.append(card)
-        if len(self._issues) > _MAX_CARDS:
-            more = QLabel(f"… et {len(self._issues) - _MAX_CARDS} autres (corrigez les premières pour voir la suite).")
-            more.setObjectName("muted")
-            self.list_layout.insertWidget(self.list_layout.count() - 1, more)
-            more.show()
+        reusable = {} if force else {c.key: c for c in self._cards}
+        cards = []
+        for key, issue in zip(keys, shown):
+            card = reusable.pop(key, None)
+            if card is None:
+                card = IssueCard(self, issue, self._text, self.theme)
+                card.selected.connect(lambda uid: self._select(self._by_uid(uid)))
+            cards.append(card)
+        kept = set(map(id, cards))
+        for card in self._cards:
+            if id(card) not in kept:
+                self.list_layout.removeWidget(card)
+                card.hide()
+                card.deleteLater()
+        # Cartes dans l'ordre des fautes, entre le texte d'état (position 0) et la mention des suivantes.
+        for index, card in enumerate(cards, start=1):
+            if self.list_layout.indexOf(card) != index:
+                self.list_layout.removeWidget(card)
+                self.list_layout.insertWidget(index, card)
+                # Visible tout de suite (sinon Qt attend le tour de boucle suivant) : la mise en page
+                # et le défilement vers la faute sélectionnée peuvent se faire immédiatement.
+                card.show()
+        self._cards = cards
         self.list_host.setUpdatesEnabled(True)
         self._sync_card_selection()
         self._update_summary()
@@ -534,9 +685,37 @@ class CorrectionWindow(QWidget):
         parts = [f"{n} {cat.label.lower()}" for cat, n in counts.items()]
         total = len(self._issues)
         self.summary.setText(f"{total} remarque{'s' if total > 1 else ''} : " + " · ".join(parts))
-        sure = len(split_confident(self._issues)[0])
+        sure = count_sure(self._issues)
         self.fix_sure.setText(f"Corrections sûres ({sure})")
         self.fix_sure.setEnabled(sure > 0)
+        self._update_replace_button()
+
+    def _update_replace_button(self) -> None:
+        """« Remplacer » ne renvoie jamais un texte inchangé : avec des corrections sûres, il les applique
+        d'abord (« Corriger et remplacer ») ; sans rien à corriger, il est désactivé."""
+        has_target = self.capture is not None and self.capture.from_selection
+        verb = "Remplacer" if has_target else "Copier et fermer"
+        unchanged = self._text == self._original
+        if self._replace_pending:
+            label, tip, enabled = "Vérification…", "Le texte sera remplacé dès la fin des vérifications.", False
+        elif not self._ready:
+            label, enabled = verb, True
+            tip = "Attend la fin des vérifications, applique les corrections sûres, puis " + (
+                "remplace le texte sélectionné (Ctrl+Entrée)." if has_target else "copie le texte (Ctrl+Entrée).")
+        elif unchanged and count_sure(self._issues):
+            label, enabled = ("Corriger et remplacer" if has_target else "Corriger et copier"), True
+            tip = "Applique les corrections sûres, puis " + (
+                "remplace le texte sélectionné (Ctrl+Entrée)." if has_target else "copie le texte (Ctrl+Entrée).")
+        elif unchanged:
+            label, enabled = verb, False
+            tip = "Le texte n'a pas changé : cliquez une suggestion pour l'appliquer."
+        else:
+            label, enabled = verb, True
+            tip = ("Remplace le texte sélectionné dans l'application d'origine (Ctrl+Entrée)." if has_target
+                   else "Copie le texte corrigé et ferme la fenêtre (Ctrl+Entrée).")
+        self.replace_btn.setText(label)
+        self.replace_btn.setToolTip(tip)
+        self.replace_btn.setEnabled(enabled)
 
     def _update_status(self) -> None:
         parts = []
@@ -668,14 +847,22 @@ class CorrectionWindow(QWidget):
             menu.addAction("Ne plus signaler cette règle", lambda: self.ignore_rule(issue))
 
     def _replace_range(self, edits: list[tuple[Issue, str]]) -> None:
+        applied = {issue.uid for issue, _ in edits}
         cursor = QTextCursor(self.editor.document())
-        cursor.beginEditBlock()
-        for issue, rep in sorted(edits, key=lambda e: e[0].start, reverse=True):
-            start, end = self.editor.qt_range(issue)
-            cursor.setPosition(start)
-            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
-            cursor.insertText(rep)
-        cursor.endEditBlock()
+        self._applying = applied  # lu par _on_text_changed, appelé à la fin du bloc d'édition
+        try:
+            cursor.beginEditBlock()
+            for issue, rep in sorted(edits, key=lambda e: e[0].start, reverse=True):
+                start, end = self.editor.qt_range(issue)
+                cursor.setPosition(start)
+                cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+                cursor.insertText(rep)
+            cursor.endEditBlock()
+        finally:
+            self._applying = set()
+        # Suggestion identique au texte : rien n'a changé, mais la faute est traitée.
+        if any(i.uid in applied for i in self._issues):
+            self._drop(lambda i: i.uid in applied)
 
     def apply(self, issue: Issue, replacement: str) -> None:
         self.apply_uid(issue.uid, replacement)
@@ -683,7 +870,7 @@ class CorrectionWindow(QWidget):
     def apply_uid(self, uid: int, replacement: str) -> None:
         issue = self._by_uid(uid)
         if issue is None:
-            return
+            return  # déjà corrigée (double-clic sur la suggestion, Alt+1 répété)
         self._replace_range([(issue, replacement)])
         # Passe à la faute suivante pour enchaîner les corrections au clavier.
         after = issue.start + len(replacement)
@@ -699,11 +886,13 @@ class CorrectionWindow(QWidget):
             return
         self.apply_uid(issue.uid, issue.replacements[number - 1])
 
-    def apply_confident(self) -> None:
-        """Corrections sûres, en plusieurs passes (voir Checker.autocorrect), en arrière-plan."""
+    def apply_confident(self, auto: bool = False) -> None:
+        """Corrections sûres, en plusieurs passes (voir Checker.autocorrect), en arrière-plan. `auto` : la
+        correction automatique de l'ouverture (bilan dans la fenêtre plutôt qu'en notification)."""
         if self._auto_running or not self._text.strip():
             return
         self._auto_running = True
+        self._auto_kind = auto
         before = self._text
         self.fix_sure.setEnabled(False)
         self.fix_sure.setText("Correction…")
@@ -720,19 +909,44 @@ class CorrectionWindow(QWidget):
 
     def _on_auto_done(self, before: str, after: str, count: int) -> None:
         self._auto_running = False
+        auto, self._auto_kind = self._auto_kind, False
         if before != self._text or after == before:
             self._update_summary()  # texte modifié entre-temps, ou rien à corriger
+            if not self._ready:
+                self._set_ready()
             return
         positions = PositionMap(before)
+        edits = diff_edits(before, after)
         cursor = QTextCursor(self.editor.document())
-        cursor.beginEditBlock()  # un seul Ctrl+Z annule tout
-        for start, end, rep in reversed(diff_edits(before, after)):
-            cursor.setPosition(positions.to_qt(start))
-            cursor.setPosition(positions.to_qt(end), QTextCursor.MoveMode.KeepAnchor)
-            cursor.insertText(rep)
-        cursor.endEditBlock()
+        # Fautes corrigées : retirées tout de suite, même quand la correction ne fait que les prolonger.
+        self._applying = corrected_uids(self._issues, edits)
+        try:
+            cursor.beginEditBlock()  # un seul Ctrl+Z annule tout
+            for start, end, rep in reversed(edits):
+                cursor.setPosition(positions.to_qt(start))
+                cursor.setPosition(positions.to_qt(end), QTextCursor.MoveMode.KeepAnchor)
+                cursor.insertText(rep)
+            cursor.endEditBlock()
+        finally:
+            self._applying = set()
+        # Passages corrigés, dans le nouveau texte : surlignés jusqu'à la prochaine modification.
+        ranges, delta = [], 0
+        for start, end, rep in edits:
+            ranges.append((start + delta, start + delta + len(rep)))
+            delta += len(rep) - (end - start)
+        self.editor.mark_ranges(ranges)
+        plural = "s" if count > 1 else ""
+        done = f"{count} correction{plural} sûre{plural} appliquée{plural}"
+        self.auto_note.setText(
+            f"<span style='color:{self.theme.ok}'>✓</span> " + html.escape(
+                (done + " automatiquement" if auto else done) + ", surlignée" + plural + " (Ctrl+Z pour annuler)."
+                + " Cliquez une suggestion pour corriger le reste.", quote=False))
+        self.auto_note.show()
         self._start_check()
-        self.controller.notify(f"{count} correction{'s' if count > 1 else ''} sûre{'s' if count > 1 else ''} appliquée{'s' if count > 1 else ''}.")
+        if not auto:
+            self.controller.notify(done + ".")
+        if not self._ready:
+            self._set_ready()
 
     def apply_all(self) -> None:
         taken: list[Issue] = []
@@ -787,19 +1001,47 @@ class CorrectionWindow(QWidget):
         QDesktopServices.openUrl(QUrl(url))
 
     def copy_text(self) -> None:
-        self.controller.copy_text(self.editor.toPlainText())
+        # Le contrôleur renvoie False quand le presse-papiers refuse le texte.
+        if self.controller.copy_text(self.editor.plain_text()) is False:
+            self.controller.notify(_COPY_FAILED, error=True)
+            return
         self.controller.notify("Texte copié dans le presse-papiers.")
 
     def replace_text(self) -> None:
-        text = self.editor.toPlainText()
+        if self._replace_pending:
+            return
+        if not self._ready or self._auto_running:
+            # Vérifications pas finies : on attend, on corrige, puis on remplace (voir _set_ready).
+            self._replace_pending = True
+            self._update_replace_button()
+            if self._ready:  # « Corrections sûres » en cours : _on_auto_done relancera le remplacement
+                self._ready = False
+            return
+        text = self.editor.plain_text()  # avec ses espaces insécables, que toPlainText() perd
+        if text == self._original:
+            if count_sure(self._issues):
+                # Rien n'a encore été corrigé : on applique les corrections sûres, puis on remplace.
+                self._replace_pending = True
+                self._ready = False
+                self._update_replace_button()
+                self.apply_confident(auto=True)
+                return
+            # Jamais de texte inchangé recollé sans le dire.
+            self.auto_note.setText(html.escape("Aucune correction à appliquer : le texte n'a pas changé. "
+                                               "Cliquez une suggestion pour l'appliquer.", quote=False))
+            self.auto_note.show()
+            self._update_replace_button()
+            return
         capture = self.capture
         self._closing_handled = True
         self.hide()
         if capture is not None and capture.from_selection:
             self.replaceRequested.emit(capture, text)
             self.finished.emit(capture, True)
+        elif self.controller.copy_text(text) is False:
+            self.controller.notify(_COPY_FAILED, error=True)
+            self.finished.emit(capture, False)
         else:
-            self.controller.copy_text(text)
             self.controller.notify("Texte corrigé copié : collez-le avec Ctrl+V.")
             self.finished.emit(capture, False)
         self.capture = None

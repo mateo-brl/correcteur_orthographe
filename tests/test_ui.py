@@ -13,6 +13,7 @@ from correcteur.config import PersonalDictionary, Settings  # noqa: E402
 from correcteur.models import Category, Issue  # noqa: E402
 from correcteur.ui.popup import shift_issues  # noqa: E402
 from test_checker import TEXT, FakeEngine, g_issues, lt_issues  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 
 
 class FakeController:
@@ -62,14 +63,16 @@ def wait_until(qapp, predicate, timeout=5.0):
 
 @pytest.fixture
 def make_window(qapp, home):
-    """make_window(grammalecte={...}, languagetool={...}) : arguments de FakeEngine pour chaque moteur."""
+    """make_window(grammalecte={...}, languagetool={...}) : arguments de FakeEngine pour chaque moteur.
+    La correction automatique à l'ouverture est coupée, sauf avec auto_correct=True."""
     from correcteur.ui.popup import CorrectionWindow
     from correcteur.ui.theme import LIGHT
 
     made = []
 
-    def make(**engines):
+    def make(auto_correct=False, **engines):
         settings = Settings()
+        settings.general.auto_correct = auto_correct
         dictionary = PersonalDictionary()
         checker = Checker(settings, dictionary, engines=[FakeEngine(settings, name, **kw) for name, kw in engines.items()])
         w = CorrectionWindow(checker, FakeController(settings, dictionary), LIGHT)
@@ -194,12 +197,14 @@ def test_live_recheck_after_typing(qapp, window):
 
 
 def test_replace_without_capture_copies(qapp, window):
+    """Texte inchangé avec des corrections sûres : « Corriger et copier » les applique d'abord."""
     open_and_wait(qapp, window)
+    assert window.replace_btn.text() == "Corriger et copier"
     finished = []
     window.finished.connect(lambda cap, replaced: finished.append(replaced))
     window.replace_text()
-    assert window.controller.copied[-1] == TEXT
-    assert finished == [False]
+    assert wait_until(qapp, lambda: finished == [False])
+    assert window.controller.copied[-1] == "Les résultats que j'ai obtenus sont bons et école ferme, fesait-il."
     assert not window.isVisible()
 
 
@@ -207,11 +212,27 @@ def test_replace_with_capture_emits_request(qapp, window):
     from correcteur.platform.bridge import Capture
 
     capture = Capture("Ces un test.", target=123, from_selection=True)
-    window.open_with(capture.text, capture)
+    open_and_wait(qapp, window, capture.text, capture)
     requested = []
     window.replaceRequested.connect(lambda cap, text: requested.append((cap, text)))
+    window.editor.setPlainText("C'est un test.")  # corrigé à la main
     window.replace_text()
-    assert requested == [(capture, "Ces un test.")]
+    assert requested == [(capture, "C'est un test.")]
+
+
+def test_unchanged_text_is_never_pasted_back(qapp, window):
+    """Rien de corrigé et rien de sûr à corriger : « Remplacer » ne recolle pas le texte d'origine (l'utilisateur
+    croyait que le remplacement ne marchait pas) ; il est désactivé et la fenêtre dit pourquoi."""
+    from correcteur.platform.bridge import Capture
+
+    capture = Capture("Ces un test.", target=123, from_selection=True)
+    open_and_wait(qapp, window, capture.text, capture)
+    requested = []
+    window.replaceRequested.connect(lambda cap, text: requested.append((cap, text)))
+    assert not window.replace_btn.isEnabled()
+    window.replace_text()  # Ctrl+Entrée
+    assert requested == [] and window.isVisible()
+    assert "Aucune correction" in window.auto_note.text()
 
 
 def test_escape_releases_capture(qapp, window):
@@ -246,11 +267,13 @@ def test_express_message_lists_changes_and_missing_engines():
     assert not error
     assert text.splitlines() == [
         "5 corrections appliquées : aller → allé, a → à, obtenu → obtenus…",
+        "Ctrl+Z dans l'application pour annuler.",
         "1 remarque à vérifier (Ctrl+Alt+C).",
         "LanguageTool a mis plus de 8 s à répondre.",
     ]
     # Une espace en trop n'a rien de lisible à montrer : seulement le nombre.
-    assert express_message("le  mail", "le mail", 1, 0, {}, "X") == ("1 correction appliquée.", False)
+    assert express_message("le  mail", "le mail", 1, 0, {}, "X") == (
+        "1 correction appliquée.\nCtrl+Z dans l'application pour annuler.", False)
     assert express_message("ok", "ok", 0, 0, {}, "X") == ("Aucune faute trouvée ✓", False)
     offline = {"grammalecte": EngineStatus("grammalecte", False, "non installé.")}
     assert express_message("ok", "ok", 0, 0, offline, "X") == ("Vérification incomplète : Grammalecte : non installé.", True)
@@ -383,3 +406,117 @@ def test_next_card_is_scrolled_into_view_after_a_fix(qapp, make_window):
     selected = next(c for c in w._cards if c.uid == w._selected.uid)
     top = selected.mapTo(w.scroll.viewport(), QPoint(0, 0)).y()
     assert 0 <= top < w.scroll.viewport().height()
+
+
+# Correction automatique à l'ouverture (réglage « Corriger automatiquement », actif par défaut).
+FIXED = "Les résultats que j'ai obtenus sont bons et école ferme, fesait-il."
+
+
+def auto_window(make_window, lt_delay=0.05):
+    return make_window(auto_correct=True, grammalecte=dict(found=g_issues),
+                       languagetool=dict(found=lt_issues, delay=lt_delay))
+
+
+def test_sure_corrections_are_applied_when_the_window_opens(qapp, make_window):
+    window = auto_window(make_window)
+    window.open_with(TEXT)
+    assert wait_until(qapp, lambda: window.editor.plain_text() == FIXED)
+    assert "automatiquement" in window.auto_note.text() and window.auto_note.isVisible()
+    marked = {FIXED[a:b] for a, b in window.editor.marked_ranges()}
+    assert marked and all(m in ("s", "bons", "é", ",") or m in FIXED for m in marked)  # passages surlignés
+    remaining = {window._text[i.start:i.end] for i in window._issues}
+    assert "fesait" in remaining  # douteuse : reste une suggestion
+    window.editor.undo()  # un seul Ctrl+Z annule la correction automatique
+    assert window.editor.plain_text() == TEXT
+    assert window.editor.marked_ranges() == []
+
+
+def test_without_the_setting_the_text_is_left_alone(qapp, window):
+    open_and_wait(qapp, window)
+    qapp.processEvents()
+    assert window.editor.plain_text() == TEXT and not window.auto_note.isVisible()
+
+
+def test_replace_before_the_checks_end_waits_then_pastes_the_corrected_text(qapp, make_window):
+    from correcteur.platform.bridge import Capture
+
+    window = auto_window(make_window, lt_delay=0.6)
+    capture = Capture(TEXT, target=1, from_selection=True)
+    requested = []
+    window.replaceRequested.connect(lambda cap, text: requested.append(text))
+    window.open_with(TEXT, capture)
+    window.replace_text()  # Entrée tout de suite, LanguageTool n'a pas répondu
+    assert requested == [] and window.replace_btn.text() == "Vérification…"
+    assert wait_until(qapp, lambda: requested == [FIXED])
+
+
+def test_typing_before_the_checks_end_cancels_the_automatic_correction(qapp, make_window):
+    window = auto_window(make_window, lt_delay=0.4)
+    window.open_with(TEXT)
+    cursor = window.editor.textCursor()
+    cursor.insertText(" Merci.")
+    assert wait_until(qapp, lambda: not window._running and window._ready)
+    assert window.editor.plain_text() == TEXT + " Merci."
+
+
+def test_a_suggestion_applied_twice_is_applied_once(qapp, window):
+    """Alt+1 répété (ou double-clic) sur « enfant » -> « enfants » donnait « enfantss »."""
+    open_and_wait(qapp, window)
+    obtenu = next(i for i in window._issues if window._text[i.start:i.end] == "obtenu")
+    window.apply_uid(obtenu.uid, "obtenus")
+    window.apply_uid(obtenu.uid, "obtenus")
+    assert "obtenus sont" in window.editor.plain_text() and "obtenuss" not in window.editor.plain_text()
+    assert all(i.uid != obtenu.uid for i in window._issues)
+
+
+def test_non_breaking_spaces_survive_a_replacement(qapp, window):
+    """toPlainText() changeait les espaces insécables en espaces ordinaires dans le texte rendu."""
+    from correcteur.platform.bridge import Capture
+
+    text = "Il fesait beau\u00a0: on est sorti\u00a0! «\u00a0Super\u00a0»"
+    capture = Capture(text, target=1, from_selection=True)
+    open_and_wait(qapp, window, text, capture)
+    requested = []
+    window.replaceRequested.connect(lambda cap, new: requested.append(new))
+    window.editor.setPlainText(text.replace("fesait", "faisait"))
+    window.replace_text()
+    assert requested and requested[0].count("\u00a0") == 4
+
+
+def test_local_engine_underlines_without_waiting_for_languagetool(qapp, make_window):
+    window = make_window(grammalecte=dict(found=g_issues), languagetool=dict(found=lt_issues, delay=3))
+    window.open_with(TEXT)
+    start = time.monotonic()
+    assert wait_until(qapp, lambda: any("grammalecte" in i.sources for i in window._issues), 2)
+    assert time.monotonic() - start < 1.5
+
+
+def test_reopening_forgets_a_check_still_running(qapp, make_window):
+    """Fenêtre fermée avant la réponse de LanguageTool, puis rouverte : l'indicateur ne tourne pas sans fin."""
+    window = make_window(grammalecte=dict(found=g_issues), languagetool=dict(found=lt_issues, delay=0.5))
+    window.open_with(TEXT)
+    window.close()
+    window.open_with("Texte correct.")
+    assert wait_until(qapp, lambda: not window._running, 3)
+
+
+def test_settings_save_keeps_rules_and_words_added_meanwhile(qapp, home):
+    """« Enregistrer » réécrivait la copie faite à l'ouverture : une règle coupée ou un mot ajouté depuis la
+    fenêtre de correction pendant que les Paramètres étaient ouverts disparaissait."""
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    settings.ignored_rules = ["ANCIENNE", "A_REACTIVER"]
+    dictionary = PersonalDictionary()
+    dictionary.add("bidule")
+    controller = FakeController(settings, dictionary)
+    dialog = SettingsDialog(settings, controller)
+    # Pendant ce temps, depuis la fenêtre de correction :
+    controller.settings.ignored_rules.append("NOUVELLE")
+    dictionary.add("machin")
+    # Dans les Paramètres, l'utilisateur réactive une règle.
+    item = dialog.rules.findItems("A_REACTIVER", Qt.MatchFlag.MatchExactly)[0]
+    dialog.rules.takeItem(dialog.rules.row(item))
+    dialog._accept()
+    assert controller.settings.ignored_rules == ["ANCIENNE", "NOUVELLE"]
+    assert sorted(controller.applied_words) == ["bidule", "machin"]

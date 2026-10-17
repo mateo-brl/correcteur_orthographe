@@ -105,6 +105,14 @@ def run_install(parent: QWidget, label: str, func) -> bool:
     return outcome["ok"]
 
 
+def _merged(opened: list[str], shown: list[str], current: list[str]) -> list[str]:
+    """Liste à enregistrer : l'état actuel, moins ce que l'utilisateur a retiré dans la fenêtre (présent à
+    l'ouverture, absent maintenant), plus ce qu'il y a ajouté."""
+    removed = set(opened) - set(shown)
+    kept = [item for item in current if item not in removed]
+    return kept + [item for item in shown if item not in kept]
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, controller, parent=None) -> None:
         super().__init__(parent)
@@ -163,6 +171,10 @@ class SettingsDialog(QDialog):
         self.live = QCheckBox("Revérifier pendant la frappe dans la fenêtre du correcteur")
         self.live.setChecked(g.live_check)
         form.addRow("", self.live)
+        self.auto_correct = QCheckBox("Corriger automatiquement les fautes sûres à l'ouverture de la fenêtre")
+        self.auto_correct.setToolTip("Les corrections douteuses restent proposées, à appliquer d'un clic.")
+        self.auto_correct.setChecked(g.auto_correct)
+        form.addRow("", self.auto_correct)
         self.autostart = QCheckBox("Lancer le correcteur à l'ouverture de session")
         self.autostart.setChecked(self.controller.autostart_enabled())
         form.addRow("", self.autostart)
@@ -279,7 +291,8 @@ class SettingsDialog(QDialog):
         layout.addWidget(QLabel("Mots acceptés (noms propres, jargon…) :"))
         self.words = QListWidget()
         dictionary = self.controller.dictionary
-        self.words.addItems(dictionary.words() if dictionary else [])
+        self._opened_words = list(dictionary.words() if dictionary else [])
+        self.words.addItems(self._opened_words)
         layout.addWidget(self.words, 2)
         row = QHBoxLayout()
         self.new_word = QLineEdit()
@@ -302,6 +315,10 @@ class SettingsDialog(QDialog):
         restore.clicked.connect(lambda: [self.rules.takeItem(self.rules.row(i)) for i in self.rules.selectedItems()])
         layout.addWidget(restore)
         return page
+
+    @staticmethod
+    def _items(widget: QListWidget) -> list[str]:
+        return [widget.item(i).text() for i in range(widget.count())]
 
     def _about_tab(self) -> QWidget:
         page = QWidget()
@@ -384,6 +401,7 @@ class SettingsDialog(QDialog):
         g.typography = "stricte" if self.typo_strict.isChecked() else "standard"
         g.accept_abbreviations = self.abbrev.isChecked()
         g.live_check = self.live.isChecked()
+        g.auto_correct = self.auto_correct.isChecked()
         g.theme = self.theme.currentData()
         g.hotkeys_enabled = self.hotkeys_enabled.isChecked()
         g.hotkey_check, g.hotkey_autocorrect = check, express
@@ -398,8 +416,11 @@ class SettingsDialog(QDialog):
         lt.username = self.lt_user.text().strip()
         lt.api_key = self.lt_key.text().strip()
         lt.picky = self.lt_picky.isChecked()
-        s.ignored_rules = [self.rules.item(i).text() for i in range(self.rules.count())]
-
-        words = [self.words.item(i).text() for i in range(self.words.count())]
+        # Règles coupées et mots ajoutés depuis la fenêtre de correction pendant que celle-ci était ouverte :
+        # gardés. Seuls disparaissent ceux que l'utilisateur a retirés ici.
+        s.ignored_rules = _merged(self.settings.ignored_rules, self._items(self.rules),
+                                  self.controller.settings.ignored_rules)
+        dictionary = self.controller.dictionary
+        words = _merged(self._opened_words, self._items(self.words), dictionary.words() if dictionary else [])
         self.controller.apply_settings(s, words)
         self.accept()
