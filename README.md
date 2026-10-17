@@ -86,7 +86,9 @@ tar xzf Correcteur-x.y.z-linux-x86_64.tar.gz
 ```
 
 Le script installe tout dans `~/.local`, sans `sudo`. Il ajoute le correcteur au menu des applications et au
-démarrage de session, puis le lance.
+démarrage de session, puis le lance. Pour une mise à jour, relancez-le depuis la nouvelle archive : il arrête
+l'ancienne version et la remplace. `./Correcteur/installer-linux.sh --desinstaller` retire tout, sauf vos
+paramètres et votre dictionnaire.
 
 | Session | Paquets utiles (Debian / Ubuntu) |
 |---|---|

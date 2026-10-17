@@ -13,6 +13,7 @@ import hashlib
 import logging
 import os
 import secrets
+import stat
 import sys
 import tempfile
 import threading
@@ -46,17 +47,60 @@ def _profile_tag() -> str:
     return hashlib.sha1(str(config_dir().resolve()).encode("utf-8")).hexdigest()[:10]
 
 
+def _temp_dirs() -> list[Path]:
+    """Dossiers temporaires partagés où créer le dossier du canal."""
+    return list(dict.fromkeys([Path(tempfile.gettempdir()), Path("/tmp")]))
+
+
+def _private_dir(path: Path, create: bool) -> bool:
+    """Vrai si `path` est un dossier (pas un lien) de l'utilisateur, fermé aux autres. Dans un dossier partagé
+    comme /tmp, un autre utilisateur local pourrait sinon créer le dossier avant lui et y placer une fausse
+    socket. Avec `create`, le dossier est créé s'il n'existe pas, et remis en mode 700 s'il est à lui."""
+    try:
+        if create and not os.path.lexists(path):
+            try:
+                os.mkdir(path, 0o700)
+            except FileExistsError:
+                pass  # créé entre-temps : vérifié ci-dessous
+        info = os.lstat(path)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            if not create:
+                return False  # XDG_RUNTIME_DIR ouvert aux autres : on ne touche pas à ses droits
+            os.chmod(path, 0o700)
+        return True
+    except OSError as exc:
+        log.debug("Dossier du canal inutilisable (%s) : %s", path, exc)
+        return False
+
+
 def address() -> tuple[str, str]:
+    """Adresse du canal de commande. Ne lève jamais d'erreur (la ligne de commande l'appelle sans filet) : si
+    aucun dossier ne convient, l'écoute échouera et IpcServer.start() le dira."""
     if sys.platform == "win32":
         return rf"\\.\pipe\correcteur-{_user_tag()}-{_profile_tag()}", "AF_PIPE"
-    name = f"correcteur-{_profile_tag()}.sock"
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    bases = [Path(runtime)] if runtime and os.path.isdir(runtime) else []
-    bases += [Path(tempfile.gettempdir()) / f"correcteur-{os.getuid()}", Path("/tmp") / f"correcteur-{os.getuid()}"]
-    # Un dossier au chemin trop long ferait échouer l'écoute (« AF_UNIX path too long ») : on prend le suivant.
-    base = next((b for b in bases if len(os.fsencode(str(b / name))) <= _UNIX_PATH_MAX), bases[-1])
-    base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return str(base / name), "AF_UNIX"
+    try:
+        name = f"correcteur-{_profile_tag()}.sock"
+        uid = os.getuid()
+
+        def fits(base: Path) -> bool:
+            # Un chemin trop long ferait échouer l'écoute (« AF_UNIX path too long ») : on prend le suivant.
+            return len(os.fsencode(str(base / name))) <= _UNIX_PATH_MAX
+
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if runtime and fits(Path(runtime)) and _private_dir(Path(runtime), create=False):
+            return str(Path(runtime) / name), "AF_UNIX"
+        # Dossier pris par un fichier, par un autre utilisateur ou illisible : dossier suffixé (-1, -2...).
+        candidates = [tmp / f"correcteur-{uid}{suffix}" for suffix in ("", "-1", "-2", "-3") for tmp in _temp_dirs()]
+        for base in candidates:
+            if fits(base) and _private_dir(base, create=True):
+                return str(base / name), "AF_UNIX"
+        base = config_dir()  # dossier de l'utilisateur, en dernier recours
+        return str(base / name), "AF_UNIX"
+    except Exception as exc:
+        log.warning("Adresse du canal de commande : %s", exc)
+        return str(Path(tempfile.gettempdir()) / f"correcteur-{_user_tag()}.sock"), "AF_UNIX"
 
 
 def _authkey(create: bool) -> bytes | None:
@@ -74,8 +118,12 @@ def _authkey(create: bool) -> bytes | None:
 
 
 def send_command(command: str, payload: str = "", timeout: float = 2.0) -> bool:
-    """Envoie une commande à l'instance en cours. False s'il n'y en a pas."""
-    key = _authkey(create=False)
+    """Envoie une commande à l'instance en cours. False s'il n'y en a pas (ou si le dossier des paramètres est
+    inaccessible : la ligne de commande l'appelle sans filet)."""
+    try:
+        key = _authkey(create=False)
+    except OSError:
+        return False
     if key is None:
         return False
     addr, family = address()

@@ -1055,10 +1055,10 @@ class CorrectionWindow(QWidget):
             self.ignore_rule(issue)
 
     def open_url(self, url: str) -> None:
-        from PySide6.QtCore import QUrl
-        from PySide6.QtGui import QDesktopServices
+        from correcteur.platform import open_url
 
-        QDesktopServices.openUrl(QUrl(url))
+        if not open_url(url):
+            self.controller.notify(f"Ouverture impossible : {url}", error=True)
 
     def copy_text(self) -> None:
         # Le contrôleur renvoie False quand le presse-papiers refuse le texte.

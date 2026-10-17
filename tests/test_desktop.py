@@ -106,6 +106,38 @@ def test_release_restores_clipboard(qapp, home):
     target.final_text()
 
 
+_IMAGE_OWNER = (
+    "from PySide6.QtWidgets import QApplication\nfrom PySide6.QtGui import QColor, QImage\n"
+    "from PySide6.QtCore import QTimer\na = QApplication([])\nim = QImage(8, 8, QImage.Format.Format_RGB32)\n"
+    "im.fill(QColor('red'))\na.clipboard().setImage(im)\nprint('ok', flush=True)\n"
+    "QTimer.singleShot(8000, a.quit)\na.exec()"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sélections X11")
+def test_capture_keeps_an_image_in_the_clipboard(qapp, home):
+    """Rien de sélectionné, une image dans le presse-papiers : le marqueur la remplaçait, puis seul du texte
+    était rendu, et l'image était perdue (régression de la 0.1.5)."""
+    from correcteur.platform.bridge import create_bridge
+    from correcteur.platform.x11_selection import selection_targets
+
+    owner = subprocess.Popen([sys.executable, "-c", _IMAGE_OWNER], stdout=subprocess.PIPE, text=True)
+    try:
+        assert owner.stdout.readline().strip() == "ok"
+        time.sleep(0.3)
+        assert "image/png" in (selection_targets("CLIPBOARD") or [])
+        bridge = create_bridge(lambda ms, fn: fn())
+        target = Target("", 3000)  # zone de texte vide : rien à copier
+        capture = bridge.capture()
+        bridge.release(capture)
+        assert capture.text == "" and not capture.clipboard_touched
+        assert "image/png" in (selection_targets("CLIPBOARD") or [])
+        target.final_text()
+    finally:
+        owner.kill()
+        owner.wait()
+
+
 def test_replace_after_another_app_copied(qapp, home):
     """Cas réel : l'utilisateur a copié quelque chose dans une autre application,
     et le correcteur tourne depuis longtemps avec des fenêtres ouvertes."""

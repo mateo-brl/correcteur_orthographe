@@ -201,6 +201,7 @@ class Checker:
             issues = self.post_process(text, raw, solo, recheck)
             if not pending and len(answered) > 1:
                 self._settle_partial(text, raw, issues, language)
+                self._confirm_remote(text, raw, issues, language)
             result = CheckResult(text, issues, dict(statuses), pending)
             if on_update:
                 on_update(result)
@@ -226,6 +227,30 @@ class Checker:
         settled = {_corrected(text, o) for o in offline if o.confident and o.replacements}
         for issue in partial:
             issue.confident = _corrected(text, issue) in settled
+
+    def _confirm_remote(self, text: str, raw: dict[str, list[Issue]], issues: list[Issue], language: str) -> None:
+        """LanguageTool seul propose une correction, et Grammalecte signale juste à côté une faute qu'il corrige
+        mal (« Mes parents son partis » : « sont » pour LanguageTool, « parti » pour Grammalecte ; « Les enfants
+        on faim » : « ont » contre « feint »). Les deux moteurs voient une faute à cet endroit : si la correction
+        de LanguageTool fait taire Grammalecte sans lui faire signaler autre chose (contre-épreuve), elle est
+        sûre. Pas quand la remarque voisine vient d'une règle fiable de Grammalecte : ce sont alors deux lectures
+        (« les enfant joue »), et l'utilisateur choisit."""
+        local = [name for name in raw if name in _LOCAL_ENGINES and raw[name]]
+        if len(local) != 1:
+            return
+        name = local[0]
+        trials: _Trials | None = None
+        for issue in issues:
+            if (issue.confident or issue.category is not Category.GRAMMAR or not issue.replacements
+                    or name in issue.sources or not _homophones(text[issue.start:issue.end], issue.replacements[0])):
+                continue
+            weak = [o for o in issues if o.sources == (name,) and not o.confident and not o.overlaps(issue)
+                    and not solo_rule(o) and _next_to(text, issue, o)]
+            if not weak:
+                continue
+            trials = trials or _Trials(text, issues, self._recheck(name, language))
+            issue.confident = bool(trials._clean_fix(issue)) and all(
+                trials._still_there(issue, o) is False for o in weak)
 
     def _recheck(self, name: str, language: str) -> Recheck:
         """Revérification instantanée par un moteur local, pour la contre-épreuve de la règle "solo"."""
@@ -425,6 +450,28 @@ def _distinct(replacements: list[str]) -> list[str]:
     return [r for r in replacements if not (typo_normalize(r) in seen or seen.add(typo_normalize(r)))]
 
 
+# Confusions d'homophones grammaticaux : les seules corrections de LanguageTool confirmées par la contre-épreuve.
+_HOMOPHONES = (("son", "sont"), ("on", "ont"), ("a", "à"), ("et", "est"), ("ce", "se"), ("ces", "ses"),
+               ("ça", "sa"), ("ou", "où"), ("la", "là"), ("peu", "peut"), ("peu", "peux"), ("leur", "leurs"),
+               ("ma", "m'a"), ("ta", "t'a"), ("mes", "mais"), ("quand", "quant"), ("ni", "n'y"), ("sans", "s'en"),
+               ("c'est", "s'est"), ("dans", "d'en"), ("si", "s'y"), ("ses", "s'est"), ("ces", "c'est"))
+_HOMOPHONE_PAIRS = frozenset(_HOMOPHONES) | frozenset((b, a) for a, b in _HOMOPHONES)
+
+
+def _homophones(original: str, replacement: str) -> bool:
+    key = (original.lower().replace("’", "'"), replacement.lower().replace("’", "'"))
+    return key in _HOMOPHONE_PAIRS
+
+
+_NEXT_TO_RE = re.compile(r"[^\w.!?…\n]*(?:[\w'’-]+[^\w.!?…\n]+)?")
+
+
+def _next_to(text: str, a: Issue, b: Issue) -> bool:
+    """Au plus un mot entre les deux remarques, dans la même phrase."""
+    gap = text[a.end:b.start] if a.end <= b.start else text[b.end:a.start]
+    return _NEXT_TO_RE.fullmatch(gap) is not None
+
+
 def _corrected(text: str, issue: Issue) -> str:
     return text[:issue.start] + issue.replacements[0] + text[issue.end:]
 
@@ -600,7 +647,7 @@ _SOLO_RULES = frozenset({
     # homophones
     "conf_ces_ses_c_est", "conf_ce_ceux_se", "conf_se_ceux_ce", "conf_ce_se_verbe", "conf_ont", "conf_on_ont",
     "conf_ils_non_verbe", "conf_tu_non_verbe", "conf_son_sont", "conf_peu_peut_peux", "conf_la_là", "conf_est_et",
-    "conf_et_est2", "conf_mai_mais_mes", "conf_où_ou", "conf_quand_quant_qu_en", "conf_quant_quand_qu_en",
+    "conf_et_est2", "conf_m_a_ma", "conf_mai_mais_mes", "conf_où_ou", "conf_quand_quant_qu_en", "conf_quant_quand_qu_en",
     "conf_dans_dan_d_en", "conf_nôtre_notre", "conf_ça_çà_sa", "conf_déterminant_fem_sing_verbe", "conf_leurs_verbe",
     "conf_c_est_était", "conf_près_prêt_pré", "conf_peut_être", "conf_peut_être2",
     # déterminant + nom
@@ -610,7 +657,7 @@ _SOLO_RULES = frozenset({
     # conjugaison, mode, infinitif
     "conj_je", "conj_tu", "conj_1s_2s_sans_sujet_xxxs", "conj_les_nom", "vmode_verbes_que_subjonctif",
     "vmode_j_aimerais_vinfi", "infi_falloir", "infi_vouloir", "infi_devoir", "infi_ne_pas_jamais_etc", "infi_qqch_de",
-    "infi_par_pour_sans", "infi_verbe_de_verbe", "imp_verbe_groupe3_d",
+    "infi_par_pour_sans", "infi_verbe_de_verbe", "infi_verbes", "imp_verbe_groupe3_d",
     # participes passés (voir aussi solo_context_ok)
     "ppas_avoir", "ppas_être_confusion", "ppas_sujet_être_accord_pluriel", "ppas_ne_me_te_se_être",
     "ppas_3pl_mas_verbe_état", "ppas_3pl_fem_verbe_état", "ppas_3sg_fem_verbe_état", "ppas_nous_verbe_état",
@@ -626,6 +673,13 @@ _PARTICIPLE_FAMILIES = frozenset({"ppas_avoir", "ppas_être_confusion", "ppas_ne
 _CONFUSABLE_AUXILIARIES = frozenset({"a", "est"})
 _SUBJECTS = frozenset({"il", "elle", "on", "ça", "cela", "qui", "lui", "tout", "rien", "personne"})
 _WORD_BEFORE_RE = re.compile(r"([\w'’-]+)\W*$")
+# « Je vais acheté du pain » : après aller ou venir, un participe en -é est l'infinitif mal écrit seulement si un
+# complément suit (« Je vais fatigué au travail », « Ils vont pressés au marché » sont justes).
+_GO_COME = frozenset("""vais vas va allons allez vont allais allait allions alliez allaient irai iras ira irons irez
+    iront irais irait irions iriez iraient aille ailles aillent allé allée allés allées aller allant viens vient venons
+    venez viennent venais venait venions veniez venaient venu venue venus venues venir venant""".split())
+_OBJECT_START_RE = re.compile(r"\s*(?:[.!?…]|$)|\s+(?:[ldLD]['’]|(?:du|des|un|une|le|la|les|mon|ma|mes|ton|ta|tes|son|"
+                              r"sa|ses|notre|nos|votre|vos|leur|leurs|ce|cet|cette|ces|quelques|plusieurs)\b)")
 
 
 def rule_family(rule_id: str) -> str:
@@ -675,6 +729,11 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         if m and m.group(1).isupper():
             return False
     first = issue.replacements[0] if issue.replacements else ""
+    if family == "infi_verbes":
+        word = text[issue.start:issue.end]
+        if (not before or before[0] not in _GO_COME or not word.endswith("é") or first != word[:-1] + "er"
+                or not _OBJECT_START_RE.match(text, issue.end)):
+            return False
     if not agreed and len(issue.replacements) > 1 and first.endswith("s"):
         # Masculin pluriel proposé au hasard (« Ma mère et ma sœur sont partit » : « partis » ou « parties » ?) :
         # seulement quand le sujet le dit (« ils »).

@@ -259,7 +259,7 @@ def cmd_installer(args) -> int:
 
 
 def cmd_diagnostic(args) -> int:
-    from correcteur.config import SettingsStore, config_dir, data_dir
+    from correcteur.config import SettingsStore, config_dir, data_dir, log_path
     from correcteur.engines.grammalecte_engine import import_grammalecte
     from correcteur.engines.lt_server import _find_server_jar
     from correcteur.installer import find_java
@@ -271,6 +271,7 @@ def cmd_diagnostic(args) -> int:
     print(f"Session : {session_type()} {desktop_name()}")
     print(f"Paramètres : {config_dir()}")
     print(f"Données : {data_dir()}")
+    print(f"Journal : {log_path()}")
     print(f"Instance en cours : {'oui' if send_command('ping', timeout=1) else 'non'}")
     print(f"Grammalecte : {'installé' if import_grammalecte() else 'non installé'} (activé : {settings.grammalecte.enabled})")
     print(f"LanguageTool : mode {settings.languagetool.mode} (activé : {settings.languagetool.enabled})")

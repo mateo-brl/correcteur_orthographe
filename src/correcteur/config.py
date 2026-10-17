@@ -43,6 +43,11 @@ def data_dir() -> Path:
     return path
 
 
+def log_path() -> Path:
+    """Journal de l'application (voir correcteur.ui.app.install_log)."""
+    return data_dir() / "correcteur.log"
+
+
 def engines_dir() -> Path:
     path = data_dir() / "moteurs"
     path.mkdir(parents=True, exist_ok=True)
@@ -209,6 +214,15 @@ class PersonalDictionary:
         except UnicodeDecodeError:
             return line.decode("cp1252", errors="replace")
 
+    @classmethod
+    def _lines(cls, data: bytes) -> list[str]:
+        """Lignes du fichier. UTF-16 s'il commence par sa marque d'ordre des octets (« Unicode » du Bloc-notes
+        de Windows) : lu octet par octet comme de l'UTF-8, il donnait des mots coupés de caractères nuls, que
+        l'enregistrement suivant écrivait tels quels. Sinon UTF-8, ligne par ligne (voir _decode)."""
+        if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+            return data.decode("utf-16", errors="replace").splitlines()
+        return [cls._decode(line) for line in data.removeprefix(codecs.BOM_UTF8).splitlines()]
+
     def reload(self) -> None:
         words: set[str] = set()
         data, unreadable = b"", False
@@ -222,8 +236,8 @@ class PersonalDictionary:
             log.warning("Dictionnaire personnel illisible (%s) : %s", self.path, exc)
             unreadable = True
         self._unreadable = unreadable
-        for line in data.removeprefix(codecs.BOM_UTF8).splitlines():
-            word = self._decode(line).strip()
+        for line in self._lines(data):
+            word = line.strip()
             if word and not word.startswith("#"):
                 words.add(word)
         with self._lock:

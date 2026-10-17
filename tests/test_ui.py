@@ -274,9 +274,13 @@ def test_express_message_lists_changes_and_missing_engines():
     # Une espace en trop n'a rien de lisible à montrer : seulement le nombre.
     assert express_message("le  mail", "le mail", 1, 0, {}, "X") == (
         "1 correction appliquée.\nCtrl+Z dans l'application pour annuler.", False)
-    assert express_message("ok", "ok", 0, 0, {}, "X") == ("Aucune faute trouvée ✓", False)
+    # Aucun moteur n'a vérifié le texte : ce n'est pas « aucune faute ».
+    assert express_message("ok", "ok", 0, 0, {}, "X") == (
+        "Vérification impossible : aucun moteur actif n'a vérifié le texte.", True)
     offline = {"grammalecte": EngineStatus("grammalecte", False, "non installé.")}
-    assert express_message("ok", "ok", 0, 0, offline, "X") == ("Vérification incomplète : Grammalecte : non installé.", True)
+    assert express_message("ok", "ok", 0, 0, offline, "X") == ("Vérification impossible : Grammalecte : non installé.", True)
+    both = {"grammalecte": EngineStatus("grammalecte", True, ""), "languagetool": EngineStatus("languagetool", True, "")}
+    assert express_message("ok", "ok", 0, 0, both, "X") == ("Aucune faute trouvée ✓", False)
 
 
 def test_shift_issues():
