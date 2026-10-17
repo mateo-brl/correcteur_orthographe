@@ -412,6 +412,19 @@ def test_ignore_once_keeps_a_grammar_remark_to_its_sentence(home):
     assert [i.start for i in c.check(text).issues] == [text.index("sac a") + 4]
     assert len(c.check("Je vais a la plage.").issues) == 0  # même phrase : toujours ignorée
     assert len(c.check("Il range son sac a dos.").issues) == 1
+    # Corriger une autre faute de la même phrase ne fait pas revenir la remarque ignorée.
+    assert [i.start for i in c.check("Je vais a la plage. Le sac à dos est lourd.").issues] == []
+    c.close()
+
+
+def test_ignore_once_holds_when_the_engines_zones_differ(home):
+    """La remarque ignorée est la fusion des deux moteurs (« on joué ») ; la zone de Grammalecte seul est
+    « joué » : elle doit rester ignorée."""
+    s = Settings()
+    c = Checker(s, PersonalDictionary(), engines=on_joue_engines(s))
+    [merged] = c.check(ON_JOUE).issues
+    c.ignore_once(ON_JOUE, merged)
+    assert c.check(ON_JOUE).issues == []
     c.close()
 
 

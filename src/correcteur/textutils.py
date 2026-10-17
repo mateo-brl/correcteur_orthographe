@@ -32,11 +32,13 @@ def utf16_len(text: str) -> int:
 
 
 def split_paragraphs(text: str) -> Iterator[tuple[int, str]]:
-    """Découpe en lignes (paragraphes) et renvoie (offset, contenu sans \\r)."""
+    """Découpe en lignes (paragraphes) et renvoie (offset, contenu). Fins de ligne \\n, \\r\\n ou \\r seul
+    (anciens fichiers Mac) : sans ce dernier, tout le fichier passait pour un seul paragraphe."""
     pos = 0
-    for line in text.split("\n"):
-        yield pos, line[:-1] if line.endswith("\r") else line
-        pos += len(line) + 1
+    for m in re.finditer(r"\r\n|\r|\n", text):
+        yield pos, text[pos:m.start()]
+        pos = m.end()
+    yield pos, text[pos:]
 
 
 def chunk_text(text: str, max_len: int) -> Iterator[tuple[int, str]]:
@@ -239,3 +241,10 @@ def match_case(original: str, suggestion: str) -> str:
     if original[:1].isupper() and suggestion[:1].islower():
         return suggestion[:1].upper() + suggestion[1:]
     return suggestion
+
+
+def describe_changes(before: str, after: str, limit: int = 4) -> str:
+    """« aller → allé, a → à, obtenu → obtenus… » : ce qu'une correction a changé, mot à mot."""
+    changes = [(before[s:e].strip(), rep.strip()) for s, e, rep in diff_edits(before, after)]
+    changes = [f"{old} → {new}" for old, new in changes if old.split() != new.split()]
+    return ", ".join(changes[:limit]) + ("…" if len(changes) > limit else "")

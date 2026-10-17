@@ -144,7 +144,7 @@ Dans la fenêtre :
 |---|---|
 | Clic sur un mot souligné | Suggestions, *Ignorer*, *Ajouter au dictionnaire* |
 | Bouton *Corrections sûres* | Applique d'un coup tout ce qui est confirmé (un seul <kbd>Ctrl</kbd> + <kbd>Z</kbd> pour annuler) |
-| <kbd>Ctrl</kbd> + <kbd>Entrée</kbd> ou *Remplacer* | Remplace le texte dans l'application d'origine. Avant la fin des vérifications, attend les moteurs et applique les corrections sûres ; un texte inchangé n'est jamais recollé |
+| <kbd>Ctrl</kbd> + <kbd>Entrée</kbd> ou *Remplacer* | Remplace le texte dans l'application d'origine. Avant la fin des vérifications, le bouton affiche *Vérification…* et le texte est figé : le correcteur attend les moteurs, applique les corrections sûres puis remplace. Tant que rien n'est corrigé, le bouton s'appelle *Corriger et remplacer*. Un texte inchangé n'est jamais recollé |
 | <kbd>F8</kbd> / <kbd>Maj</kbd> + <kbd>F8</kbd> | Faute suivante / précédente |
 | <kbd>Alt</kbd> + <kbd>1</kbd> … <kbd>5</kbd> | Applique la suggestion n° 1 à 5 de la faute sélectionnée (ou sous le curseur) et passe à la suivante |
 | <kbd>Échap</kbd> | Ferme la fenêtre et rend le presse-papiers d'origine |

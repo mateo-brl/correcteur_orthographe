@@ -520,3 +520,58 @@ def test_settings_save_keeps_rules_and_words_added_meanwhile(qapp, home):
     dialog._accept()
     assert controller.settings.ignored_rules == ["ANCIENNE", "NOUVELLE"]
     assert sorted(controller.applied_words) == ["bidule", "machin"]
+
+
+def test_closing_while_a_replacement_waits_pastes_nothing_later(qapp, make_window):
+    """Entrée puis Échap avant la fin des vérifications : rien ne doit être collé après coup, et la fenêtre
+    rouverte n'est ni figée ni en attente."""
+    from correcteur.platform.bridge import Capture
+
+    window = auto_window(make_window, lt_delay=0.4)
+    capture = Capture(TEXT, target=1, from_selection=True)
+    requested = []
+    window.replaceRequested.connect(lambda cap, text: requested.append(text))
+    window.open_with(TEXT, capture)
+    window.replace_text()
+    assert window.editor.isReadOnly()  # figé : une frappe annulerait la correction attendue
+    window.close()
+    assert not window.editor.isReadOnly()
+    time.sleep(0.6)
+    qapp.processEvents()
+    assert requested == []
+    window.open_with("Texte correct.")
+    assert wait_until(qapp, lambda: window._ready)
+    assert not window._replace_pending and not window.editor.isReadOnly()
+    assert requested == []
+
+
+def test_without_live_check_typing_leaves_the_window_ready(qapp, make_window):
+    """Revérification coupée : après une frappe, « Remplacer » n'attend pas une vérification qui ne vient pas."""
+    from correcteur.platform.bridge import Capture
+
+    window = make_window(grammalecte=dict(found=g_issues), languagetool=dict(found=lt_issues, delay=0.4))
+    window.controller.settings.general.live_check = False
+    capture = Capture(TEXT, target=1, from_selection=True)
+    requested = []
+    window.replaceRequested.connect(lambda cap, text: requested.append(text))
+    window.open_with(TEXT, capture)
+    window.editor.textCursor().insertText(" Merci.")
+    assert window._ready and window.replace_btn.text() == "Remplacer"
+    window.replace_text()
+    assert requested == [TEXT + " Merci."]
+
+
+def test_without_auto_correct_the_edited_text_is_pasted_as_is(qapp, window):
+    """Correction automatique décochée : le texte retouché à la main est collé tel quel, sans corrections
+    ajoutées en douce."""
+    from correcteur.platform.bridge import Capture
+
+    capture = Capture(TEXT, target=1, from_selection=True)
+    open_and_wait(qapp, window, TEXT, capture)
+    requested = []
+    window.replaceRequested.connect(lambda cap, text: requested.append(text))
+    edited = TEXT.replace("fesait", "faisait")
+    window.editor.setPlainText(edited)
+    assert wait_until(qapp, lambda: window._ready and not window._running)
+    window.replace_text()
+    assert requested == [edited]

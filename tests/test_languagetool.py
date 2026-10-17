@@ -162,6 +162,15 @@ def test_odd_server_answers_are_readable(settings, response, fragment):
         engine.check("Texte.", "fr")
 
 
+def test_malformed_matches_are_skipped(settings):
+    """Une remarque mal formée (position non numérique, suggestions à null) est ignorée, pas fatale."""
+    good = lt_match("Un mot faux.", "mot", ["mots"], "R")
+    odd = [{"offset": "x", "length": 3}, {**good, "replacements": None}, {"rule": "pas un dict", "offset": 0}]
+    engine = make_engine(settings, FakeServer(lambda t: odd + [good]))
+    found = engine.check("Un mot faux.", "fr")
+    assert [(i.start, i.replacements) for i in found] == [(3, []), (3, ["mots"])]
+
+
 def test_network_error(settings):
     def boom(request):
         raise httpx.ConnectError("pas de réseau")

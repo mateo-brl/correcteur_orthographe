@@ -232,15 +232,22 @@ class GrammalecteEngine(Engine):
             ))
         for err in spell:
             word = err.get("sValue", "")
+            suggestions = rank_spelling(word, tuple(err.get("aSuggestions") or ()))
+            # « Helene » -> « Hélène » : un nom propre, que la personne écrit peut-être ainsi (jamais d'office).
+            rule = ("grammalecte_nom_propre" if word[:1].isupper() and suggestions and self._proper_noun(suggestions[0])
+                    else "grammalecte_orthographe")
             found.append((
                 err["nStart"], err["nEnd"], f"Mot inconnu du dictionnaire : « {word} ».",
-                rank_spelling(word, tuple(err.get("aSuggestions") or ())), Category.SPELLING,
-                "grammalecte_orthographe", "",
+                suggestions, Category.SPELLING, rule, "",
             ))
         self._cache[key] = found
         if len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
         return found
+
+    def _proper_noun(self, word: str) -> bool:
+        morphs = self._ensure_loaded().getSpellChecker().getMorph(word)
+        return bool(morphs) and all("/:M" in m for m in morphs)  # étiquettes :M1 prénom, :M2 nom, :MP lieu
 
     def _current_usage(self, suggestions: tuple[str, ...]) -> tuple[str, ...]:
         """Écarte l'imparfait du subjonctif ("que tu viens" -> "viennes", pas "vinsses"),
