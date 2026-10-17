@@ -8,22 +8,54 @@
 # le correcteur à l'ouverture de session.
 set -euo pipefail
 
-PREFIX="${PREFIX:-$HOME/.local}"
+PREFIX="$(realpath -m "${PREFIX:-$HOME/.local}")"  # chemin absolu : il sert de cible aux liens
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$PREFIX/bin"
+DEST="$PREFIX/opt/correcteur"
+SOURCES=""
 mkdir -p "$BIN" "$PREFIX/share/applications" "$PREFIX/share/icons/hicolor/scalable/apps"
 
 info() { printf '\033[1;34m▶\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!\033[0m %s\n' "$*"; }
 
+# Processus lancés depuis l'exécutable installé (test -ef suit le lien /proc/PID/exe, sans programme externe).
+instance_running() {
+    local exe
+    for exe in /proc/[0-9]*/exe; do
+        [ "$exe" -ef "$DEST/correcteur" ] && return 0
+    done
+    return 1
+}
+
 if [ -x "$HERE/correcteur" ] && [ -d "$HERE/_internal" ]; then
-    info "Installation de la version empaquetée dans $PREFIX/opt/correcteur"
-    "$BIN/correcteur" quitter >/dev/null 2>&1 || true
-    rm -rf "$PREFIX/opt/correcteur"
-    mkdir -p "$PREFIX/opt"
-    cp -r "$HERE" "$PREFIX/opt/correcteur"
-    ln -sf "$PREFIX/opt/correcteur/correcteur" "$BIN/correcteur"
-    ICON_SRC="$PREFIX/opt/correcteur/_internal/correcteur/resources/icone.svg"
+    if [ "$(realpath "$HERE")" = "$(realpath -m "$DEST")" ]; then
+        # Relancé depuis la copie installée : la supprimer pour la recopier détruirait l'installation.
+        info "Version empaquetée déjà en place dans $DEST : fichiers conservés"
+    else
+        info "Installation de la version empaquetée dans $DEST"
+        mkdir -p "$PREFIX/opt"
+        # Copie à côté d'abord : si elle échoue (disque plein...), l'ancienne version reste intacte.
+        STAGING="$(mktemp -d "$PREFIX/opt/.correcteur-installation.XXXXXX")"
+        trap 'if [ -n "${STAGING:-}" ]; then rm -rf "$STAGING"; fi' EXIT
+        chmod "$(umask -S)" "$STAGING"  # mktemp crée le dossier en 700
+        cp -r "$HERE/." "$STAGING"
+        if "$BIN/correcteur" quitter >/dev/null 2>&1; then
+            # On attend la fin de l'ancienne instance (5 s au plus) : ses fichiers vont disparaître, et le
+            # correcteur relancé plus bas lui passerait la main au lieu de démarrer.
+            for _ in $(seq 50); do
+                instance_running || break
+                sleep 0.1
+            done
+            if instance_running; then
+                warn "L'ancienne instance du correcteur ne s'est pas arrêtée : elle sera remplacée quand même."
+            fi
+        fi
+        rm -rf "$DEST"
+        mv "$STAGING" "$DEST"
+        STAGING=""
+    fi
+    ln -sf "$DEST/correcteur" "$BIN/correcteur"
+    ICON_SRC="$DEST/_internal/correcteur/resources/icone.svg"
 elif [ -f "$HERE/../pyproject.toml" ]; then
     REPO="$(cd "$HERE/.." && pwd)"
     VENV="$PREFIX/share/correcteur/venv"
@@ -36,6 +68,7 @@ elif [ -f "$HERE/../pyproject.toml" ]; then
     "$VENV/bin/correcteur" installer grammalecte
     ln -sf "$VENV/bin/correcteur" "$BIN/correcteur"
     ICON_SRC="$REPO/src/correcteur/resources/icone.svg"
+    SOURCES=1
 else
     echo "Lancez ce script depuis le dossier de la version téléchargée ou depuis scripts/ du dépôt."
     exit 1
@@ -74,7 +107,8 @@ if [ "$session" = "wayland" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
             fi ;;
         *) warn "Wayland : créez deux raccourcis dans les paramètres du bureau : « correcteur selection » et « correcteur express »." ;;
     esac
-else
+elif [ -n "$SOURCES" ]; then
+    # La version empaquetée embarque libxcb-cursor ; le Qt installé par pip, non.
     if command -v ldconfig >/dev/null && ! ldconfig -p 2>/dev/null | grep -q libxcb-cursor.so.0; then
         warn "Qt a besoin de libxcb-cursor0 sous X11 (ex. sudo apt install libxcb-cursor0)."
     fi

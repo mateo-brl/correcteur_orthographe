@@ -16,7 +16,8 @@ import secrets
 import sys
 import tempfile
 import threading
-from multiprocessing.connection import Client, Listener
+import time
+from multiprocessing.connection import Client, Listener, answer_challenge, deliver_challenge
 from pathlib import Path
 from typing import Callable
 
@@ -25,6 +26,11 @@ from correcteur.config import config_dir
 log = logging.getLogger(__name__)
 
 COMMANDS = ("verifier-selection", "correction-express", "ouvrir", "presse-papiers", "parametres", "quitter")
+
+# Délai accordé à un client pour s'authentifier et envoyer sa commande.
+CLIENT_TIMEOUT = 2.0
+# Longueur maximale du chemin d'une socket Unix (108 octets sous Linux, zéro final compris).
+_UNIX_PATH_MAX = 107
 
 
 def _user_tag() -> str:
@@ -43,10 +49,14 @@ def _profile_tag() -> str:
 def address() -> tuple[str, str]:
     if sys.platform == "win32":
         return rf"\\.\pipe\correcteur-{_user_tag()}-{_profile_tag()}", "AF_PIPE"
+    name = f"correcteur-{_profile_tag()}.sock"
     runtime = os.environ.get("XDG_RUNTIME_DIR")
-    base = Path(runtime) if runtime and os.path.isdir(runtime) else Path(tempfile.gettempdir()) / f"correcteur-{os.getuid()}"
+    bases = [Path(runtime)] if runtime and os.path.isdir(runtime) else []
+    bases += [Path(tempfile.gettempdir()) / f"correcteur-{os.getuid()}", Path("/tmp") / f"correcteur-{os.getuid()}"]
+    # Un dossier au chemin trop long ferait échouer l'écoute (« AF_UNIX path too long ») : on prend le suivant.
+    base = next((b for b in bases if len(os.fsencode(str(b / name))) <= _UNIX_PATH_MAX), bases[-1])
     base.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return str(base / f"correcteur-{_profile_tag()}.sock"), "AF_UNIX"
+    return str(base / name), "AF_UNIX"
 
 
 def _authkey(create: bool) -> bytes | None:
@@ -85,31 +95,73 @@ def send_command(command: str, payload: str = "", timeout: float = 2.0) -> bool:
     return result[0]
 
 
+class _TimedConnection:
+    """Connexion dont les lectures échouent passé l'échéance, poignée de main comprise : un client qui se
+    connecte sans rien envoyer ne retient pas le serveur."""
+
+    def __init__(self, conn, timeout: float) -> None:
+        self._conn = conn
+        self._deadline = time.monotonic() + timeout
+
+    def _wait(self) -> None:
+        if not self._conn.poll(max(0.0, self._deadline - time.monotonic())):
+            raise TimeoutError("client muet")
+
+    def send_bytes(self, data) -> None:
+        self._conn.send_bytes(data)
+
+    def recv_bytes(self, maxlength=None) -> bytes:
+        self._wait()
+        return self._conn.recv_bytes(maxlength)
+
+    def recv(self):
+        self._wait()
+        return self._conn.recv()
+
+
 class IpcServer:
     def __init__(self, handler: Callable[[str, str], None]) -> None:
         self._handler = handler
         self._listener: Listener | None = None
         self._thread: threading.Thread | None = None
+        self._key = b""
         self._stopping = False
+        self.error = ""
+        self.other_instance = False  # start() a échoué parce qu'une autre instance écoute déjà
+
+    def _fail(self, reason: str) -> bool:
+        self.error = reason
+        log.warning("%s", reason)
+        return False
 
     def start(self) -> bool:
-        """False si une autre instance écoute déjà."""
-        addr, family = address()
-        key = _authkey(create=True)
+        """False si une autre instance écoute déjà (`other_instance`) ou si l'écoute est impossible ; la raison
+        est alors dans `error`."""
+        self.error, self.other_instance = "", False
+        try:
+            addr, family = address()
+            self._key = _authkey(create=True)
+        except OSError as exc:
+            return self._fail(f"Canal de commande indisponible : {exc}")
         if send_command("ping", timeout=1.0):
-            return False
+            self.other_instance = True
+            return self._fail("Une autre instance du correcteur est déjà lancée.")
         if family == "AF_UNIX" and os.path.exists(addr):
             try:
                 os.unlink(addr)  # socket orpheline d'un arrêt brutal
             except OSError:
                 pass
+        listener = None
         try:
-            self._listener = Listener(addr, family=family, authkey=key)
+            # Sans clé ici : l'authentification se fait connexion par connexion, avec un délai (voir _handle).
+            listener = Listener(addr, family=family)
+            if family == "AF_UNIX":
+                os.chmod(addr, 0o600)
         except OSError as exc:
-            log.warning("Canal de commande indisponible : %s", exc)
-            return send_command("ping") is False
-        if family == "AF_UNIX":
-            os.chmod(addr, 0o600)
+            if listener is not None:
+                listener.close()
+            return self._fail(f"Canal de commande indisponible ({addr}) : {exc}")
+        self._listener = listener
         self._thread = threading.Thread(target=self._serve, name="ipc", daemon=True)
         self._thread.start()
         return True
@@ -123,16 +175,22 @@ class IpcServer:
                 if self._stopping:
                     return
                 continue
-            try:
-                message = conn.recv()
-                command = message.get("commande", "") if isinstance(message, dict) else ""
-                conn.send("ok")
-                if command and command != "ping":
-                    self._handler(command, str(message.get("donnees", "")))
-            except Exception:
-                pass
-            finally:
-                conn.close()
+            threading.Thread(target=self._handle, args=(conn,), name="ipc-client", daemon=True).start()
+
+    def _handle(self, conn) -> None:
+        timed = _TimedConnection(conn, CLIENT_TIMEOUT)
+        try:
+            deliver_challenge(timed, self._key)
+            answer_challenge(timed, self._key)
+            message = timed.recv()
+            command = message.get("commande", "") if isinstance(message, dict) else ""
+            conn.send("ok")
+            if command and command != "ping":
+                self._handler(command, str(message.get("donnees", "")))
+        except Exception as exc:
+            log.debug("Connexion de commande abandonnée : %s", exc)
+        finally:
+            conn.close()
 
     def stop(self) -> None:
         self._stopping = True

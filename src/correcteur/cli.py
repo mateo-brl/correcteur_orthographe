@@ -7,6 +7,9 @@
     correcteur corriger "texte"    affiche le texte avec les corrections sûres appliquées
     correcteur installer grammalecte|languagetool
     correcteur diagnostic
+
+Codes de retour de verifier et corriger : 0 (aucune faute, ou texte corrigé), 1 (fautes trouvées),
+2 (erreur), 3 (aucun moteur n'a pu vérifier le texte).
 """
 
 from __future__ import annotations
@@ -16,9 +19,14 @@ import bisect
 import json
 import logging
 import os
+import re
 import sys
 
 from correcteur import APP_NAME, __version__
+
+# Aucun moteur n'a vérifié le texte (langue non gérée, moteurs en échec) : ce n'est pas « aucune faute ».
+EXIT_UNCHECKED = 3
+_LANGUAGE_RE = re.compile(r"([a-z]{2})(?:-([a-z]{2}))?", re.IGNORECASE)
 
 _GUI_COMMANDS = {
     "selection": "verifier-selection",
@@ -71,15 +79,42 @@ def _colors() -> bool:
     return True
 
 
+def _read_file(path: str) -> str:
+    """Contenu exact du fichier (fins de ligne d'origine, sans l'éventuel BOM UTF-8)."""
+    try:
+        with open(path, encoding="utf-8-sig", newline="") as fh:
+            return fh.read()
+    except UnicodeDecodeError:
+        raise ValueError(f"le fichier « {path} » n'est pas en UTF-8 : enregistrez-le en UTF-8 puis "
+                         "recommencez.") from None
+    except FileNotFoundError:
+        raise ValueError(f"fichier « {path} » introuvable.") from None
+    except OSError as exc:
+        raise ValueError(f"lecture du fichier « {path} » impossible ({exc.strerror or exc}).") from None
+
+
 def _read_text(args) -> str:
     if getattr(args, "fichier", None):
-        with open(args.fichier, encoding="utf-8") as fh:
-            return fh.read()
+        return _read_file(args.fichier)
     if getattr(args, "texte", None):
         return " ".join(args.texte)
     if sys.stdin is None or sys.stdin.isatty():
         print("Tapez ou collez le texte, puis Ctrl+D (Linux) ou Ctrl+Z puis Entrée (Windows) :", file=sys.stderr)
     return sys.stdin.read() if sys.stdin else ""
+
+
+def _normalize_language(value: str | None) -> str | None:
+    """Option -l : « auto », ou un code de la forme « fr » ou « en-US »."""
+    if value is None:
+        return None
+    if value.lower() == "auto":
+        return "auto"
+    match = _LANGUAGE_RE.fullmatch(value)
+    if not match:
+        raise ValueError(f"langue « {value} » non reconnue : utilisez « auto », « fr » ou un code de la forme "
+                         "« en » ou « en-US ».")
+    lang, region = match.groups()
+    return lang.lower() + (f"-{region.upper()}" if region else "")
 
 
 def _make_checker(args):
@@ -91,18 +126,39 @@ def _make_checker(args):
         settings.general.language = args.langue
     if getattr(args, "strict", False):
         settings.general.typography = "stricte"
-    if getattr(args, "hors_ligne", False) and settings.languagetool.mode in ("public", "premium"):
+    # Hors ligne : seul le serveur LanguageTool de cette machine peut rester ; tout autre mode (public, perso,
+    # premium, ou valeur inconnue traitée comme une adresse) passe par le réseau.
+    if getattr(args, "hors_ligne", False) and settings.languagetool.mode != "local":
         settings.languagetool.enabled = False
     return Checker(settings, PersonalDictionary())
 
 
+def _unchecked_reason(args, checker, result) -> str | None:
+    """Pourquoi aucun moteur n'a vérifié le texte, ou None si au moins un l'a fait."""
+    if any(status.ok for status in result.statuses.values()):
+        return None
+    failures = [status.detail for status in result.statuses.values() if status.detail]
+    if failures:
+        return "Aucun moteur n'a pu vérifier le texte : " + " ; ".join(failures)
+    if not any(engine.is_enabled() for engine in checker.engines):
+        return "Aucun moteur n'a vérifié le texte : tous les moteurs sont désactivés dans les paramètres."
+    language = checker.resolve_language(result.text)
+    reason = "Aucun moteur activé ne gère " + ("la langue de ce texte." if language == "auto"
+                                                else f"cette langue ({language}).")
+    if getattr(args, "hors_ligne", False):
+        reason += " Hors ligne, seul Grammalecte (français uniquement) est utilisé."
+    return reason
+
+
 def cmd_verifier(args) -> int:
+    args.langue = _normalize_language(args.langue)
     text = _read_text(args)
     checker = _make_checker(args)
     try:
         result = checker.check(text)
     finally:
         checker.close()
+    unchecked = _unchecked_reason(args, checker, result)
     if args.json:
         payload = {
             "texte": text,
@@ -110,7 +166,13 @@ def cmd_verifier(args) -> int:
             "moteurs": {n: {"ok": s.ok, "detail": s.detail, "ms": round(s.duration_ms)} for n, s in result.statuses.items()},
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if unchecked:
+            print(unchecked, file=sys.stderr)
+            return EXIT_UNCHECKED
         return 1 if result.issues else 0
+    if unchecked:
+        print(unchecked, file=sys.stderr)
+        return EXIT_UNCHECKED
     color = _colors()
     red, dim, bold, reset = ("\033[31m", "\033[2m", "\033[1m", "\033[0m") if color else ("", "", "", "")
     for name, status in result.statuses.items():
@@ -137,6 +199,7 @@ def cmd_verifier(args) -> int:
 def cmd_corriger(args) -> int:
     from correcteur.textutils import apply_edits
 
+    args.langue = _normalize_language(args.langue)
     text = _read_text(args)
     checker = _make_checker(args)
     try:
@@ -144,10 +207,23 @@ def cmd_corriger(args) -> int:
             result = checker.check(text)
             fixed = apply_edits(text, [(i.start, i.end, i.replacements[0]) for i in result.issues if i.replacements])
         else:
-            fixed = checker.autocorrect(text)[0]
+            fixed, _applied, _remaining, result = checker.autocorrect(text)
     finally:
         checker.close()
-    print(fixed, end="" if fixed.endswith("\n") else "\n")
+    if "\r" in fixed:
+        try:
+            # Fins de ligne écrites telles quelles (sous Windows, \r\n deviendrait \r\r\n).
+            sys.stdout.reconfigure(newline="")  # type: ignore[union-attr]
+        except Exception:
+            pass
+    # Un fichier redirigé ressort à l'identique ; dans le terminal, on finit toujours par un retour à la ligne.
+    exact = bool(getattr(args, "fichier", None)) and not getattr(sys.stdout, "isatty", lambda: False)()
+    end = "" if exact or fixed.endswith("\n") else ("\r\n" if "\r\n" in fixed else "\n")
+    print(fixed, end=end)
+    unchecked = _unchecked_reason(args, checker, result)
+    if unchecked:
+        print(unchecked, file=sys.stderr)
+        return EXIT_UNCHECKED
     return 0
 
 
@@ -236,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("texte", nargs="*", help="texte à vérifier (sinon : entrée standard)")
         p.add_argument("-f", "--fichier", help="fichier texte (UTF-8)")
-        p.add_argument("-l", "--langue", help="fr, auto, en-US…")
+        p.add_argument("-l", "--langue", help="auto, fr, ou un code comme en ou en-US")
         p.add_argument("--strict", action="store_true", help="typographie stricte")
         p.add_argument("--hors-ligne", action="store_true", help="n'utiliser que les moteurs locaux")
         if name == "verifier":

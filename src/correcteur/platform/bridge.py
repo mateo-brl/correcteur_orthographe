@@ -14,12 +14,23 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from correcteur.platform import desktop_name, session_type, which
+from correcteur.platform import child_env, desktop_name, session_type, which
 
 log = logging.getLogger(__name__)
 
 Defer = Callable[[int, Callable[[], None]], None]
 _RESTORE_DELAY_MS = 1200
+# Jamais de Ctrl+V si le texte corrigé n'est pas dans le presse-papiers : on collerait son ancien contenu.
+_COPY_FAILED = "Copie du texte corrigé impossible (presse-papiers inaccessible) : rien n'a été collé."
+
+
+def _qt_set_clipboard(text: str) -> bool:
+    """Presse-papiers via Qt, relu pour vérifier que l'écriture a pris."""
+    from PySide6.QtGui import QGuiApplication
+
+    clipboard = QGuiApplication.clipboard()
+    clipboard.setText(text)
+    return clipboard.text() == text
 
 
 @dataclass
@@ -55,13 +66,13 @@ class Bridge:
         """Fenêtre fermée sans remplacement : on rend le presse-papiers d'origine."""
 
     def replace(self, capture: Capture, text: str) -> tuple[bool, str]:
-        self.copy(text)
+        if not self.copy(text):
+            return False, _COPY_FAILED
         return False, "Texte corrigé copié : collez-le avec Ctrl+V."
 
-    def copy(self, text: str) -> None:
-        from PySide6.QtGui import QGuiApplication
-
-        QGuiApplication.clipboard().setText(text)
+    def copy(self, text: str) -> bool:
+        """Met `text` dans le presse-papiers. False si c'est impossible."""
+        return _qt_set_clipboard(text)
 
     def clipboard_text(self) -> str:
         from PySide6.QtGui import QGuiApplication
@@ -131,18 +142,20 @@ class WindowsBridge(Bridge):
     def replace(self, capture: Capture, text: str) -> tuple[bool, str]:
         w = self.w
         if not capture.target or not w.activate_window(capture.target):
-            w.set_clipboard_text(text)
+            if not w.set_clipboard_text(text):
+                return False, _COPY_FAILED
             return False, "Fenêtre d'origine introuvable : texte corrigé copié, collez-le avec Ctrl+V."
         time.sleep(0.06)
-        w.set_clipboard_text(text)
+        if not w.set_clipboard_text(text):
+            return False, _COPY_FAILED
         w.wait_modifiers_released(0.5)
         w.send_ctrl("v")
         capture.clipboard_touched = True
         self._restore_later(capture)
         return True, ""
 
-    def copy(self, text: str) -> None:
-        self.w.set_clipboard_text(text)
+    def copy(self, text: str) -> bool:
+        return self.w.set_clipboard_text(text)
 
     def clipboard_text(self) -> str:
         return (self.w.get_clipboard_text() or "").replace("\r\n", "\n")
@@ -240,7 +253,7 @@ class X11Bridge(Bridge):
             pass
         tool = which("xdotool")
         if tool:
-            out = subprocess.run([tool, "getactivewindow"], capture_output=True, text=True, timeout=1)
+            out = subprocess.run([tool, "getactivewindow"], capture_output=True, text=True, timeout=1, env=child_env())
             if out.returncode == 0 and out.stdout.strip().isdigit():
                 return int(out.stdout.strip())
         return None
@@ -272,7 +285,7 @@ class X11Bridge(Bridge):
             tool = which("xdotool")
             if not tool:
                 return False
-            subprocess.run([tool, "windowactivate", "--sync", str(wid)], capture_output=True, timeout=2)
+            subprocess.run([tool, "windowactivate", "--sync", str(wid)], capture_output=True, timeout=2, env=child_env())
         deadline = time.monotonic() + 0.6
         while time.monotonic() < deadline:
             if self._active_window() == wid:
@@ -306,19 +319,17 @@ class X11Bridge(Bridge):
             return QGuiApplication.clipboard().text(mode)
         return read_selection(selection)
 
-    def _write(self, text: str) -> None:
+    def _write(self, text: str) -> bool:
         try:
             if self._owner is None:
                 from correcteur.platform.x11_selection import SelectionOwner
 
                 self._owner = SelectionOwner()
             if self._owner.set_text(text):
-                return
+                return True
         except Exception as exc:
             log.debug("Presse-papiers X11 via python-xlib impossible : %s", exc)
-        from PySide6.QtGui import QGuiApplication
-
-        QGuiApplication.clipboard().setText(text)
+        return _qt_set_clipboard(text)
 
     def capture(self) -> Capture:
         target = self._active_window()
@@ -350,7 +361,8 @@ class X11Bridge(Bridge):
     def replace(self, capture: Capture, text: str) -> tuple[bool, str]:
         if capture.saved_clipboard is None:
             capture.saved_clipboard = self._read("CLIPBOARD")
-        self._write(text)
+        if not self._write(text):
+            return False, _COPY_FAILED
         capture.clipboard_touched = True
         if capture.target and not self._activate(capture.target):
             return False, "Fenêtre d'origine introuvable : texte corrigé copié, collez-le avec Ctrl+V."
@@ -364,8 +376,8 @@ class X11Bridge(Bridge):
             self._defer(_RESTORE_DELAY_MS, lambda: self._write(saved))
         return True, ""
 
-    def copy(self, text: str) -> None:
-        self._write(text)
+    def copy(self, text: str) -> bool:
+        return self._write(text)
 
     def clipboard_text(self) -> str:
         return self._read("CLIPBOARD") or ""
@@ -393,12 +405,20 @@ class WaylandBridge(Bridge):
                        "« correcteur selection » (voir Paramètres > Général).")
 
     @staticmethod
-    def _run(cmd: list[str], data: str | None = None, timeout: float = 1.5) -> str | None:
+    def _run(cmd: list[str], data: str | None = None, timeout: float = 1.5, output: bool = True) -> str | None:
+        """Sortie du programme (chaîne vide sans `output`), None s'il échoue.
+
+        Sans `output`, ses sorties vont vers /dev/null : wl-copy laisse en arrière-plan un processus qui sert le
+        presse-papiers en gardant ses sorties ouvertes, et attendre leur fin bloquerait jusqu'au délai."""
+        streams = {"capture_output": True} if output else {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
         try:
-            out = subprocess.run(cmd, input=data, capture_output=True, text=True, timeout=timeout)
+            out = subprocess.run(cmd, input=data, encoding="utf-8", errors="replace", timeout=timeout, env=child_env(),
+                                 **streams)
         except (OSError, subprocess.TimeoutExpired):
             return None
-        return out.stdout if out.returncode == 0 else None
+        if out.returncode != 0:
+            return None
+        return out.stdout if output else ""
 
     def _paste(self, primary: bool) -> str:
         tool = which("wl-paste")
@@ -412,9 +432,8 @@ class WaylandBridge(Bridge):
     def _set_clipboard(self, text: str) -> bool:
         tool = which("wl-copy")
         if tool:
-            return self._run([tool], data=text) is not None
-        super().copy(text)
-        return True
+            return self._run([tool], data=text, output=False) is not None
+        return _qt_set_clipboard(text)
 
     def _send_ctrl(self, letter: str) -> bool:
         wtype = which("wtype")
@@ -450,7 +469,8 @@ class WaylandBridge(Bridge):
     def replace(self, capture: Capture, text: str) -> tuple[bool, str]:
         if capture.saved_clipboard is None:
             capture.saved_clipboard = self._paste(primary=False)
-        self._set_clipboard(text)
+        if not self._set_clipboard(text):
+            return False, "Copie du texte corrigé impossible (wl-copy a échoué) : rien n'a été collé."
         capture.clipboard_touched = True
         time.sleep(0.25)  # le temps que le bureau rende le focus à la fenêtre d'origine
         if not self._send_ctrl("v"):
@@ -459,8 +479,8 @@ class WaylandBridge(Bridge):
         self._defer(_RESTORE_DELAY_MS, lambda: self._set_clipboard(saved))
         return True, ""
 
-    def copy(self, text: str) -> None:
-        self._set_clipboard(text)
+    def copy(self, text: str) -> bool:
+        return self._set_clipboard(text)
 
     def clipboard_text(self) -> str:
         return self._paste(primary=False)

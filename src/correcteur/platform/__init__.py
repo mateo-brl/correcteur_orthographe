@@ -30,3 +30,17 @@ def which(*names: str) -> str | None:
         if path:
             return path
     return None
+
+
+# Posées par PyInstaller pour les plugins Qt du paquet : utiles au correcteur, mais un programme Qt du système
+# lancé par lui chargerait ces plugins au lieu des siens.
+_PACKAGE_QT_VARIABLES = ("QT_PLUGIN_PATH", "QML2_IMPORT_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH")
+
+
+def child_env() -> dict[str, str]:
+    """Environnement des programmes du système lancés par le correcteur (copie de os.environ)."""
+    env = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        for name in _PACKAGE_QT_VARIABLES:
+            env.pop(name, None)
+    return env

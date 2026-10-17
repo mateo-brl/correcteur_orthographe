@@ -94,7 +94,8 @@ def test_ipc_roundtrip(home):
     assert server.start()
     try:
         # Une deuxième instance voit la première et ne démarre pas.
-        assert IpcServer(lambda c, d: None).start() is False
+        second = IpcServer(lambda c, d: None)
+        assert second.start() is False and second.other_instance
         assert send_command("verifier-selection", "abc")
         assert event.wait(3)
         assert received == [("verifier-selection", "abc")]
@@ -236,3 +237,118 @@ def test_gnome_shortcuts_never_overwrite_an_unread_list(fake_dconf, monkeypatch,
     with pytest.raises(RuntimeError):
         install_gnome_shortcuts("<ctrl>+<alt>+c", "<ctrl>+<alt>+x")
     assert read() == state
+
+
+@pytest.mark.parametrize("frozen, workers", [(False, 0), (True, 1)], ids=["sources", "paquet"])
+def test_grammalecte_precompiled_without_subprocesses_in_package(tmp_path, monkeypatch, frozen, workers):
+    """Dans le paquet PyInstaller, compileall en parallèle relançait l'exécutable avec des arguments de Python
+    (« invalid choice: 'from multiprocessing.forkserver import main…' »)."""
+    import compileall
+
+    from correcteur import installer
+
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
+    monkeypatch.setattr(installer, "download", lambda url, dest, *args, **kwargs: dest)
+    monkeypatch.setattr(installer, "_extract", lambda archive, target, **kwargs: target.mkdir(parents=True))
+    calls = []
+    monkeypatch.setattr(compileall, "compile_dir", lambda path, **kwargs: calls.append(kwargs))
+    installer.install_grammalecte(target=tmp_path / "grammalecte")
+    assert [c["workers"] for c in calls] == [workers]
+
+
+def test_package_launcher_calls_freeze_support_first():
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parents[1] / "packaging" / "lancer.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    statements = [ast.unparse(node) for node in tree.body
+                  if not isinstance(node, ast.Import)
+                  and not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))]
+    # Première instruction exécutée, avant le bloc LD_LIBRARY_PATH et l'import du correcteur.
+    assert statements[0] == "multiprocessing.freeze_support()"
+    assert any(s.startswith("if sys.platform.startswith('linux')") for s in statements)
+    assert statements.index("from correcteur.cli import main") > 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="socket Unix")
+def test_ipc_silent_client_does_not_block_commands(home, monkeypatch):
+    """Un client qui se connecte sans rien envoyer bloquait la poignée de main, donc toutes les commandes
+    suivantes : la ligne de commande lançait alors une deuxième instance."""
+    import socket
+
+    from correcteur.platform import ipc
+
+    monkeypatch.setattr(ipc, "CLIENT_TIMEOUT", 0.5)
+    received, done = [], threading.Event()
+    server = ipc.IpcServer(lambda cmd, data: (received.append(cmd), done.set()))
+    assert server.start(), server.error
+    silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        silent.connect(ipc.address()[0])
+        start = time.monotonic()
+        assert ipc.send_command("ouvrir", timeout=2.0)
+        assert time.monotonic() - start < 1.0
+        assert done.wait(3)
+        # Passé le délai, le client muet est déconnecté.
+        silent.settimeout(5)
+        while silent.recv(1024):
+            pass
+    finally:
+        silent.close()
+        server.stop()
+    assert received == ["ouvrir"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="socket Unix")
+def test_ipc_wrong_key_is_refused(home):
+    from multiprocessing.connection import Client
+
+    from correcteur.platform import ipc
+
+    received, done = [], threading.Event()
+    server = ipc.IpcServer(lambda cmd, data: (received.append(cmd), done.set()))
+    assert server.start()
+    try:
+        with pytest.raises(Exception):
+            with Client(ipc.address()[0], family="AF_UNIX", authkey=b"mauvaise cle") as conn:
+                conn.send({"commande": "quitter"})
+        assert ipc.send_command("ouvrir")
+        assert done.wait(3)
+    finally:
+        server.stop()
+    assert received == ["ouvrir"]
+
+
+def test_ipc_start_reports_listen_failure(home, monkeypatch):
+    """Écoute impossible : start() renvoie False avec la raison (avant : True, l'application tournait sans
+    canal, « correcteur quitter » échouait et chaque raccourci lançait une nouvelle instance)."""
+    from correcteur.platform import ipc
+
+    def refuse(*args, **kwargs):
+        raise OSError("AF_UNIX path too long")
+
+    monkeypatch.setattr(ipc, "Listener", refuse)
+    server = ipc.IpcServer(lambda cmd, data: None)
+    assert server.start() is False
+    assert "AF_UNIX path too long" in server.error and not server.other_instance
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="socket Unix")
+def test_ipc_long_runtime_dir_falls_back_to_short_path(home, tmp_path, monkeypatch):
+    from correcteur.platform import ipc
+
+    long_dir = tmp_path / ("r" * 60) / ("u" * 60)
+    long_dir.mkdir(parents=True)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(long_dir))
+    path, family = ipc.address()
+    assert len(os.fsencode(path)) <= 107 and not path.startswith(str(long_dir))
+    received, done = [], threading.Event()
+    server = ipc.IpcServer(lambda cmd, data: (received.append(cmd), done.set()))
+    assert server.start(), server.error
+    try:
+        assert ipc.send_command("parametres")
+        assert done.wait(3)
+    finally:
+        server.stop()
+    assert received == ["parametres"]

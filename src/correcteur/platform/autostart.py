@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from correcteur import APP_NAME
+from correcteur.platform import child_env
 from correcteur.platform.keys import parse
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -116,7 +117,7 @@ _GSETTINGS_UNRELIABLE = ("'memory' GSettings backend", "Failed to load module")
 
 
 def _gsettings(*args: str) -> str:
-    out = subprocess.run(["gsettings", *args], capture_output=True, text=True, timeout=5)
+    out = subprocess.run(["gsettings", *args], capture_output=True, text=True, timeout=5, env=child_env())
     if out.returncode != 0:
         raise RuntimeError(f"gsettings {args[0]} : {out.stderr.strip() or 'échec'}")
     if any(marker in out.stderr for marker in _GSETTINGS_UNRELIABLE):
@@ -142,7 +143,7 @@ def _other_keybinding_dirs() -> list[str]:
 
     if not which("dconf"):
         return []
-    out = subprocess.run(["dconf", "list", _GNOME_BASE], capture_output=True, text=True, timeout=5)
+    out = subprocess.run(["dconf", "list", _GNOME_BASE], capture_output=True, text=True, timeout=5, env=child_env())
     return [d for d in out.stdout.split() if d.endswith("/") and not d.startswith("correcteur-")]
 
 

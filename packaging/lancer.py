@@ -1,7 +1,13 @@
 """Point d'entrée des exécutables PyInstaller."""
 
+import multiprocessing
 import os
 import sys
+
+# Avant tout le reste : un processus auxiliaire de multiprocessing (serveur forkserver, suivi des ressources,
+# processus de travail) relance cet exécutable avec des arguments de Python ; freeze_support exécute alors ce
+# qu'il demande et termine le processus, au lieu de passer ces arguments à notre ligne de commande.
+multiprocessing.freeze_support()
 
 if sys.platform.startswith("linux"):
     # Le lanceur de PyInstaller place les bibliothèques du paquet en tête de LD_LIBRARY_PATH (l'original est
