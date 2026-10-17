@@ -63,3 +63,11 @@ def test_supports_only_french():
     e = engine()
     assert e.supports("fr") and e.supports("fr-FR") and e.supports("auto")
     assert not e.supports("en-US")
+
+
+def test_imperfect_subjunctive_left_out_in_standard_mode():
+    text = "Il faut que tu viens demain."
+    assert found(engine().check(text, "fr"), text)["viens"].replacements == ["viennes"]
+    strict_settings = Settings()
+    strict_settings.general.typography = "stricte"
+    assert found(engine(strict_settings).check(text, "fr"), text)["viens"].replacements == ["viennes", "vinsses"]

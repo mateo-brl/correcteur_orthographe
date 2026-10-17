@@ -142,10 +142,14 @@ Dans la fenêtre :
 | Bouton *Corrections sûres* | Applique d'un coup tout ce qui est confirmé (un seul <kbd>Ctrl</kbd> + <kbd>Z</kbd> pour annuler) |
 | <kbd>Ctrl</kbd> + <kbd>Entrée</kbd> | Remplace le texte dans l'application d'origine |
 | <kbd>F8</kbd> / <kbd>Maj</kbd> + <kbd>F8</kbd> | Faute suivante / précédente |
+| <kbd>Alt</kbd> + <kbd>1</kbd> … <kbd>5</kbd> | Applique la suggestion n° 1 à 5 de la faute sélectionnée (ou sous le curseur) et passe à la suivante |
 | <kbd>Échap</kbd> | Ferme la fenêtre et rend le presse-papiers d'origine |
 
 Couleurs : 🔴 orthographe · 🔵 grammaire · 🟠 ponctuation · 🟣 style. Le texte reste modifiable et la vérification
 suit la frappe.
+
+Après une correction express, la notification indique les premières corrections faites (« aller → allé, a → à… »)
+et le nombre de remarques laissées à vérifier.
 
 L'icône dans la zone de notification donne accès à « Vérifier le presse-papiers », à une fenêtre vide où taper
 ou coller un texte, et aux paramètres.
@@ -232,6 +236,11 @@ flowchart LR
 4. Une faute signalée par les deux moteurs devient une seule remarque, qui garde en mémoire leur accord.
 5. Une correction est considérée comme sûre si les deux moteurs proposent la même, si c'est un accent
    (« ecole » → « école ») ou une ponctuation évidente.
+   Quand Grammalecte est seul (hors ligne, ou LanguageTool injoignable), personne ne peut confirmer ses
+   corrections de grammaire. Il fait alors une contre-épreuve : il applique la correction, revérifie la phrase,
+   et ne la garde que si elle ne fait pas disparaître une autre lecture possible. « Ils on mangé » devient
+   « Ils ont mangé », mais dans « les résultats que j'ai obtenu sont bon », « son bon » et « sont bons » font
+   chacun disparaître l'autre faute : la phrase reste à vérifier dans la fenêtre.
 6. Les corrections sûres s'appliquent en cascade. Dans « les enfant était ravis », les deux moteurs voudraient
    « ravi » (accord avec « était »), ce qui serait faux. Le correcteur corrige d'abord « enfants » et revérifie
    localement (c'est instantané). Il corrige ensuite « étaient », et « ravis » redevient juste. Dans une même
@@ -247,6 +256,9 @@ flowchart LR
   réanalysé.
 - LanguageTool garde un cache et une connexion ouverte ; les longs textes sont découpés automatiquement.
 - Pendant la frappe, seul Grammalecte est relancé tout de suite. LanguageTool attend une courte pause.
+- En correction express, LanguageTool a 8 secondes pour répondre (réseau lent, serveur local qui démarre). Passé ce
+  délai, Grammalecte corrige seul avec ses règles prudentes, et la réponse de LanguageTool, gardée en cache, sert à
+  la correction suivante.
 - La liste des remarques n'est reconstruite que si elle change réellement.
 - Sous X11, les sélections sont lues et servies directement avec python-xlib, comme le fait `xclip`. Cela reste
   fiable quand l'application tourne en arrière-plan depuis des heures.

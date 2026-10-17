@@ -112,6 +112,11 @@ class CheckEditor(QPlainTextEdit):
                 return issue
         return None
 
+    def issue_at_cursor(self) -> Issue | None:
+        """Faute sous le curseur de saisie (juste avant, au milieu ou juste après le mot)."""
+        index = self._map.to_py(self.textCursor().position())
+        return next((i for i in self._issues if i.start <= index <= max(i.end, i.start + 1)), None)
+
     def mouseMoveEvent(self, event) -> None:
         super().mouseMoveEvent(event)
         issue = self.issue_at(event.position().toPoint())
