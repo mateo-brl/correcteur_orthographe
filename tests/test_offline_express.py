@@ -25,11 +25,22 @@ FIXED = [
      "Il faut que tu viennes voir ça, les enfants étaient ravis !"),
     ("Les filles sont parti tôt car elles étaient fatigué.",
      "Les filles sont parties tôt, car elles étaient fatiguées."),
+    ("J'aime ce voiture rouge.", "J'aime cette voiture rouge."),
+    # Une correction sûre à un endroit ne l'est pas ailleurs pour le même mot (« Il ce lave » : ce -> se).
+    ("J'aime ce voiture rouge. Il ce lave les mains.", "J'aime cette voiture rouge. Il ce lave les mains."),
+    ("Les manteau sont rangés. Il a pris sont manteau.", "Les manteaux sont rangés. Il a pris sont manteau."),
 ]
 
 UNTOUCHED = [
     # Grammalecte croit "sont" verbe et voudrait "sont manteaux" : sans confirmation, on n'y touche pas.
     "Il a pris sont manteau.",
+    # Corrections de Grammalecte qui tombent sur le mauvais mot (rapport de test, 0.1.2) : la faute
+    # est « son » -> « sont », « on » -> « ont », « c'est » -> « s'est », ou la phrase est juste.
+    "Mes parents son partis en vacances.",
+    "Les enfants on faim.",
+    "Les filles son belles.",
+    "Ses parents son très gentils.",
+    "Nous nous sommes téléphoné.",
     "Les enfants sont partis en vacances avec leurs parents.",
     "Elle a mangé les pommes qu'elle avait achetées.",
     "stp envoie-moi le rdv par mail, merci !",

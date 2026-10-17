@@ -7,6 +7,7 @@ ne réanalyse que le paragraphe modifié."""
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 from collections import OrderedDict
@@ -50,6 +51,22 @@ _CATEGORY_BY_TYPE = {
 }
 
 _import_lock = threading.Lock()
+
+# Préfixe de niveau des identifiants de Grammalecte 2.3 (« g2__typo_ordinaux… ») : les préfixes ci-dessus
+# s'appliquent à ce qui suit.
+_RULE_LEVEL_RE = re.compile(r"^gv?\d+__")
+
+# Emoji et pictogrammes : Grammalecte ne les reconnaît pas et perd alors les fautes qui suivent
+# (« 😀 Les enfant joue. » : rien). Ils sont remplacés par des espaces, une par point de code, pour garder
+# les positions ; les remarques qui touchent ces espaces (espaces en trop) sont écartées.
+_EMOJI_RE = re.compile("[\U0001F000-\U0010FFFF\u2600-\u27BF\u2B00-\u2BFF\uFE0E\uFE0F\u200D\u20E3]")
+
+
+def _hide_emoji(paragraph: str) -> tuple[str, list[int]]:
+    hidden = [m.start() for m in _EMOJI_RE.finditer(paragraph)]
+    if not hidden:
+        return paragraph, hidden
+    return _EMOJI_RE.sub(" ", paragraph), hidden
 
 
 def _case_shape(word: str) -> str:
@@ -194,11 +211,17 @@ class GrammalecteEngine(Engine):
                 return cached
         key = (paragraph, strict, spelling_suggestions)
         checker = self._ensure_loaded()
-        gram, spell = checker.getParagraphErrors(paragraph, self._options(strict), False, spelling_suggestions)
+        masked, hidden = _hide_emoji(paragraph)
+        gram, spell = checker.getParagraphErrors(masked, self._options(strict), False, spelling_suggestions)
+        if hidden:
+            def clear(err: dict) -> bool:
+                return not any(err["nStart"] <= h < err["nEnd"] for h in hidden)
+
+            gram, spell = [e for e in gram if clear(e)], [e for e in spell if clear(e)]
         found: list[tuple] = []
         for err in gram:
             rule = err.get("sRuleId", "")
-            if not strict and rule.startswith(_STANDARD_RULE_PREFIXES):
+            if not strict and _RULE_LEVEL_RE.sub("", rule).startswith(_STANDARD_RULE_PREFIXES):
                 continue
             suggestions = tuple(err.get("aSuggestions") or ())
             if not strict:

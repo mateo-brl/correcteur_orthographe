@@ -151,6 +151,17 @@ def test_http_errors_are_readable(settings, status, fragment):
         engine.check("Texte.", "fr")
 
 
+@pytest.mark.parametrize("response, fragment", [
+    (httpx.Response(503, text="  \n "), "Erreur LanguageTool 503"),  # corps vide : plantait (list index)
+    (httpx.Response(200, text="<html>proxy</html>"), "illisible"),     # pas du JSON : plantait avec une trace
+], ids=["503 vide", "200 pas JSON"])
+def test_odd_server_answers_are_readable(settings, response, fragment):
+    engine = LanguageToolEngine(settings)
+    engine._client = httpx.Client(transport=httpx.MockTransport(lambda request: response))
+    with pytest.raises(EngineError, match=fragment):
+        engine.check("Texte.", "fr")
+
+
 def test_network_error(settings):
     def boom(request):
         raise httpx.ConnectError("pas de réseau")

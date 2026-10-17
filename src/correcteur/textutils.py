@@ -41,7 +41,8 @@ def split_paragraphs(text: str) -> Iterator[tuple[int, str]]:
 
 def chunk_text(text: str, max_len: int) -> Iterator[tuple[int, str]]:
     """Découpe un long texte en morceaux d'au plus `max_len` caractères, sur des
-    fins de paragraphe quand c'est possible, sinon sur des fins de phrase."""
+    fins de paragraphe quand c'est possible, sinon sur des fins de phrase, sinon
+    entre deux mots (jamais au milieu d'un mot, qui serait signalé à tort)."""
     start = 0
     n = len(text)
     while start < n:
@@ -51,6 +52,8 @@ def chunk_text(text: str, max_len: int) -> Iterator[tuple[int, str]]:
             if cut <= start:
                 cut = max(text.rfind(". ", start, end), text.rfind("! ", start, end), text.rfind("? ", start, end))
                 cut = cut + 1 if cut > start else -1
+            if cut <= start:
+                cut = max(text.rfind(" ", start, end), text.rfind("\t", start, end))
             if cut > start:
                 end = cut + 1 if text[cut:cut + 1] == "\n" else cut
         yield start, text[start:end]
@@ -187,12 +190,16 @@ def only_typographic_difference(a: str, b: str) -> bool:
     return a != b and typo_normalize(a) == typo_normalize(b)
 
 
-def adapt_to_user_style(suggestion: str, text: str) -> str:
+def adapt_to_user_style(suggestion: str, text: str, original: str = "") -> str:
     """Dans les suggestions, garde les apostrophes et espaces du style de
-    l'utilisateur : apostrophe droite, celle du clavier, sauf si le texte
-    emploie déjà l'apostrophe courbe."""
-    if "’" not in text:
-        suggestion = suggestion.replace("’", "'")
+    l'utilisateur. L'apostrophe suit celle du passage corrigé ; s'il n'en a pas,
+    celle que le texte emploie le plus (la droite, celle du clavier, à égalité).
+    Un seul « ’ » collé d'ailleurs ne change donc pas « c'est » en « s’est »."""
+    if "’" in original or "'" in original:
+        curly = "’" in original
+    else:
+        curly = text.count("’") > text.count("'")
+    suggestion = suggestion.replace("'", "’") if curly else suggestion.replace("’", "'")
     if "\u00a0" not in text and "\u202f" not in text:
         suggestion = suggestion.replace("\u00a0", " ").replace("\u202f", " ")
     return suggestion

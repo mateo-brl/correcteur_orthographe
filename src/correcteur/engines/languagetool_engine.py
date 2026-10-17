@@ -191,9 +191,14 @@ class LanguageToolEngine(Engine):
         if resp.status_code in (401, 403):
             raise EngineError("LanguageTool refuse l'accès (identifiants Premium incorrects ?).")
         if resp.status_code >= 400:
-            detail = resp.text.strip().splitlines()[0][:200] if resp.text else ""
-            raise EngineError(f"Erreur LanguageTool {resp.status_code} : {detail}")
-        payload = resp.json()
+            detail = (resp.text.strip().splitlines() or [""])[0][:200]
+            raise EngineError(f"Erreur LanguageTool {resp.status_code}" + (f" : {detail}" if detail else "."))
+        try:
+            payload = resp.json()
+        except ValueError as exc:  # page d'erreur d'un proxy, réponse tronquée…
+            raise EngineError("Réponse illisible de LanguageTool.") from exc
+        if not isinstance(payload, dict):
+            raise EngineError("Réponse illisible de LanguageTool.")
         to_index = utf16_to_index(text)
         found = []
         for match in payload.get("matches", []):
