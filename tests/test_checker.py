@@ -49,7 +49,11 @@ def find(text, word, occurrence=0):
     return matches[occurrence].start() if len(matches) > occurrence else None
 
 
-def issue(text, word, repl, source, category=Category.GRAMMAR, rule="R", occurrence=0, message="msg"):
+# Règle par défaut des faux moteurs : une famille que la règle « solo » accepte (voir _SOLO_RULES).
+RULE = "g3__gn_les_1m__b1_a1_1"
+
+
+def issue(text, word, repl, source, category=Category.GRAMMAR, rule=RULE, occurrence=0, message="msg"):
     start = find(text, word, occurrence)
     if start is None:
         return None
@@ -161,7 +165,7 @@ def test_autocorrect_does_not_apply_a_second_choice(home):
     c.close()
 
 
-def word_issue(text, word, repl, source, rule="R"):
+def word_issue(text, word, repl, source, rule=RULE):
     """Comme `issue`, mais seulement pour le mot entier (« enfant » n'est pas trouvé dans « enfants »)."""
     m = re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text)
     return Issue(m.start(), m.end(), "msg", list(repl), Category.GRAMMAR, rule, source) if m else None
@@ -190,6 +194,40 @@ def test_partial_agreement_falls_back_on_the_offline_decision(home):
         assert new_text == "Hier, les enfants on joué ensemble."
         assert [new_text[i.start:i.end] for i in remaining] == ["joué"]  # vu à la dernière passe (locale)
         c.close()
+
+
+def test_solo_only_trusts_reliable_rule_families(home):
+    """Seul, Grammalecte n'est cru que pour des familles de règles vérifiées : « Mes parents son partis »
+    -> « son parti » (gn_mon_ton_son prend « son » pour un déterminant) n'est jamais appliqué."""
+    s = Settings()
+    text = "Mes parents son partis en vacances."
+    g = lambda t: present([word_issue(t, "partis", ["parti"], "grammalecte", "g3__gn_mon_ton_son_1m__b1_a4_1")])
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "grammalecte", g)])
+    assert c.autocorrect(text)[0] == text
+    c.close()
+
+
+def test_pronominal_participle_is_never_sure():
+    """« Nous nous sommes téléphoné » : les deux moteurs veulent « téléphonés », à tort (téléphoner à)."""
+    text = "Nous nous sommes téléphoné."
+    rule = "gv1__ppas_nous_nous_être_verbe__b1_a1_1"
+    found = [issue(text, "téléphoné", ["téléphonés", "téléphonées"], "grammalecte", rule=rule),
+             issue(text, "téléphoné", ["téléphonés"], "languagetool", rule="AGREEMENT")]
+    [merged] = merge_issues(text, found)
+    assert merged.agreed and not is_confident(text, merged)
+
+
+def test_curly_apostrophe_elsewhere_does_not_split_a_fault(home):
+    """Un « ’ » ailleurs dans le texte : Grammalecte propose « C’est », LanguageTool « C'est ». C'est la même
+    correction (une seule remarque, sûre), écrite avec l'apostrophe du passage corrigé ou du texte."""
+    s = Settings()
+    text = "Ses une très bonne idée. Aujourd’hui il pleut."
+    g = lambda t: present([word_issue(t, "Ses", ["C’est"], "grammalecte", "g2__conf_ces_ses_c_est__b1_a1_1")])
+    lt = lambda t: present([word_issue(t, "Ses", ["C'est"], "languagetool", "SES_CEST")])
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "grammalecte", g), FakeEngine(s, "languagetool", lt)])
+    [found] = c.check(text).issues
+    assert found.agreed and found.confident and found.replacements == ["C’est"]
+    c.close()
 
 
 def test_autocorrect_only_applies_confident(checker):
@@ -258,7 +296,7 @@ def test_autocorrect_does_not_wait_forever_for_a_slow_engine(home):
     "solo") au lieu de laisser l'utilisateur attendre sans rien voir."""
     s = Settings()
     text = "Je vais a la plage demain."
-    g = FakeEngine(s, "grammalecte", lambda t: present([issue(t, "a", ["à"], "grammalecte", rule="CONF_A")]))
+    g = FakeEngine(s, "grammalecte", lambda t: present([issue(t, "a", ["à"], "grammalecte", rule="g3__conf_à_a_après_verbes__b3_a1_1")]))
     slow = FakeEngine(s, "languagetool", lambda t: [], delay=3)
     c = Checker(s, PersonalDictionary(), engines=[g, slow])
     t0 = time.monotonic()
@@ -361,6 +399,22 @@ def test_ignored_rules_and_ignore_once(checker):
     assert "fesait" not in by_text(checker.check(TEXT).issues, TEXT)
 
 
+def test_ignore_once_keeps_a_grammar_remark_to_its_sentence(home):
+    """Ignorer « a » -> « à » une fois ne doit pas faire taire « sac a dos » ailleurs (avant : toute la session)."""
+    s = Settings()
+    rule = "g3__conf_à_a_après_verbes__b3_a1_1"
+    g = lambda t: [Issue(m.start(), m.end(), "msg", ["à"], Category.GRAMMAR, rule, "grammalecte")
+                   for m in re.finditer(r"(?<= )a(?= )", t)]
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "grammalecte", g)])
+    text = "Je vais a la plage. Le sac a dos est lourd."
+    first = c.check(text).issues[0]
+    c.ignore_once(text, first)
+    assert [i.start for i in c.check(text).issues] == [text.index("sac a") + 4]
+    assert len(c.check("Je vais a la plage.").issues) == 0  # même phrase : toujours ignorée
+    assert len(c.check("Il range son sac a dos.").issues) == 1
+    c.close()
+
+
 def test_grammalecte_skipped_for_english_in_auto_mode(home):
     s = Settings()
     s.general.language = "auto"
@@ -418,7 +472,7 @@ def test_checker_is_thread_safe(checker):
     assert not errors
 
 
-def when(context, word, repl, rule="R", category=Category.GRAMMAR, source="grammalecte"):
+def when(context, word, repl, rule=RULE, category=Category.GRAMMAR, source="grammalecte"):
     """Remarque sur `word` tant que le texte contient `context` : comme un vrai moteur,
     qui juge un mot d'après ses voisins (corriger l'un peut faire disparaître l'autre)."""
     import re
@@ -491,7 +545,7 @@ def test_solo_accepts_masculine_among_gender_variants(home):
     c = solo_checker(Settings(), when("suis aller", "aller", ["allé", "allée"]))
     assert c.autocorrect("Je suis aller au cinéma.")[0] == "Je suis allé au cinéma."
     c.close()
-    grammar = lambda *repl: Issue(0, 1, "", list(repl), Category.GRAMMAR, "R", "grammalecte")
+    grammar = lambda *repl: Issue(0, 1, "", list(repl), Category.GRAMMAR, RULE, "grammalecte")
     assert solo_candidate(grammar("allés", "allées"))
     assert not solo_candidate(grammar("mange", "manges"))  # personne du verbe : pas un simple accord
     assert not solo_candidate(grammar("ait", "est"))

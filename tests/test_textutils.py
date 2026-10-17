@@ -95,6 +95,10 @@ def test_adapt_to_user_style():
     assert adapt_to_user_style("C’est", "Je dis que c’est") == "C’est"
     assert adapt_to_user_style("C’est", "Ces un film.") == "C'est"  # aucune apostrophe : celle du clavier
     assert adapt_to_user_style("10\u00a0h", "à 10h") == "10 h"
+    # Le style du passage corrigé prime : « c'est » tapé au clavier reste droit dans un texte qui a un « ’ ».
+    mixed = "Elle c'est trompée. Aujourd’hui il pleut."
+    assert adapt_to_user_style("s’est", mixed, "c'est") == "s'est"
+    assert adapt_to_user_style("C'est", "Ses une idée. Aujourd’hui il pleut.", "Ses") == "C’est"
 
 
 def test_word_helpers():
@@ -104,3 +108,10 @@ def test_word_helpers():
     assert match_case("Ecole", "école") == "École"
     assert levenshtein("fesait", "faisait") == 2
     assert levenshtein("abc", "xyzuvw", limit=2) == 3
+
+
+def test_chunks_never_split_a_word():
+    text = " ".join(["mot"] * 2000)  # ni fin de ligne ni point : on coupe entre deux mots
+    chunks = list(chunk_text(text, 1000))
+    assert "".join(c for _, c in chunks) == text
+    assert all(c.strip(" ").split(" ")[0] == "mot" and c.rstrip(" ").endswith("mot") for _, c in chunks)

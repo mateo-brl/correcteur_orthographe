@@ -21,6 +21,7 @@ from correcteur.textutils import (
     narrow_edit,
     only_typographic_difference,
     same_letters,
+    typo_normalize,
 )
 
 log = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ class Checker:
                  engines: list[Engine] | None = None) -> None:
         self.settings = settings
         self.dictionary = dictionary
-        self.session_ignored: set[tuple[str, str]] = set()
+        self.session_ignored: set[tuple[str, ...]] = set()
         self.server = None
         if engines is None:
             from correcteur.engines.grammalecte_engine import GrammalecteEngine
@@ -246,7 +247,7 @@ class Checker:
         if issue.start < 0 or issue.end > len(text) or issue.start > issue.end:
             return None
         original = text[issue.start:issue.end]
-        if issue.rule_id in ignored_rules or (issue.category.value, original) in self.session_ignored:
+        if issue.rule_id in ignored_rules or self._ignored(text, issue, original):
             return None
         if issue.category is Category.SPELLING:
             word = original.strip()
@@ -261,8 +262,9 @@ class Checker:
         replacements = []
         for rep in issue.replacements:
             if not strict:
-                rep = adapt_to_user_style(rep, text)
-            if issue.category is Category.SPELLING:
+                rep = adapt_to_user_style(rep, text, original)
+            if issue.category is Category.SPELLING and rep.casefold() != original.casefold():
+                # Pas pour une correction de la casse elle-même (« Janvier » -> « janvier »).
                 rep = match_case(original, rep)
             if rep == original or rep in seen:
                 continue
@@ -276,8 +278,23 @@ class Checker:
         return replace(issue, start=start, end=end, replacements=replacements)
 
     def ignore_once(self, text: str, issue: Issue) -> None:
-        """Ignore cette remarque sur ce texte (tous moteurs confondus) jusqu'à la fermeture."""
-        self.session_ignored.add((issue.category.value, issue.original(text)))
+        """Ignore cette remarque (tous moteurs confondus) jusqu'à la fermeture : un mot inconnu partout ;
+        une remarque de grammaire seulement dans sa phrase, avec ses règles. Ignorer « a » -> « à » une fois
+        ne doit pas faire taire « sac a dos » dans un autre texte."""
+        original = issue.original(text)
+        if issue.category is Category.SPELLING:
+            self.session_ignored.add((issue.category.value, original))
+            return
+        sentence = _sentence_at(text, issue.start, issue.end)
+        for rule in issue.rules:
+            self.session_ignored.add((rule, original, sentence))
+
+    def _ignored(self, text: str, issue: Issue, original: str) -> bool:
+        if not self.session_ignored:
+            return False
+        if issue.category is Category.SPELLING:
+            return (issue.category.value, original) in self.session_ignored
+        return (issue.rule_id, original, _sentence_at(text, issue.start, issue.end)) in self.session_ignored
 
     def autocorrect(self, text: str, language: str | None = None, max_passes: int = 6,
                     slow_timeout: float | None = EXPRESS_SLOW_TIMEOUT) -> tuple[str, list[Issue], list[Issue], CheckResult]:
@@ -293,7 +310,8 @@ class Checker:
         - les corrections proposées par le seul moteur en ligne à la 1re passe et
           confirmées ensuite par le moteur local ;
         - dans une phrase déjà corrigée, une nouvelle correction de grammaire à
-          suggestion unique (conséquence directe de la correction précédente).
+          suggestion unique (conséquence directe de la correction précédente), d'une
+          famille de règles fiable (`_SOLO_RULES`).
         Une correction que le moteur local proposait seul et que l'autre moteur
         n'a pas confirmée à la 1re passe n'est jamais appliquée.
 
@@ -307,12 +325,11 @@ class Checker:
         can_go_alone = any(e.available()[0] for e in self.engines if e.name in local)
         result = self.check(current, language, timeout=slow_timeout if can_go_alone else None)
         first_statuses = result.statuses
-        confirmed = {(i.original(current), i.replacements[0]) for i in result.issues if i.confident}
-        # Qui proposait quoi à la 1re passe : une correction proposée par le seul
-        # moteur lent puis confirmée par le moteur local devient sûre ; une
-        # correction que le moteur local proposait déjà seul ne le devient jamais.
-        first_sources = {(i.original(current), i.replacements[0]): set(i.sources)
-                         for i in result.issues if i.replacements}
+        # Remarques de la 1re passe, recalées après chaque correction : qui proposait quoi, et où. Une
+        # correction proposée par le seul moteur lent puis confirmée par le moteur local devient sûre ; une
+        # correction que le moteur local proposait déjà seul ne le devient jamais. Tout se juge à la même
+        # place : le même « ce » -> « cette » sûr dans une phrase ne l'est pas pour autant dans la suivante.
+        first_pass = [i for i in result.issues if i.replacements]
         # Remarques de la 1re passe venant uniquement des moteurs lents : gardées pour le bilan.
         slow_only = [i for i in result.issues if not set(i.sources) & set(local)] if local else []
         applied_all: list[Issue] = []
@@ -326,15 +343,15 @@ class Checker:
                 sent = _sentence_finder(current)
 
                 def acceptable(i: Issue) -> bool:
-                    key = (i.original(current), i.replacements[0])
-                    before = first_sources.get(key)
-                    if i.confident or key in confirmed:
+                    fixed = _corrected(current, i)
+                    same = [j for j in first_pass if j.overlaps(i) and _corrected(current, j) == fixed]
+                    if i.confident or any(j.confident for j in same):
                         return True
-                    if before is not None:
+                    if same:
                         # Confirmation par le moteur local ; sans moteur local, personne ne peut confirmer.
-                        return bool(local) and not before & set(local)
+                        return bool(local) and not {s for j in same for s in j.sources} & set(local)
                     return (i.category is Category.GRAMMAR and len(i.replacements) == 1
-                            and sent(i.start) in touched)
+                            and sent(i.start) in touched and solo_rule(i))
 
                 candidates = [i for i in result.issues if i.replacements and acceptable(i)]
                 candidates = split_confident([replace(i, confident=True) for i in candidates])[0]
@@ -358,6 +375,7 @@ class Checker:
             edits = sorted(((i.start, i.end, i.replacements[0]) for i in chosen), key=lambda e: e[0])
             current = apply_edits(current, edits)
             slow_only = remap_issues(slow_only, edits)
+            first_pass = remap_issues(first_pass, edits)
             done = _remap_spans(done, edits)
             sent = _sentence_finder(current)
             delta = 0
@@ -374,6 +392,12 @@ class Checker:
         remaining += [i for i in slow_only if not i.confident and not any(i.overlaps(r) for r in remaining)]
         remaining.sort(key=lambda i: i.start)
         return current, applied_all, remaining, result
+
+
+def _distinct(replacements: list[str]) -> list[str]:
+    """Sans doublons, à la typographie près (« C’est » et « C'est ») : la première forme est gardée."""
+    seen: set[str] = set()
+    return [r for r in replacements if not (typo_normalize(r) in seen or seen.add(typo_normalize(r)))]
 
 
 def _corrected(text: str, issue: Issue) -> str:
@@ -406,7 +430,9 @@ def _match_score(text: str, a: Issue, b: Issue) -> int:
     if not a.replacements or not b.replacements:
         return 1 if same_span and a.category == b.category else 0
     lo, hi = min(a.start, b.start), max(a.end, b.end)
-    eff_a, eff_b = _effects(text, a, lo, hi, 8), _effects(text, b, lo, hi, 8)
+    # Comparées sans la typographie : « C’est » de l'un et « C'est » de l'autre sont la même correction.
+    eff_a = [typo_normalize(e) for e in _effects(text, a, lo, hi, 8)]
+    eff_b = [typo_normalize(e) for e in _effects(text, b, lo, hi, 8)]
     if eff_a[0] == eff_b[0]:
         return 3
     if eff_a[0] in eff_b or eff_b[0] in eff_a:
@@ -460,16 +486,16 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
         lead = cand if ENGINE_PRIORITY.get(cand.source, 9) <= ENGINE_PRIORITY.get(issue.source, 9) else issue
         # La correction du moteur prioritaire reste en tête, celle de l'autre moteur la suit : en cas de
         # désaccord (« on joue » / « ont joué »), les deux choix principaux sont les premiers proposés.
-        replacements = list(dict.fromkeys(base.replacements + extra))
+        replacements = _distinct(base.replacements + extra)
         follower = issue if lead is cand else cand
-        lead_effect = _effects(text, lead, lo, hi, 1)
-        partly = bool(lead_effect) and lead_effect[0] in _effects(text, follower, lo, hi, 8)
+        lead_effect = [typo_normalize(e) for e in _effects(text, lead, lo, hi, 1)]
+        partly = bool(lead_effect) and lead_effect[0] in [typo_normalize(e) for e in _effects(text, follower, lo, hi, 8)]
         for position, engine_issue in ((0, lead), (1, follower)):
             effect = _effects(text, engine_issue, lo, hi, 1)
             first = _translate(text, effect[0], base, lo, hi) if effect else None
-            if first in replacements and replacements.index(first) > position:
-                replacements.remove(first)
-                replacements.insert(position, first)
+            keys = [typo_normalize(r) for r in replacements]
+            if first is not None and typo_normalize(first) in keys and keys.index(typo_normalize(first)) > position:
+                replacements.insert(position, replacements.pop(keys.index(typo_normalize(first))))
         merged[best] = replace(
             base,
             message=lead.message,
@@ -494,7 +520,7 @@ def is_confident(text: str, issue: Issue) -> bool:
     - les deux moteurs proposent le même mot et il y a très peu de candidats
       (sinon, "fesait" deviendrait "fessait" au lieu de "faisait") ;
     - c'est une correction de ponctuation/espaces à suggestion unique."""
-    if not issue.replacements or issue.category is Category.STYLE:
+    if not issue.replacements or issue.category is Category.STYLE or never_sure(issue):
         return False
     original = text[issue.start:issue.end]
     first = issue.replacements[0]
@@ -513,9 +539,34 @@ def is_confident(text: str, issue: Issue) -> bool:
 
 _SOLO_WINDOW = 12
 _SOLO_MAX_TRIALS = 120
-# Accord déduit de la seule forme du verbe être ("sont bon" -> "bons") : si c'est le verbe qui est faux
-# ("il a pris sont manteau" -> "sont manteaux"), la correction aggrave la phrase. Jamais sans confirmation.
-_SOLO_WEAK_RULES = ("gv1__ppas_être_accord_",)
+# Familles de règles Grammalecte dont la correction est fiable sans un second moteur pour la confirmer :
+# chacune a été vérifiée sur des phrases réelles (tests/test_offline_express.py). Les autres corrigent
+# trop souvent le mauvais mot : « Mes parents son partis » -> « son parti » (gn_mon_ton_son prend « son »
+# pour un déterminant), « on faim » -> « on feint » (conf_on_non_verbe), « Ses parents son » -> « sons »
+# (gn_det_epi_plur_2m), « Il a pris sont manteau » -> « sont manteaux » (ppas_être_accord_plur).
+_SOLO_RULES = (
+    "conf_à_a_", "conf_ces_ses_c_est", "conf_ont", "conf_ils_non_verbe", "vmode_verbes_que_subjonctif",
+    "gn_quel_", "gn_ce_1m", "gn_les_1m", "gn_det_epi_plur_1m", "conj_les_nom", "ppas_être_confusion",
+    "ppas_sujet_être_accord_", "ppas_ne_me_te_se_être", "ppas_avoir", "ppas_3pl_fem_verbe_état",
+)
+# Jamais sûres, même avec l'accord des deux moteurs : le participe d'un verbe pronominal s'accorde selon
+# son complément (« nous nous sommes lavés », mais « nous nous sommes téléphoné »), ce qu'aucun ne sait voir.
+_NEVER_SURE_RULES = ("ppas_nous_nous_être", "ppas_vous_vous_être")
+_RULE_FAMILY_RE = re.compile(r"^gv?\d+__(.+?)(?:__b\d+_a\d+(?:_\d+)?)?$")
+
+
+def rule_family(rule_id: str) -> str:
+    """« gv1__ppas_avoir__b1_a1_1 » -> « ppas_avoir » (famille de la règle, sans niveau ni variante)."""
+    m = _RULE_FAMILY_RE.match(rule_id)
+    return m.group(1) if m else rule_id
+
+
+def solo_rule(issue: Issue) -> bool:
+    return rule_family(issue.rule_id).startswith(_SOLO_RULES)
+
+
+def never_sure(issue: Issue) -> bool:
+    return rule_family(issue.rule_id).startswith(_NEVER_SURE_RULES)
 
 
 def solo_candidate(issue: Issue) -> bool:
@@ -524,7 +575,7 @@ def solo_candidate(issue: Issue) -> bool:
     correcteur humain qui ne connaît pas l'auteur)."""
     if issue.confident or issue.category is not Category.GRAMMAR or not issue.replacements:
         return False
-    if issue.rule_id.startswith(_SOLO_WEAK_RULES):
+    if not solo_rule(issue):
         return False
     first = issue.replacements[0]
     feminine = first[:-1] + "es" if first.endswith("s") else first + "e"
@@ -686,6 +737,13 @@ def number_direction(original: str, replacement: str) -> int:
     if plural_of(b, a):
         return -1
     return 0
+
+
+def _sentence_at(text: str, start: int, end: int) -> str:
+    """La phrase qui contient [start, end], sans les espaces autour."""
+    lo = max((m.end() for m in _SENTENCE_END_RE.finditer(text, 0, start)), default=0)
+    hi = next((m.end() for m in _SENTENCE_END_RE.finditer(text, end)), len(text))
+    return text[lo:hi].strip()
 
 
 def _sentence_finder(text: str):

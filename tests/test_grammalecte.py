@@ -88,3 +88,32 @@ def test_spelling_ranking_keeps_grammalecte_distances():
     assert rank_spelling("bonjoure", ("bonjour", "bonjours", "conjure")) == ("bonjour", "bonjours", "conjure")
     assert rank_spelling("tres", ("très", "Dres", "ares")) == ("très", "ares", "Dres")
     assert rank_spelling("Vien", ("VIe", "Vie", "Viens")) == ("Viens", "Vie", "VIe")
+
+
+def test_case_corrections_are_kept(home):
+    """« Janvier » -> « janvier » : la suggestion ne doit pas reprendre la majuscule du mot tapé (elle serait
+    alors identique à l'original, et la remarque disparaissait)."""
+    from correcteur.checker import Checker
+    from correcteur.config import PersonalDictionary
+
+    settings = Settings()
+    settings.languagetool.enabled = False
+    checker = Checker(settings, PersonalDictionary())
+    text = "Je suis né en Janvier."
+    assert [(text[i.start:i.end], i.replacements[0]) for i in checker.check(text).issues] == [("Janvier", "janvier")]
+    checker.close()
+
+
+def test_emoji_do_not_hide_faults():
+    """Grammalecte ne reconnaît pas les emoji et perdait les fautes qui suivent (« 😀 Les enfant joue. »)."""
+    for text in ("😀 Les enfant joue.", "Bravo 👍🏽 les enfant joue.", "Merci ❤️ ! Les enfant joue."):
+        got = found(engine().check(text, "fr"), text)
+        assert "enfant" in got, text
+        assert all(text[i.start:i.end].strip() for i in got.values())  # rien sur les espaces de remplacement
+
+
+def test_standard_mode_skips_typographic_ordinals():
+    """Les identifiants de Grammalecte 2.3 ont un préfixe de niveau (« g2__typo_ordinaux… ») : « 1er » ne doit
+    pas devenir « 1ᵉʳ » en mode standard."""
+    text = "Le 1er mai, il pleuvait."
+    assert "1er" not in found(engine().check(text, "fr"), text)
