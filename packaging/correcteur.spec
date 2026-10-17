@@ -17,8 +17,11 @@ if not (ROOT / "vendor" / "grammalecte" / "__init__.py").exists():
 
 hidden = collect_submodules("correcteur")
 hidden += collect_submodules("grammalecte", filter=lambda name: "test" not in name and "bottle" not in name)
+# pynput choisit son module X11 au lancement. Sans écran, l'import de pynput échoue pendant le build et
+# collect_submodules("pynput") ne trouve rien : ces modules sont donc nommés un par un.
+PYNPUT_X11 = ["pynput.keyboard._xorg", "pynput.mouse._xorg", "pynput._util.xorg", "pynput._util.xorg_keysyms"]
 if sys.platform.startswith("linux"):
-    hidden += collect_submodules("pynput") + collect_submodules("Xlib")
+    hidden += PYNPUT_X11 + collect_submodules("Xlib")
 
 datas = collect_data_files("grammalecte", excludes=["**/gc_test.txt", "**/perf.txt"])
 datas += [(str(ROOT / "src" / "correcteur" / "resources"), "correcteur/resources")]
@@ -34,6 +37,12 @@ a = Analysis(
               "PySide6.QtOpenGL", "PySide6.QtPdf", "PySide6.QtSql", "PySide6.QtTest", "PySide6.QtMultimedia"],
     noarchive=False,
 )
+
+if sys.platform.startswith("linux"):
+    missing = set(PYNPUT_X11) - {entry[0] for entry in a.pure}
+    if missing:
+        raise SystemExit(f"Modules absents du paquet (raccourcis X11 inutilisables) : {sorted(missing)}")
+
 # Le thème GTK de Qt n'est pas utilisé (style Fusion) : on évite d'embarquer GTK (~15 Mo).
 _unused = ("libqgtk3", "libgtk-3", "libgdk-3", "libatk-1.0", "libatk-bridge-2.0")
 a.binaries = [b for b in a.binaries if not any(part in b[0] for part in _unused)]

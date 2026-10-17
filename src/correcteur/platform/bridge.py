@@ -158,6 +158,29 @@ class WindowsBridge(Bridge):
         return ["Session : Windows", "Raccourcis : RegisterHotKey", "Sélection : Ctrl+C simulé (presse-papiers restauré)"]
 
 
+def xtest_key(letter: str):
+    """Touche pynput qui tape ``letter`` comme une vraie frappe sous X11.
+
+    pynput envoie un caractère par XSendEvent : un évènement « synthétique » que certaines applications
+    ignorent (xterm, par exemple) et que les raccourcis globaux ne voient pas. Donnée par son keysym, la
+    touche passe par XTEST, comme le clavier. Si la disposition n'a pas cette touche, on garde le caractère.
+    """
+    from pynput.keyboard import KeyCode
+    from Xlib import XK, display
+
+    keysym = XK.string_to_keysym(letter)
+    try:
+        d = display.Display()
+        try:
+            if keysym and d.keysym_to_keycode(keysym):
+                return KeyCode.from_vk(keysym)
+        finally:
+            d.close()
+    except Exception:
+        pass
+    return letter
+
+
 class X11Bridge(Bridge):
     name = "x11"
 
@@ -267,9 +290,10 @@ class X11Bridge(Bridge):
                 kb.release(key)
             except Exception:
                 pass
+        key = xtest_key(letter)
         with kb.pressed(Key.ctrl):
-            kb.press(letter)
-            kb.release(letter)
+            kb.press(key)
+            kb.release(key)
 
     # sélections : python-xlib (voir x11_selection), Qt en dernier recours
     def _read(self, selection: str) -> str | None:

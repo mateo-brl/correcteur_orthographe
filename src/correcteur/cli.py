@@ -180,6 +180,11 @@ def cmd_diagnostic(args) -> int:
     print(f"Grammalecte : {'installé' if import_grammalecte() else 'non installé'} (activé : {settings.grammalecte.enabled})")
     print(f"LanguageTool : mode {settings.languagetool.mode} (activé : {settings.languagetool.enabled})")
     print(f"  serveur local installé : {'oui' if _find_server_jar() else 'non'} · Java : {find_java() or 'introuvable'}")
+    if session_type() == "x11":
+        from correcteur.platform.bridge import X11Bridge
+
+        ok, why = X11Bridge().hotkeys_supported()
+        print(f"Raccourcis globaux : {'oui (pynput)' if ok else why.splitlines()[0]}")
     if sys.platform.startswith("linux"):
         for tool in ("wl-paste", "wl-copy", "wtype", "ydotool", "xdotool", "gsettings"):
             print(f"  {tool} : {'oui' if which(tool) else 'non'}")

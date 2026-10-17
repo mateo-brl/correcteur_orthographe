@@ -71,7 +71,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libegl1 libgl1 libdbus-1-3 libfontconfig1 \
             libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 \
-            libxcb-randr0 libxcb-render-util0 libxcb-image0
+            libxcb-randr0 libxcb-render-util0 libxcb-image0 xvfb
 
       - name: Dépendances
         run: |
@@ -88,6 +88,11 @@ jobs:
         run: |
           dist/Correcteur/correcteur corriger --hors-ligne "Je vais a la plage , et il faut que tu viens." > sortie.txt
           python -c "t = open('sortie.txt', encoding='utf-8').read(); print(t); assert 'à la plage, et' in t"
+
+      # Le paquet lancé comme par un utilisateur : Ctrl+Alt+X dans une vraie fenêtre (écran X11 virtuel).
+      - name: Test du paquet sur un bureau (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1280x800x24 +extension RECORD" python packaging/verifier_paquet_linux.py dist/Correcteur/correcteur
 
       - name: Test de l'exécutable (Windows)
         if: runner.os == 'Windows'
