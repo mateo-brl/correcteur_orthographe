@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
@@ -152,3 +153,86 @@ def test_download_checks_sha256(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="SHA-256"):
         installer.download("https://exemple.org/f", tmp_path / "g", sha256="0" * 64)
     assert not (tmp_path / "g").exists()
+
+
+# Faux gsettings et dconf : une base de réglages dans un fichier JSON (FAUX_DCONF).
+_FAKE_GSETTINGS = r'''#!{python}
+import json, os, sys
+path = os.environ["FAUX_DCONF"]
+state = json.load(open(path))
+memory = bool(os.environ.get("FAUX_GSETTINGS_MEMOIRE"))
+if memory:  # comme gsettings quand il n'atteint pas dconf : base vide en mémoire, rien n'est gardé
+    sys.stderr.write("GLib-GIO-Message: Using the 'memory' GSettings backend.  Your settings will not be saved.\n")
+    state = {{}}
+cmd, schema, key = sys.argv[1:4]
+name = schema + " " + key
+if cmd == "get":
+    print(state.get(name, "@as []" if key == "custom-keybindings" else "''"))
+else:
+    state[name] = sys.argv[4] if key == "custom-keybindings" else repr(sys.argv[4])
+    if not memory:
+        json.dump(state, open(path, "w"))
+'''
+_FAKE_DCONF = r'''#!{python}
+import json, os, sys
+state, base = json.load(open(os.environ["FAUX_DCONF"])), sys.argv[2]
+print("\n".join(sorted({{k.split(" ")[0].split(":", 1)[1][len(base):] for k in state if ":" + base in k}})))
+'''
+_BASE = "/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/"
+_LIST = "org.gnome.settings-daemon.plugins.media-keys custom-keybindings"
+
+
+def _user_shortcuts(listed: bool) -> dict:
+    state = {f"org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:{_BASE}{d}/ name": f"'{d}'"
+             for d in ("win-e", "terminator")}
+    if listed:
+        state[_LIST] = str([f"{_BASE}win-e/", f"{_BASE}terminator/"])
+    return state
+
+
+@pytest.fixture
+def fake_dconf(tmp_path, monkeypatch):
+    import json
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, script in (("gsettings", _FAKE_GSETTINGS), ("dconf", _FAKE_DCONF)):
+        (bin_dir / name).write_text(script.format(python=sys.executable), encoding="utf-8")
+        (bin_dir / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    db = tmp_path / "dconf.json"
+    monkeypatch.setenv("FAUX_DCONF", str(db))
+
+    def setup(state: dict) -> callable:
+        db.write_text(json.dumps(state), encoding="utf-8")
+        return lambda: json.loads(db.read_text(encoding="utf-8"))
+
+    return setup
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="GNOME : Linux")
+def test_gnome_shortcuts_keep_the_user_ones(fake_dconf):
+    from correcteur.platform.autostart import install_gnome_shortcuts
+
+    read = fake_dconf(_user_shortcuts(listed=True))
+    assert "créés" in install_gnome_shortcuts("<ctrl>+<alt>+c", "<ctrl>+<alt>+x")
+    install_gnome_shortcuts("<ctrl>+<alt>+c", "<ctrl>+<alt>+x")  # deux fois : pas de doublon
+    listed = eval(read()[_LIST])
+    assert listed == [f"{_BASE}win-e/", f"{_BASE}terminator/", f"{_BASE}correcteur-verifier/",
+                      f"{_BASE}correcteur-express/"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="GNOME : Linux")
+@pytest.mark.parametrize("memory", [True, False], ids=["base en mémoire", "liste lue vide"])
+def test_gnome_shortcuts_never_overwrite_an_unread_list(fake_dconf, monkeypatch, memory):
+    """gsettings qui n'atteint pas dconf lit une liste vide : la réécrire effacerait les raccourcis de
+    l'utilisateur (vu sous Debian 13 avec la 0.1.1). On s'arrête sans rien écrire."""
+    from correcteur.platform.autostart import install_gnome_shortcuts
+
+    state = _user_shortcuts(listed=memory)
+    read = fake_dconf(state)
+    if memory:
+        monkeypatch.setenv("FAUX_GSETTINGS_MEMOIRE", "1")
+    with pytest.raises(RuntimeError):
+        install_gnome_shortcuts("<ctrl>+<alt>+c", "<ctrl>+<alt>+x")
+    assert read() == state

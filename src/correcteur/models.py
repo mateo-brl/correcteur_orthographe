@@ -51,6 +51,7 @@ class Issue:
     sources: tuple[str, ...] = ()
     rules: tuple[str, ...] = ()  # règles à couper pour ne plus signaler cette faute (tous moteurs)
     agreed: bool = False      # plusieurs moteurs proposent la même correction
+    partly_agreed: bool = False  # la correction du moteur prioritaire n'est qu'un autre choix de l'autre moteur
     confident: bool = False   # correction sûre, appliquée par la correction express
     # Identifiant stable : conservé quand la faute est décalée après une modification du texte.
     uid: int = field(default_factory=lambda: next(_uids), compare=False, repr=False)
