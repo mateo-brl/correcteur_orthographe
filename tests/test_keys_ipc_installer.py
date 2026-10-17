@@ -64,6 +64,20 @@ def test_autostart_linux(home, monkeypatch):
     assert not autostart.autostart_enabled()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="fichier .desktop : Linux")
+def test_autostart_command_keeps_settings_in_sync(home, monkeypatch):
+    """« correcteur demarrage oui » (lancé par l'installateur) : le réglage enregistré suit le disque."""
+    from correcteur.cli import main
+    from correcteur.config import SettingsStore
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+    assert main(["demarrage", "oui"]) == 0
+    assert SettingsStore().load().general.autostart
+    assert "Icon=correcteur\n" in (home / "xdg" / "autostart" / "correcteur.desktop").read_text()
+    assert main(["demarrage", "non"]) == 0
+    assert not SettingsStore().load().general.autostart
+
+
 def test_ipc_roundtrip(home):
     from correcteur.platform.ipc import IpcServer, send_command
 

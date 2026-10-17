@@ -408,7 +408,9 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
     Chaque signalement d'un moteur secondaire est rattaché au signalement le
     plus compatible du moteur prioritaire. La zone la plus précise est gardée,
     le message vient du moteur prioritaire, les suggestions sont réunies et
-    l'accord des moteurs est mémorisé (il sert à la correction express)."""
+    l'accord des moteurs est mémorisé (il sert à la correction express). Il faut
+    pour cela la même correction principale : « on joue » en tête chez l'un et
+    seulement en 2e choix chez l'autre (qui préfère « ont joué ») n'est pas un accord."""
     ordered = sorted(issues, key=lambda i: (ENGINE_PRIORITY.get(i.source, 9), i.start, i.end))
     merged: list[Issue] = []
     for issue in ordered:
@@ -425,20 +427,26 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
         cand = merged[best]
         base, other = (cand, issue) if cand.length <= issue.length else (issue, cand)
         lo, hi = min(cand.start, issue.start), max(cand.end, issue.end)
-        extra = []
-        for eff in _effects(text, other, lo, hi, limit=8):
-            translated = _translate(text, eff, base, lo, hi)
-            if translated is not None:
-                extra.append(translated)
+        effects = _effects(text, other, lo, hi, limit=8)
+        translated = [_translate(text, eff, base, lo, hi) for eff in effects]
+        if translated and translated[0] is None:
+            # La correction principale de l'autre moteur déborde de la zone étroite (« on joué » -> « ont joué »
+            # change « on », hors de « joué ») : on passe à la zone qui couvre les deux pour ne pas la perdre.
+            base = replace(base, start=lo, end=hi,
+                           replacements=_effects(text, base, lo, hi, limit=len(base.replacements)))
+            translated = effects
+        extra = [t for t in translated if t is not None]
         lead = cand if ENGINE_PRIORITY.get(cand.source, 9) <= ENGINE_PRIORITY.get(issue.source, 9) else issue
-        # La correction du moteur prioritaire reste en tête, suivie de celles de l'autre.
-        lead_first = _effects(text, lead, lo, hi, 1)
+        # La correction du moteur prioritaire reste en tête, celle de l'autre moteur la suit : en cas de
+        # désaccord (« on joue » / « ont joué »), les deux choix principaux sont les premiers proposés.
         replacements = list(dict.fromkeys(base.replacements + extra))
-        if lead_first:
-            first = _translate(text, lead_first[0], base, lo, hi)
-            if first in replacements:
+        follower = issue if lead is cand else cand
+        for position, engine_issue in ((0, lead), (1, follower)):
+            effect = _effects(text, engine_issue, lo, hi, 1)
+            first = _translate(text, effect[0], base, lo, hi) if effect else None
+            if first in replacements and replacements.index(first) > position:
                 replacements.remove(first)
-                replacements.insert(0, first)
+                replacements.insert(position, first)
         merged[best] = replace(
             base,
             message=lead.message,
@@ -449,7 +457,7 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
             rules=tuple(dict.fromkeys((lead.rule_id,) + _rules_to_ignore(cand) + _rules_to_ignore(issue))),
             source=lead.source,
             category=lead.category,
-            agreed=cand.agreed or best_score >= 2,
+            agreed=cand.agreed or best_score == 3,
         )
     merged.sort(key=lambda i: (i.start, i.end))
     return merged
