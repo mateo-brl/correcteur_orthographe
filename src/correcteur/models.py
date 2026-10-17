@@ -49,6 +49,7 @@ class Issue:
     source: str
     url: str = ""
     sources: tuple[str, ...] = ()
+    rules: tuple[str, ...] = ()  # règles à couper pour ne plus signaler cette faute (tous moteurs)
     agreed: bool = False      # plusieurs moteurs proposent la même correction
     confident: bool = False   # correction sûre, appliquée par la correction express
     # Identifiant stable : conservé quand la faute est décalée après une modification du texte.
@@ -57,6 +58,8 @@ class Issue:
     def __post_init__(self) -> None:
         if not self.sources:
             self.sources = (self.source,)
+        if not self.rules:
+            self.rules = (self.rule_id,)
 
     @property
     def length(self) -> int:

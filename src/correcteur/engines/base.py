@@ -40,5 +40,10 @@ class Engine(ABC):
     @abstractmethod
     def check(self, text: str, language: str) -> list[Issue]: ...
 
+    def recheck(self, text: str, language: str) -> list[Issue]:
+        """Revérification pour une contre-épreuve : mêmes remarques que `check`, mais les
+        suggestions d'orthographe peuvent manquer si cela rend l'analyse plus rapide."""
+        return self.check(text, language)
+
     def close(self) -> None:
         pass

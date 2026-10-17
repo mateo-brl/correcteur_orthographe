@@ -32,7 +32,7 @@ class FakeEngine(Engine):
         time.sleep(self.delay)
         if self.error:
             raise EngineError(self.error)
-        return self.found(text)
+        return present(self.found(text))  # un mot absent du texte (déjà corrigé) : pas de remarque
 
 
 def find(text, word, occurrence=0):
@@ -113,6 +113,25 @@ def test_merge_and_confidence(checker):
     assert not found["fesait"].confident
 
 
+def test_merged_issue_keeps_every_rule(checker):
+    """Pour ne plus signaler une faute, il faut couper la règle de chaque moteur :
+    sinon l'autre moteur la resignale à la vérification suivante."""
+    found = by_text(checker.check(TEXT).issues, TEXT)
+    assert found["obtenu"].rule_id == "G_PPAS"
+    assert found["obtenu"].rules == ("G_PPAS", "QUE_AVOIR")
+    checker.settings.ignored_rules = list(found["obtenu"].rules)
+    assert "obtenu" not in by_text(checker.check(TEXT).issues, TEXT)
+
+
+def test_spelling_rule_never_joins_a_grammar_fault():
+    text = "Il a mangé la tarte a la crème."
+    g = issue(text, "a", ["à"], "grammalecte", rule="CONF_A", occurrence=1)
+    lt = issue(text, "a", ["à"], "languagetool", Category.SPELLING, "MORFOLOGIK_RULE_FR", occurrence=1)
+    merged = merge_issues(text, [g, lt])
+    assert len(merged) == 1 and merged[0].category is Category.GRAMMAR
+    assert merged[0].rules == ("CONF_A",)
+
+
 def test_autocorrect_only_applies_confident(checker):
     new_text, applied, remaining, _ = checker.autocorrect(TEXT)
     assert new_text == "Les résultats que j'ai obtenus sont bons et école ferme, fesait-il."
@@ -152,6 +171,49 @@ def test_autocorrect_never_touches_a_fixed_passage_twice(home):
     new_text, applied, _, _ = c.autocorrect("abc def")
     assert new_text == "abcx def" and len(applied) == 1
     c.close()
+
+
+def test_autocorrect_without_local_engine_stays_cautious(home):
+    """Sans moteur local (texte anglais, Grammalecte désactivé), les passes
+    suivantes n'ont personne pour confirmer : une correction douteuse de la
+    1re passe ne devient jamais sûre."""
+    s = Settings()
+
+    def lt(t):
+        return present([
+            issue(t, "teh", ["the", "ten", "tea"], "languagetool", Category.SPELLING, "SPELL"),
+            issue(t, " ,", [","], "languagetool", Category.TYPOGRAPHY, "COMMA_WS"),
+        ])
+
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "languagetool", lt, languages=("en",))])
+    new_text, applied, remaining, _ = c.autocorrect("I saw teh car , then left.", "en-US")
+    c.close()
+    assert new_text == "I saw teh car, then left."
+    assert len(applied) == 1
+    assert [new_text[i.start:i.end] for i in remaining] == ["teh"]
+
+
+def test_autocorrect_does_not_wait_forever_for_a_slow_engine(home):
+    """Réseau lent : la correction express part avec Grammalecte seul (règle
+    "solo") au lieu de laisser l'utilisateur attendre sans rien voir."""
+    s = Settings()
+    text = "Je vais a la plage demain."
+    g = FakeEngine(s, "grammalecte", lambda t: present([issue(t, "a", ["à"], "grammalecte", rule="CONF_A")]))
+    slow = FakeEngine(s, "languagetool", lambda t: [], delay=3)
+    c = Checker(s, PersonalDictionary(), engines=[g, slow])
+    t0 = time.monotonic()
+    new_text, _, _, final = c.autocorrect(text, slow_timeout=0.3)
+    assert time.monotonic() - t0 < 2
+    assert new_text == "Je vais à la plage demain."
+    assert not final.statuses["languagetool"].ok  # le bilan dit pourquoi LanguageTool manque
+
+    t0 = time.monotonic()
+    result = c.check(text, timeout=0.3)
+    assert time.monotonic() - t0 < 2
+    c.close()
+    assert result.done and result.statuses["grammalecte"].ok
+    assert not result.statuses["languagetool"].ok
+    assert "0.3 s" in result.statuses["languagetool"].detail
 
 
 def test_partial_updates_are_streamed(home):
@@ -296,22 +358,108 @@ def test_checker_is_thread_safe(checker):
     assert not errors
 
 
+def when(context, word, repl, rule="R", category=Category.GRAMMAR, source="grammalecte"):
+    """Remarque sur `word` tant que le texte contient `context` : comme un vrai moteur,
+    qui juge un mot d'après ses voisins (corriger l'un peut faire disparaître l'autre)."""
+    import re
+
+    def found(t):
+        match = re.search(r"(?<!\w)" + re.escape(context) + r"(?!\w)", t)
+        if match is None:
+            return None
+        start = match.start() + context.index(word)
+        return Issue(start, start + len(word), "msg", list(repl), category, rule, source)
+    return found
+
+
+def solo_checker(s, *rules, name="grammalecte"):
+    """Un seul moteur répond (l'autre est hors ligne)."""
+    other = "languagetool" if name == "grammalecte" else "grammalecte"
+    engines = [FakeEngine(s, name, lambda t: [r(t) for r in rules]), FakeEngine(s, other, error="hors ligne")]
+    return Checker(s, PersonalDictionary(), engines=engines)
+
+
+def sure(checker, text):
+    return {w: i.confident for w, i in by_text(checker.check(text).issues, text).items()}
+
+
 def test_solo_engine_accepts_isolated_single_grammar_fix(home):
-    s = Settings()
-    text = "Je vais a la plage demain. Les résultats sont bon et sont là."
-    found = lambda t: [
-        issue(t, "a", ["à"], "grammalecte", rule="CONF_A"),
-        issue(t, "sont", ["son"], "grammalecte", rule="G_SON"),
-        issue(t, "bon", ["bons"], "grammalecte", rule="G_ACCORD"),
-    ]
-    # LanguageTool en panne : Grammalecte est seul.
-    engines = [FakeEngine(s, "grammalecte", found), FakeEngine(s, "languagetool", error="hors ligne")]
-    c = Checker(s, PersonalDictionary(), engines=engines)
-    result = c.check(text)
-    got = by_text(result.issues, text)
-    assert got["a"].confident
-    # Deux corrections voisines : ambigu, rien d'automatique.
-    assert not got["sont"].confident and not got["bon"].confident
+    c = solo_checker(Settings(), when("vais a la", "a", ["à"]), when("sont bon", "sont", ["son"]),
+                     when("sont bon", "bon", ["bons"]))
+    got = sure(c, "Je vais a la plage demain. Les résultats sont bon et sont là.")
+    assert got["a"]
+    # Chaque correction fait disparaître l'autre : deux lectures possibles, rien d'automatique.
+    assert not got["sont"] and not got["bon"]
+    c.close()
+
+
+def test_solo_recheck_applies_the_cause_not_the_consequence(home):
+    """"Ils on mangé" : "ont" règle aussi "mangé" ; corriger "mangé" laisse "on"."""
+    c = solo_checker(Settings(), when("Ils on", "on", ["ont"]), when("on mangé", "mangé", ["mange", "mangeait"]))
+    text = "Ils on mangé au restaurant."
+    got = sure(c, text)
+    assert got["on"] and not got["mangé"]
+    assert c.autocorrect(text)[0] == "Ils ont mangé au restaurant."
+    c.close()
+
+
+def test_solo_recheck_applies_independent_neighbours(home):
+    c = solo_checker(Settings(), when("avons manger", "manger", ["mangé"]), when("des pomme", "pomme", ["pommes"]))
+    text = "Nous avons manger des pomme hier."
+    assert sure(c, text) == {"manger": True, "pomme": True}
+    assert c.autocorrect(text)[0] == "Nous avons mangé des pommes hier."
+    c.close()
+
+
+def test_solo_recheck_ignores_an_alternative_that_breaks_something_else(home):
+    """"Quel belle journée" : "beau" ferait disparaître "Quel" mais rendrait "journée" fautive."""
+    c = solo_checker(Settings(), when("Quel belle", "Quel", ["Quelle"]), when("Quel belle", "belle", ["beau"]),
+                     when("beau journée", "journée", []))
+    assert sure(c, "Quel belle journée !") == {"Quel": True, "belle": False}
+    c.close()
+
+
+def test_solo_recheck_rejects_a_fix_the_engine_flags_again(home):
+    c = solo_checker(Settings(), when("faut mangé", "mangé", ["mangez"]), when("faut mangez", "mangez", ["manger"]))
+    assert sure(c, "Il faut mangé.") == {"mangé": False}
+    c.close()
+
+
+def test_solo_accepts_masculine_among_gender_variants(home):
+    from correcteur.checker import solo_candidate
+
+    c = solo_checker(Settings(), when("suis aller", "aller", ["allé", "allée"]))
+    assert c.autocorrect("Je suis aller au cinéma.")[0] == "Je suis allé au cinéma."
+    c.close()
+    grammar = lambda *repl: Issue(0, 1, "", list(repl), Category.GRAMMAR, "R", "grammalecte")
+    assert solo_candidate(grammar("allés", "allées"))
+    assert not solo_candidate(grammar("mange", "manges"))  # personne du verbe : pas un simple accord
+    assert not solo_candidate(grammar("ait", "est"))
+
+
+def test_solo_never_trusts_agreement_guessed_from_the_verb(home):
+    """"Il a pris sont manteau" : l'accord avec "sont" donnerait "sont manteaux"."""
+    c = solo_checker(Settings(), when("sont manteau", "manteau", ["manteaux"], rule="gv1__ppas_être_accord_plur__b1"))
+    text = "Il a pris sont manteau."
+    assert sure(c, text) == {"manteau": False}
+    assert c.autocorrect(text)[0] == text
+    c.close()
+
+
+def test_solo_recheck_failure_leaves_the_fix_to_the_user(home):
+    rules = [when("Ils on", "on", ["ont"]), when("on mangé", "mangé", ["mange"])]
+    c = solo_checker(Settings(), *rules)
+    engine = c.engine("grammalecte")
+    engine.recheck = lambda text, language: (_ for _ in ()).throw(RuntimeError("moteur planté"))
+    assert sure(c, "Ils on mangé au restaurant.") == {"on": False, "mangé": False}
+    c.close()
+
+
+def test_solo_without_local_engine_keeps_the_distance_rule(home):
+    """LanguageTool seul : pas de revérification instantanée, deux remarques voisines restent à vérifier."""
+    c = solo_checker(Settings(), when("Ils on", "on", ["ont"], source="languagetool"),
+                     when("on mangé", "mangé", ["mange"], source="languagetool"), name="languagetool")
+    assert sure(c, "Ils on mangé au restaurant.") == {"on": False, "mangé": False}
     c.close()
 
 

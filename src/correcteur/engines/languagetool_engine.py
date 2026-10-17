@@ -36,6 +36,18 @@ _STYLE_CATEGORIES = {"STYLE", "REDUNDANCY", "REPETITIONS", "REPETITIONS_STYLE", 
                      "SEMANTICS", "MISC"}
 
 
+def server_root(url: str) -> str:
+    """Adresse d'un serveur perso telle qu'on la tape ("monserveur:8081",
+    ".../v2/check") ramenée à sa racine "http://monserveur:8081"."""
+    url = url.strip().rstrip("/")
+    if "://" not in url:
+        url = "http://" + url
+    for suffix in ("/v2/check", "/v2"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+    return url
+
+
 def _matches_context(match: dict, actual: str) -> bool:
     """Vérifie que le passage signalé correspond bien au contexte renvoyé par le serveur."""
     context = match.get("context") or {}
@@ -92,7 +104,7 @@ class LanguageToolEngine(Engine):
             return PREMIUM_URL
         if lt.mode == "local":
             return f"http://127.0.0.1:{lt.local_port}"
-        return lt.url.rstrip("/")
+        return server_root(lt.url)
 
     def available(self) -> tuple[bool, str]:
         lt = self.settings.languagetool

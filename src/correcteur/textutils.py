@@ -189,8 +189,9 @@ def only_typographic_difference(a: str, b: str) -> bool:
 
 def adapt_to_user_style(suggestion: str, text: str) -> str:
     """Dans les suggestions, garde les apostrophes et espaces du style de
-    l'utilisateur (apostrophe droite si le texte n'utilise que celle-là)."""
-    if "'" in text and "’" not in text:
+    l'utilisateur : apostrophe droite, celle du clavier, sauf si le texte
+    emploie déjà l'apostrophe courbe."""
+    if "’" not in text:
         suggestion = suggestion.replace("’", "'")
     if "\u00a0" not in text and "\u202f" not in text:
         suggestion = suggestion.replace("\u00a0", " ").replace("\u202f", " ")

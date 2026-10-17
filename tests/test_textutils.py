@@ -93,6 +93,7 @@ def test_typographic_equivalence():
 def test_adapt_to_user_style():
     assert adapt_to_user_style("C’est", "Je dis que c'est") == "C'est"
     assert adapt_to_user_style("C’est", "Je dis que c’est") == "C’est"
+    assert adapt_to_user_style("C’est", "Ces un film.") == "C'est"  # aucune apostrophe : celle du clavier
     assert adapt_to_user_style("10\u00a0h", "à 10h") == "10 h"
 
 
