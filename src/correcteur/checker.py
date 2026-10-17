@@ -197,10 +197,27 @@ class Checker:
             answered = [n for n, st in statuses.items() if st.ok]
             solo = allow_solo and not pending and len(answered) == 1
             recheck = self._recheck(answered[0], language) if solo and answered[0] in _LOCAL_ENGINES else None
-            result = CheckResult(text, self.post_process(text, raw, solo, recheck), dict(statuses), pending)
+            issues = self.post_process(text, raw, solo, recheck)
+            if not pending and len(answered) > 1:
+                self._settle_partial(text, raw, issues, language)
+            result = CheckResult(text, issues, dict(statuses), pending)
             if on_update:
                 on_update(result)
         return result
+
+    def _settle_partial(self, text: str, raw: dict[str, list[Issue]], issues: list[Issue], language: str) -> None:
+        """Accord partiel : la correction de Grammalecte n'est que le 2e choix de LanguageTool. Un score ne
+        peut pas trancher (« les enfant » : LanguageTool préfère « l'enfant », à tort ; « on joué » : il préfère
+        « ont joué », à raison). On reprend donc la décision hors ligne, Grammalecte seul avec contre-épreuve :
+        la correction en ligne n'en fait jamais moins que hors ligne quand l'autre moteur la propose aussi."""
+        partial = [i for i in issues if i.partly_agreed and not i.confident and i.replacements]
+        local = [name for name in raw if name in _LOCAL_ENGINES and raw[name]]
+        if not partial or len(local) != 1:
+            return
+        offline = self.post_process(text, {local[0]: raw[local[0]]}, True, self._recheck(local[0], language))
+        settled = {_corrected(text, o) for o in offline if o.confident and o.replacements}
+        for issue in partial:
+            issue.confident = _corrected(text, issue) in settled
 
     def _recheck(self, name: str, language: str) -> Recheck:
         """Revérification instantanée par un moteur local, pour la contre-épreuve de la règle "solo"."""
@@ -359,6 +376,10 @@ class Checker:
         return current, applied_all, remaining, result
 
 
+def _corrected(text: str, issue: Issue) -> str:
+    return text[:issue.start] + issue.replacements[0] + text[issue.end:]
+
+
 def _effects(text: str, issue: Issue, lo: int, hi: int, limit: int = 4) -> list[str]:
     head, tail = text[lo:issue.start], text[issue.end:hi]
     return [head + r + tail for r in issue.replacements[:limit]]
@@ -441,6 +462,8 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
         # désaccord (« on joue » / « ont joué »), les deux choix principaux sont les premiers proposés.
         replacements = list(dict.fromkeys(base.replacements + extra))
         follower = issue if lead is cand else cand
+        lead_effect = _effects(text, lead, lo, hi, 1)
+        partly = bool(lead_effect) and lead_effect[0] in _effects(text, follower, lo, hi, 8)
         for position, engine_issue in ((0, lead), (1, follower)):
             effect = _effects(text, engine_issue, lo, hi, 1)
             first = _translate(text, effect[0], base, lo, hi) if effect else None
@@ -458,6 +481,7 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
             source=lead.source,
             category=lead.category,
             agreed=cand.agreed or best_score == 3,
+            partly_agreed=cand.partly_agreed or partly,
         )
     merged.sort(key=lambda i: (i.start, i.end))
     return merged

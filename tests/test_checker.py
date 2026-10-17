@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 
@@ -158,6 +159,37 @@ def test_autocorrect_does_not_apply_a_second_choice(home):
     assert new_text == ON_JOUE and not applied
     assert [ON_JOUE[i.start:i.end] for i in remaining] == ["on joué"]
     c.close()
+
+
+def word_issue(text, word, repl, source, rule="R"):
+    """Comme `issue`, mais seulement pour le mot entier (« enfant » n'est pas trouvé dans « enfants »)."""
+    m = re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text)
+    return Issue(m.start(), m.end(), "msg", list(repl), Category.GRAMMAR, rule, source) if m else None
+
+
+def test_partial_agreement_falls_back_on_the_offline_decision(home):
+    """« les enfant » : Grammalecte veut « enfants », LanguageTool préfère « l'enfant » et n'a « les enfants »
+    qu'en 2e choix. Même forme que « on joué », où LanguageTool a raison : un score ne tranche pas. On
+    reprend la décision hors ligne (Grammalecte seul, contre-épreuve), qui corrige « enfant » mais pas
+    « joué », où Grammalecte hésite. La correction en ligne n'en fait pas moins que hors ligne (0.1.2)."""
+    text = "Hier, les enfant on joué ensemble."
+
+    def g(t):
+        return present([word_issue(t, "enfant", ["enfants"], "grammalecte"),
+                        word_issue(t, "joué", ["joue", "jouait", "joua"], "grammalecte", "g2__conj_on")])
+
+    def lt(t):
+        return present([word_issue(t, "les enfant", ["l'enfant", "les enfants"], "languagetool"),
+                        word_issue(t, "on joué", ["ont joué", "on joue"], "languagetool", "ON_ONT")])
+
+    s = Settings()
+    for engines in ([FakeEngine(s, "grammalecte", g), FakeEngine(s, "languagetool", lt)],
+                    [FakeEngine(s, "grammalecte", g)]):
+        c = Checker(s, PersonalDictionary(), engines=engines)
+        new_text, applied, remaining, _ = c.autocorrect(text)
+        assert new_text == "Hier, les enfants on joué ensemble."
+        assert [new_text[i.start:i.end] for i in remaining] == ["joué"]  # vu à la dernière passe (locale)
+        c.close()
 
 
 def test_autocorrect_only_applies_confident(checker):

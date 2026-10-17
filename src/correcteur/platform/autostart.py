@@ -110,27 +110,69 @@ def gnome_binding(combo: str) -> str:
     return "".join(names[m] for m in ("ctrl", "alt", "shift", "cmd") if m in hk.modifiers) + key
 
 
-def install_gnome_shortcuts(check_combo: str, express_combo: str) -> str:
-    """Crée (ou met à jour) deux raccourcis personnalisés GNOME. Renvoie un message."""
+# Messages de gsettings quand il n'atteint pas la base dconf de la session : il bascule alors sur une base
+# vide en mémoire, lit une liste de raccourcis vide, et l'écriture finale effacerait ceux de l'utilisateur.
+_GSETTINGS_UNRELIABLE = ("'memory' GSettings backend", "Failed to load module")
+
+
+def _gsettings(*args: str) -> str:
+    out = subprocess.run(["gsettings", *args], capture_output=True, text=True, timeout=5)
+    if out.returncode != 0:
+        raise RuntimeError(f"gsettings {args[0]} : {out.stderr.strip() or 'échec'}")
+    if any(marker in out.stderr for marker in _GSETTINGS_UNRELIABLE):
+        raise RuntimeError("gsettings n'accède pas aux réglages de la session : " + out.stderr.strip().splitlines()[0])
+    return out.stdout.strip()
+
+
+def _read(*args: str):
+    """Valeur lue par gsettings (texte GVariant : chaînes et listes de chaînes)."""
     import ast
 
-    def gset(*args: str) -> None:
-        subprocess.run(["gsettings", "set", *args], check=True, capture_output=True, timeout=5)
+    out = _gsettings("get", *args)
+    return [] if out.startswith("@as") else ast.literal_eval(out)
 
-    out = subprocess.run(["gsettings", "get", _GNOME_SCHEMA, "custom-keybindings"],
-                         capture_output=True, text=True, timeout=5, check=True).stdout.strip()
-    current = [] if out.startswith("@as") else list(ast.literal_eval(out or "[]"))
+
+def _keybinding_list() -> list[str]:
+    return list(_read(_GNOME_SCHEMA, "custom-keybindings"))
+
+
+def _other_keybinding_dirs() -> list[str]:
+    """Raccourcis personnalisés présents dans dconf, hors ceux du correcteur ([] sans l'outil dconf)."""
+    from correcteur.platform import which
+
+    if not which("dconf"):
+        return []
+    out = subprocess.run(["dconf", "list", _GNOME_BASE], capture_output=True, text=True, timeout=5)
+    return [d for d in out.stdout.split() if d.endswith("/") and not d.startswith("correcteur-")]
+
+
+def install_gnome_shortcuts(check_combo: str, express_combo: str) -> str:
+    """Crée (ou met à jour) deux raccourcis personnalisés GNOME sans toucher aux autres. Renvoie un message.
+
+    La liste des raccourcis est réécrite en entier : si la lecture est douteuse, on s'arrête sans rien
+    écrire, et le résultat est relu avant d'annoncer quoi que ce soit."""
+    current = _keybinding_list()
+    if not current and _other_keybinding_dirs():
+        raise RuntimeError("la liste des raccourcis GNOME lue est vide alors que d'autres raccourcis existent : "
+                           "rien n'a été modifié.")
     entries = [
         ("correcteur-verifier", "Correcteur : vérifier la sélection", "selection", check_combo),
         ("correcteur-express", "Correcteur : correction express", "express", express_combo),
     ]
+    wanted = list(current)
+    expected = {}
     for ident, name, arg, combo in entries:
         path = f"{_GNOME_BASE}{ident}/"
         schema = f"{_GNOME_SCHEMA}.custom-keybinding:{path}"
-        gset(schema, "name", name)
-        gset(schema, "command", _command_line(launch_command(arg)))
-        gset(schema, "binding", gnome_binding(combo))
-        if path not in current:
-            current.append(path)
-    gset(_GNOME_SCHEMA, "custom-keybindings", str(current))
+        values = {"name": name, "command": _command_line(launch_command(arg)), "binding": gnome_binding(combo)}
+        for key, value in values.items():
+            _gsettings("set", schema, key, value)
+            expected[(schema, key)] = value
+        if path not in wanted:
+            wanted.append(path)
+    if wanted != current:
+        _gsettings("set", _GNOME_SCHEMA, "custom-keybindings", str(wanted))
+    if _keybinding_list() != wanted or any(
+            _read(schema, key) != value for (schema, key), value in expected.items()):
+        raise RuntimeError("les raccourcis GNOME relus ne correspondent pas à ceux enregistrés.")
     return "Raccourcis GNOME créés (Paramètres > Clavier > Raccourcis personnalisés)."

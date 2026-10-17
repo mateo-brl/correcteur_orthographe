@@ -23,24 +23,43 @@ TEXT = "Je vais a la plage , et ecole est fermée."
 EXPECTED = "Je vais à la plage, et école est fermée."
 
 
+_FAKE_TOOL = """#!{python}
+# Faux {name} : note l'environnement reçu et garde les réglages dans un fichier JSON.
+import json, os, sys
+tools = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(tools, "env.log"), "a") as log:
+    log.write("{name} LD_LIBRARY_PATH=" + os.environ.get("LD_LIBRARY_PATH", "") + "\\n")
+db = os.path.join(tools, "dconf.json")
+state = json.load(open(db)) if os.path.exists(db) else {{}}
+if "{name}" == "dconf":
+    sys.exit(0)  # « dconf list » : aucun autre raccourci
+cmd, schema, key = sys.argv[1:4]
+if cmd == "get":
+    print(state.get(schema + " " + key, "@as []" if key == "custom-keybindings" else "''"))
+else:
+    state[schema + " " + key] = sys.argv[4] if key == "custom-keybindings" else repr(sys.argv[4])
+    json.dump(state, open(db, "w"))
+"""
+
+
 def child_environment_is_clean(exe: Path, env: dict[str, str]) -> bool:
-    """Les programmes du système lancés par le paquet (ici gsettings, remplacé par un faux qui note son
-    environnement) ne doivent pas hériter des bibliothèques du paquet : sous Debian 13, gsettings échouait."""
+    """Les programmes du système lancés par le paquet (ici gsettings et dconf, remplacés par des faux qui
+    notent leur environnement) ne doivent pas hériter des bibliothèques du paquet : sous Debian 13,
+    gsettings échouait."""
     tools = Path(tempfile.mkdtemp(prefix="correcteur-outils-"))
-    log = tools / "gsettings.log"
-    fake = tools / "gsettings"
-    fake.write_text('#!/bin/sh\necho "LD_LIBRARY_PATH=${LD_LIBRARY_PATH-}" >> "%s"\n'
-                    '[ "$1" = get ] && echo "@as []"\nexit 0\n' % log, encoding="utf-8")
-    fake.chmod(0o755)
+    for name in ("gsettings", "dconf"):
+        (tools / name).write_text(_FAKE_TOOL.format(python=sys.executable, name=name), encoding="utf-8")
+        (tools / name).chmod(0o755)
     out = subprocess.run([str(exe), "raccourcis-gnome"], env=dict(env, PATH=f"{tools}:{env['PATH']}"),
                          capture_output=True, text=True)
+    log = tools / "env.log"
     seen = log.read_text(encoding="utf-8") if log.exists() else ""
     print(f"raccourcis-gnome : {out.stdout.strip() or out.stderr.strip()}")
-    if out.returncode != 0 or not seen:
+    if out.returncode != 0 or "gsettings" not in seen:
         print("gsettings n'a pas été appelé correctement.")
         return False
     if "_internal" in seen:
-        print("gsettings a hérité des bibliothèques du paquet :\n" + seen)
+        print("Les outils du système ont hérité des bibliothèques du paquet :\n" + seen)
         return False
     return True
 
