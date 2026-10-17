@@ -125,17 +125,18 @@ def test_replace_after_another_app_copied(qapp, home):
 def test_global_hotkey_x11(home):
     from pynput.keyboard import Controller, Key
 
-    from correcteur.platform.bridge import create_bridge
+    from correcteur.platform.bridge import create_bridge, xtest_key
 
     bridge = create_bridge()
     fired = threading.Event()
-    failed = bridge.start_hotkeys({"<ctrl>+<alt>+<shift>+<f12>": fired.set})
+    # Une lettre, comme les vrais raccourcis (Ctrl+Alt+X) : envoyée par XTEST, comme un clavier.
+    failed = bridge.start_hotkeys({"<ctrl>+<alt>+<shift>+x": fired.set})
     assert failed == []
     time.sleep(0.5)
-    kb = Controller()
+    kb, x = Controller(), xtest_key("x")
     with kb.pressed(Key.ctrl), kb.pressed(Key.alt), kb.pressed(Key.shift):
-        kb.press(Key.f12)
-        kb.release(Key.f12)
+        kb.press(x)
+        kb.release(x)
     try:
         assert fired.wait(3), "le raccourci global n'a pas été reçu"
     finally:
