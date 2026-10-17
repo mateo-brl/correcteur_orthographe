@@ -65,9 +65,18 @@ def child_environment_is_clean(exe: Path, env: dict[str, str]) -> bool:
     return True
 
 
+def app_environment(home: str) -> dict[str, str]:
+    """Environnement de l'application testée : profil isolé, session X11. Sans WAYLAND_DISPLAY : lancé depuis
+    une session Wayland, le correcteur se croirait sous Wayland (raccourcis globaux coupés) malgré
+    XDG_SESSION_TYPE=x11."""
+    env = dict(os.environ, CORRECTEUR_HOME=home, XDG_SESSION_TYPE="x11", QT_QPA_PLATFORM="xcb")
+    env.pop("WAYLAND_DISPLAY", None)
+    return env
+
+
 def main(exe: Path) -> int:
     home = tempfile.mkdtemp(prefix="correcteur-paquet-")
-    env = dict(os.environ, CORRECTEUR_HOME=home, XDG_SESSION_TYPE="x11", QT_QPA_PLATFORM="xcb")
+    env = app_environment(home)
     if not child_environment_is_clean(exe, env):
         return 1
     os.environ["CORRECTEUR_HOME"] = home

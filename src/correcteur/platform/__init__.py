@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
+import threading
 
 
 def session_type() -> str:
@@ -44,3 +46,27 @@ def child_env() -> dict[str, str]:
         for name in _PACKAGE_QT_VARIABLES:
             env.pop(name, None)
     return env
+
+
+def open_url(url: str) -> bool:
+    """Ouvre une adresse (page web, ou dossier en file://) avec le programme du système, sans attendre. False
+    si c'est impossible.
+
+    Dans le paquet Linux, QDesktopServices lancerait xdg-open, puis le navigateur ou le gestionnaire de
+    fichiers, avec les chemins Qt du paquet (voir child_env) : on lance xdg-open nous-mêmes."""
+    if sys.platform.startswith("linux") and getattr(sys, "frozen", False):
+        tool = which("xdg-open")
+        if tool:
+            try:
+                proc = subprocess.Popen([tool, url], env=child_env(), stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:
+                pass
+            else:
+                # Récupère son code de sortie quand il a fini : pas de processus zombie.
+                threading.Thread(target=proc.wait, name="xdg-open", daemon=True).start()
+                return True
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+
+    return bool(QDesktopServices.openUrl(QUrl(url)))

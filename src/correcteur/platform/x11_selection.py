@@ -71,6 +71,39 @@ def read_selection(selection: str = "PRIMARY", timeout: float = 1.0) -> str | No
         d.close()
 
 
+def selection_targets(selection: str = "CLIPBOARD", timeout: float = 1.0) -> list[str] | None:
+    """Formats offerts par le propriétaire de la sélection (cible TARGETS) : [] si personne ne la possède, None
+    s'il ne répond pas (on ne sait alors pas ce qu'elle contient)."""
+    from Xlib import X, display
+
+    try:
+        d = display.Display()
+    except Exception as exc:
+        log.debug("Écran X11 inaccessible : %s", exc)
+        return None
+    try:
+        sel = d.intern_atom(selection)
+        if d.get_selection_owner(sel) == X.NONE:
+            return []
+        win = d.screen().root.create_window(0, 0, 1, 1, 0, X.CopyFromParent, event_mask=X.PropertyChangeMask)
+        prop = d.intern_atom("_CORRECTEUR_CIBLES")
+        win.convert_selection(sel, d.intern_atom("TARGETS"), prop, X.CurrentTime)
+        d.flush()
+        ev = _wait_event(d, lambda e: e.type == X.SelectionNotify and e.requestor.id == win.id, timeout)
+        if ev is None or ev.property == X.NONE:
+            return None
+        reply = win.get_full_property(prop, X.AnyPropertyType)
+        win.delete_property(prop)
+        if reply is None or reply.format != 32:
+            return None
+        return [d.get_atom_name(atom) for atom in reply.value if atom]
+    except Exception as exc:
+        log.debug("Formats de la sélection %s illisibles : %s", selection, exc)
+        return None
+    finally:
+        d.close()
+
+
 def _read_incr(d, win, prop, timeout: float) -> bytes:
     from Xlib import X
 

@@ -147,6 +147,23 @@ def _other_keybinding_dirs() -> list[str]:
     return [d for d in out.stdout.split() if d.endswith("/") and not d.startswith("correcteur-")]
 
 
+# Identifiants des raccourcis personnalisés du correcteur (vérifier la sélection, correction express).
+GNOME_SHORTCUT_IDS = ("correcteur-verifier", "correcteur-express")
+
+
+def gnome_shortcuts() -> dict[str, str]:
+    """Raccourcis GNOME du correcteur présents dans la liste des raccourcis personnalisés : identifiant ->
+    touches au format GNOME ("<Control><Alt>c"). Lève une erreur si gsettings manque ou n'atteint pas les
+    réglages de la session."""
+    listed = _keybinding_list()
+    found = {}
+    for ident in GNOME_SHORTCUT_IDS:
+        path = f"{_GNOME_BASE}{ident}/"
+        if path in listed:
+            found[ident] = _read(f"{_GNOME_SCHEMA}.custom-keybinding:{path}", "binding")
+    return found
+
+
 def install_gnome_shortcuts(check_combo: str, express_combo: str) -> str:
     """Crée (ou met à jour) deux raccourcis personnalisés GNOME sans toucher aux autres. Renvoie un message.
 
@@ -157,8 +174,8 @@ def install_gnome_shortcuts(check_combo: str, express_combo: str) -> str:
         raise RuntimeError("la liste des raccourcis GNOME lue est vide alors que d'autres raccourcis existent : "
                            "rien n'a été modifié.")
     entries = [
-        ("correcteur-verifier", "Correcteur : vérifier la sélection", "selection", check_combo),
-        ("correcteur-express", "Correcteur : correction express", "express", express_combo),
+        (GNOME_SHORTCUT_IDS[0], "Correcteur : vérifier la sélection", "selection", check_combo),
+        (GNOME_SHORTCUT_IDS[1], "Correcteur : correction express", "express", express_combo),
     ]
     wanted = list(current)
     expected = {}

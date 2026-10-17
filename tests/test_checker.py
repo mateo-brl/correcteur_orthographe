@@ -196,6 +196,29 @@ def test_partial_agreement_falls_back_on_the_offline_decision(home):
         c.close()
 
 
+def test_languagetool_fix_confirmed_when_it_silences_a_weak_local_remark(home):
+    """« Mes parents son partis » : LanguageTool seul propose « sont », Grammalecte signale « partis » à côté
+    avec une règle peu fiable (« parti »). Corriger « son » fait taire Grammalecte : la correction est sûre.
+    Pas avec une règle fiable de Grammalecte (deux lectures), ni pour autre chose qu'un homophone."""
+    text = "Mes parents son partis."
+
+    def engines(s, rule, fix="sont"):
+        g = lambda t: present([word_issue(t, "partis", ["parti"], "grammalecte", rule)] if "son partis" in t else [])
+        lt = lambda t: present([word_issue(t, "son", [fix], "languagetool", "SON_SONT")])
+        return [FakeEngine(s, "grammalecte", g), FakeEngine(s, "languagetool", lt)]
+
+    s = Settings()
+    for rule, fix, expected in (("g3__gn_mon_ton_son_1m__b1_a4_1", "sont", "Mes parents sont partis."),
+                                (RULE, "sont", None), ("g3__gn_mon_ton_son_1m__b1_a4_1", "sont là", text)):
+        c = Checker(s, PersonalDictionary(), engines=engines(s, rule, fix))
+        new_text = c.autocorrect(text)[0]
+        if expected is None:
+            assert "sont" not in new_text
+        else:
+            assert new_text == expected
+        c.close()
+
+
 def test_solo_only_trusts_reliable_rule_families(home):
     """Seul, Grammalecte n'est cru que pour des familles de règles vérifiées : « Mes parents son partis »
     -> « son parti » (gn_mon_ton_son prend « son » pour un déterminant) n'est jamais appliqué."""

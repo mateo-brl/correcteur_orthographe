@@ -25,6 +25,7 @@ from typing import Callable, NamedTuple
 from correcteur.config import Settings, data_dir
 from correcteur.engines.base import EngineError
 from correcteur.installer import find_java, languagetool_dir
+from correcteur.platform import child_env
 
 log = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ def _spawn(launch: _Launch) -> None:
     try:
         launch.config.write_text(_SERVER_CONFIG, encoding="utf-8")
         with open(launch.log_path, "ab") as log_file:
-            proc = subprocess.Popen(launch.cmd, stdout=log_file, **kwargs)
+            proc = subprocess.Popen(launch.cmd, stdout=log_file, env=child_env(), **kwargs)
     except (OSError, subprocess.SubprocessError) as exc:
         launch.error = str(exc) or type(exc).__name__
         return

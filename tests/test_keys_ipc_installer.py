@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import threading
 import time
 import zipfile
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -352,3 +355,86 @@ def test_ipc_long_runtime_dir_falls_back_to_short_path(home, tmp_path, monkeypat
     finally:
         server.stop()
     assert received == ["parametres"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="socket Unix")
+def test_ipc_address_never_fails_and_avoids_foreign_folders(home, request, monkeypatch):
+    """/tmp/correcteur-<uid> déjà pris (fichier : FileExistsError, plantage de toute la ligne de commande ; ou
+    dossier d'un autre utilisateur, qui pourrait y placer une fausse socket) : un autre dossier est pris."""
+    import tempfile
+
+    from correcteur.platform import ipc
+
+    shared = Path(tempfile.mkdtemp(prefix="ipc"))  # chemin court : une socket Unix fait 107 octets au plus
+    request.addfinalizer(lambda: shutil.rmtree(shared, ignore_errors=True))
+    monkeypatch.setattr(ipc, "_temp_dirs", lambda: [shared])
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    uid = os.getuid()
+    (shared / f"correcteur-{uid}").write_text("pas un dossier")
+    path, family = ipc.address()
+    assert family == "AF_UNIX" and Path(path).parent == shared / f"correcteur-{uid}-1"
+    assert (os.stat(Path(path).parent).st_mode & 0o777) == 0o700
+
+    # Dossier ouvert à tous : corrigé s'il est à l'utilisateur.
+    os.chmod(shared / f"correcteur-{uid}-1", 0o777)
+    assert ipc.address() == (path, family)
+    assert (os.stat(Path(path).parent).st_mode & 0o777) == 0o700
+
+    # Dossiers créés avant lui par un autre utilisateur (propriétaire simulé) : ni corrigés ni utilisés.
+    shutil.rmtree(shared / f"correcteur-{uid}-1")
+    (shared / f"correcteur-{uid}").unlink()
+    foreign = {shared / f"correcteur-{uid}", shared / f"correcteur-{uid}-1"}
+    for folder in foreign:
+        folder.mkdir()
+        os.chmod(folder, 0o777)
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        return SimpleNamespace(st_mode=info.st_mode, st_uid=uid + 1) if Path(path) in foreign else info
+
+    monkeypatch.setattr(ipc.os, "lstat", lstat)
+    path, _ = ipc.address()
+    assert Path(path).parent == shared / f"correcteur-{uid}-2"
+    assert all((os.stat(folder).st_mode & 0o777) == 0o777 for folder in foreign)
+    # Lien symbolique, même vers un dossier valable : refusé.
+    (shared / "lien").symlink_to(shared / f"correcteur-{uid}-1")
+    assert not ipc._private_dir(shared / "lien", create=False)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="socket Unix")
+def test_ipc_address_never_raises(home, monkeypatch):
+    """La ligne de commande appelle address() sans filet (send_command) : jamais d'exception."""
+    from correcteur.config import config_dir
+    from correcteur.platform import ipc
+
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(ipc, "_temp_dirs", lambda: [Path("/nulle/part")])
+    path, family = ipc.address()  # aucun dossier possible : repli sur le dossier des paramètres
+    assert family == "AF_UNIX" and Path(path).parent == config_dir()
+    assert ipc.send_command("ouvrir", timeout=0.5) is False
+
+    def broken(*args, **kwargs):
+        raise OSError("disque en lecture seule")
+
+    monkeypatch.setenv("CORRECTEUR_HOME", "/nulle/part/profil")
+    monkeypatch.setattr(ipc.os, "mkdir", broken)
+    assert ipc.address()[1] == "AF_UNIX"
+    assert ipc.send_command("ouvrir", timeout=0.5) is False
+    monkeypatch.setattr(ipc, "_profile_tag", lambda: (_ for _ in ()).throw(RuntimeError("inattendu")))
+    assert ipc.address()[1] == "AF_UNIX"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="socket Unix")
+def test_ipc_runtime_dir_open_to_others_is_not_used(home, tmp_path, monkeypatch):
+    from correcteur.platform import ipc
+
+    runtime = tmp_path / "run"
+    runtime.mkdir(mode=0o755)
+    os.chmod(runtime, 0o755)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(ipc, "_temp_dirs", lambda: [tmp_path])
+    path, _ = ipc.address()
+    assert not path.startswith(str(runtime)) and (os.stat(runtime).st_mode & 0o777) == 0o755
+    os.chmod(runtime, 0o700)
+    assert ipc.address()[0].startswith(str(runtime))

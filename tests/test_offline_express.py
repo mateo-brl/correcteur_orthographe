@@ -41,6 +41,10 @@ FIXED = [
     ("Il viendra peut être demain.", "Il viendra peut-être demain."),
     ("Il pense a toi.", "Il pense à toi."),
     ("Merci a vous.", "Merci à vous."),
+    ("Je vais acheté du pain.", "Je vais acheter du pain."),
+    ("Il est allé acheté le journal.", "Il est allé acheter le journal."),
+    ("Il ma donné un livre.", "Il m'a donné un livre."),
+    ("Tu ma manqué.", "Tu m'as manqué."),
     ("Il a appris a nager.", "Il a appris à nager."),
 ]
 
@@ -58,6 +62,9 @@ UNTOUCHED = [
     "Il y a manger et manger.",           # « à manger »
     "Son seul plaisir est manger.",
     "Les Misérables est un roman de Hugo.",
+    "Je vais fatigué au travail.",
+    "Ils vont pressés au marché.",
+    "Voici ma donnée la plus fiable.",
     "Les Échos a publié un article.",
     "Rendez-vous place du 8 Mai 1945.",
     "Ma mère et ma sœur sont partit.",    # « parties » : le masculin par défaut serait faux

@@ -5,8 +5,8 @@ from __future__ import annotations
 import sys
 import threading
 
-from PySide6.QtCore import QObject, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeySequence
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from correcteur import __version__
 from correcteur.config import Settings, config_dir, data_dir
-from correcteur.platform import desktop_name, session_type
+from correcteur.platform import desktop_name, open_url, session_type
 from correcteur.platform import keys as hotkeys
 
 LANGUAGES = [
@@ -331,10 +331,14 @@ class SettingsDialog(QDialog):
         label.setWordWrap(True)
         layout.addWidget(label)
         open_dir = QPushButton("Ouvrir le dossier des paramètres")
-        open_dir.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(config_dir()))))
+        open_dir.clicked.connect(self._open_config_dir)
         layout.addWidget(open_dir)
         layout.addStretch(1)
         return page
+
+    def _open_config_dir(self) -> None:
+        if not open_url(config_dir().as_uri()):
+            QMessageBox.information(self, "Dossier des paramètres", f"Ouverture impossible. Dossier : {config_dir()}")
 
     def _refresh_engine_status(self) -> None:
         from correcteur.engines.grammalecte_engine import import_grammalecte

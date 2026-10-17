@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from correcteur.config import PersonalDictionary, Settings, SettingsStore, config_dir
 
 
@@ -83,6 +85,19 @@ def test_dictionary_not_in_utf8_keeps_every_word(home):
     d.path.write_bytes(b"\xef\xbb\xbfbom\r\nfin\r\n")  # BOM et fins de ligne Windows
     d.reload()
     assert d.words() == ["bom", "fin"]
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+def test_dictionary_in_utf16_is_read_and_rewritten_in_utf8(home, encoding):
+    """Fichier enregistré en « Unicode » par le Bloc-notes de Windows (UTF-16 avec marque d'ordre des octets) :
+    lu comme de l'UTF-8, il donnait des mots pleins de caractères nuls, réécrits tels quels."""
+    d = PersonalDictionary()
+    d.path.write_bytes(("\ufeffZorglub\r\ncafé\r\n# commentaire\r\nœuvrette\r\n").encode(encoding))
+    d.reload()
+    assert d.words() == ["café", "Zorglub", "œuvrette"]
+    d.add("nouveau")
+    assert d.path.read_bytes().decode("utf-8") == "café\nnouveau\nZorglub\nœuvrette\n"
+    assert PersonalDictionary().words() == ["café", "nouveau", "Zorglub", "œuvrette"]
 
 
 def test_unreadable_dictionary_is_neither_fatal_nor_overwritten(home):
