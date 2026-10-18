@@ -267,9 +267,10 @@ flowchart LR
    c'est « as » qui est appliqué. Dans « Mes parents son partis », seul LanguageTool propose « sont », et
    Grammalecte bute juste à côté sur « partis ». Corriger « son » le fait taire, donc « sont » est appliqué.
    Quand les deux corrections passent la contre-épreuve, ce sont deux lectures possibles, et rien n'est
-   appliqué. Si LanguageTool est seul à voir une confusion d'homophones (« Je me suis fait mal a la main ») et
-   que Grammalecte ne trouve rien dans la phrase, ni avant ni après la correction, elle est appliquée. Les
-   tournures où « a » est le verbe (« il a l'air », « elle a toutes les chances ») sont écartées.
+   appliqué. Si LanguageTool est seul à voir une confusion d'homophones (« Je me suis fait mal a la main »), que
+   c'est la seule remarque de la phrase et que Grammalecte n'y trouve rien, ni avant ni après la correction,
+   elle est appliquée. Les tournures où « a » est le verbe (« il a l'air », « elle a toutes les chances ») et
+   les règles de LanguageTool qui se trompaient sur le corpus de test sont écartées.
    Quelques corrections ne sont jamais appliquées d'office, même quand les deux moteurs sont d'accord. C'est le
    cas de l'accord du participe des verbes pronominaux : « nous nous sommes téléphoné » et « ils se sont
    téléphoné » sont justes. C'est aussi le cas de la conjugaison après « il faut que » et ses semblables : dans
