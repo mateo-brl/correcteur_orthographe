@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QColor, QContextMenuEvent, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QMenu, QPlainTextEdit, QTextEdit, QToolTip
 
 from correcteur.models import Issue
@@ -178,6 +178,15 @@ class CheckEditor(QPlainTextEdit):
         issue = self.issue_at(event.position().toPoint())
         if issue is not None:
             self.issueClicked.emit(issue, event.globalPosition().toPoint())
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_F10 and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
+            # Maj+F10 ouvre le menu du mot sous le curseur, comme la touche Menu (que bien des claviers n'ont pas).
+            pos = self.cursorRect().center()
+            self.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Keyboard, pos,
+                                                    self.viewport().mapToGlobal(pos)))
+            return
+        super().keyPressEvent(event)
 
     def contextMenuEvent(self, event) -> None:
         menu = self.createStandardContextMenu()

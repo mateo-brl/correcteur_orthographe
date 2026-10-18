@@ -219,6 +219,30 @@ def test_languagetool_fix_confirmed_when_it_silences_a_weak_local_remark(home):
         c.close()
 
 
+def test_contradiction_settled_when_grammalecte_rejects_the_other_fix(home):
+    """« Tu à raison » : « as » pour Grammalecte (règle fiable), « a » pour LanguageTool, dont la règle d'accent
+    ne regarde pas le sujet. Grammalecte resignale « Tu a raison » : sa correction l'emporte. S'il accepte aussi
+    celle de LanguageTool, ce sont deux lectures, et rien n'est appliqué."""
+    text = "Tu à raison."
+    rule = "g2__conf_tu_non_verbe__b1_a3_1"
+
+    def engines(s, rejects):
+        def g(t):
+            if "Tu à" in t:
+                return present([word_issue(t, "à", ["as"], "grammalecte", rule)])
+            if "Tu a " in t and rejects:
+                return present([word_issue(t, "a", ["as"], "grammalecte", "g2__conj_tu__b1_a1_1")])
+            return []
+        lt = lambda t: present([word_issue(t, "à", ["a"], "languagetool", "A_ACCENT_A")])
+        return [FakeEngine(s, "grammalecte", g), FakeEngine(s, "languagetool", lt)]
+
+    s = Settings()
+    for rejects, expected in ((True, "Tu as raison."), (False, text)):
+        c = Checker(s, PersonalDictionary(), engines=engines(s, rejects))
+        assert c.autocorrect(text)[0] == expected
+        c.close()
+
+
 def test_solo_only_trusts_reliable_rule_families(home):
     """Seul, Grammalecte n'est cru que pour des familles de règles vérifiées : « Mes parents son partis »
     -> « son parti » (gn_mon_ton_son prend « son » pour un déterminant) n'est jamais appliqué."""

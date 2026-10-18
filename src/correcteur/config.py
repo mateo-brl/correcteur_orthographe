@@ -281,4 +281,4 @@ class PersonalDictionary:
             log.warning("Dictionnaire personnel illisible : modification gardée pour cette session seulement.")
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(self.path, "\n".join(self.words()) + "\n")
+        _atomic_write(self.path, "\n".join(self.words()) + "\n", private=True)  # mots personnels : noms, adresses...

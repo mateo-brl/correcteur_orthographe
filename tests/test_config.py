@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -114,3 +115,11 @@ def test_cli_survives_latin1_dictionary(home):
     out = subprocess.run([sys.executable, "-m", "correcteur", "verifier", "--hors-ligne", "Bonjour."],
                          capture_output=True, text=True, encoding="utf-8", env=env, timeout=120)
     assert out.returncode != 2 and "codec" not in out.stderr, out.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="droits POSIX")
+def test_dictionary_file_is_private(home):
+    """Comme parametres.json : les mots personnels (noms, adresses) ne sont pas lisibles par les autres comptes."""
+    d = PersonalDictionary()
+    d.add("Zorglub")
+    assert stat.S_IMODE(d.path.stat().st_mode) == 0o600

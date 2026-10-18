@@ -46,6 +46,11 @@ FIXED = [
     ("Il ma donné un livre.", "Il m'a donné un livre."),
     ("Tu ma manqué.", "Tu m'as manqué."),
     ("Il a appris a nager.", "Il a appris à nager."),
+    # Rapport de test de la 0.1.6 : fautes signalées mais pas corrigées d'office.
+    ("Elle est partit très tôt ce matin.", "Elle est partie très tôt ce matin."),
+    ("Je n'ai pas put venir.", "Je n'ai pas pu venir."),
+    ("Il c'est trompé de route.", "Il s'est trompé de route."),
+    ("Nous avont fini le travail.", "Nous avons fini le travail."),
 ]
 
 UNTOUCHED = [
@@ -65,6 +70,9 @@ UNTOUCHED = [
     "Je vais fatigué au travail.",
     "Ils vont pressés au marché.",
     "Voici ma donnée la plus fiable.",
+    "Ils nous avont dit.",                 # « nous » complément : « ont », pas « avons »
+    "C'étais lui le plus jeune.",          # « C'était », pas « S'étais »
+    "Elle n'a pas sont mot de passe.",     # « son », pas « été »
     "Les Échos a publié un article.",
     "Rendez-vous place du 8 Mai 1945.",
     "Ma mère et ma sœur sont partit.",    # « parties » : le masculin par défaut serait faux

@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from correcteur.checker import Checker
+from correcteur.checker import Checker, guess_language
 from correcteur.models import ENGINE_LABELS, Category, CheckResult, EngineStatus, Issue
 from correcteur.platform.keys import display as hotkey_display
 from correcteur.textutils import describe_changes, diff_edits
@@ -644,6 +644,11 @@ class CorrectionWindow(QWidget):
         if self._auto_cancelled and count_sure(self._issues):
             self._show_note("Texte modifié avant la fin des vérifications : rien n'a été corrigé d'office. "
                             "« Corrections sûres » applique les corrections confirmées.")
+        elif (self._issues and self.controller.settings.general.language.startswith("fr")
+              and guess_language(self._text) != "fr"):
+            # Texte anglais vérifié en français : beaucoup de soulignements, et aucun n'est corrigé d'office.
+            self._show_note("Ce texte ne semble pas être en français : rien n'a été corrigé d'office. Pour le "
+                            "vérifier dans sa langue, choisissez « Détection automatique » dans les paramètres.")
         self._set_ready()
 
     def _set_ready(self) -> None:

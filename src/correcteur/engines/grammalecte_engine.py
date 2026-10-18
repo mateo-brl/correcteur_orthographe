@@ -16,7 +16,7 @@ from pathlib import Path
 from correcteur.config import Settings
 from correcteur.engines.base import Engine, EngineError
 from correcteur.models import Category, Issue
-from correcteur.textutils import split_paragraphs
+from correcteur.textutils import agree_with_subject, split_paragraphs
 
 # Options Grammalecte désactivées en mode typographique "standard" : ce sont
 # les remarques qui n'ont pas de sens pour un texte tapé au clavier (mails,
@@ -232,7 +232,8 @@ class GrammalecteEngine(Engine):
             ))
         for err in spell:
             word = err.get("sValue", "")
-            suggestions = rank_spelling(word, tuple(err.get("aSuggestions") or ()))
+            suggestions = agree_with_subject(paragraph, err["nStart"],
+                                             rank_spelling(word, tuple(err.get("aSuggestions") or ())))
             # « Helene » -> « Hélène » : un nom propre, que la personne écrit peut-être ainsi (jamais d'office).
             rule = ("grammalecte_nom_propre" if word[:1].isupper() and suggestions and self._proper_noun(suggestions[0])
                     else "grammalecte_orthographe")

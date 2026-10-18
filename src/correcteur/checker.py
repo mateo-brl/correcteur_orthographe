@@ -19,8 +19,10 @@ from correcteur.textutils import (
     apply_edits,
     match_case,
     narrow_edit,
+    one_edit,
     only_typographic_difference,
     same_letters,
+    subject_ending,
     typo_normalize,
 )
 
@@ -221,12 +223,31 @@ class Checker:
         partial = [i for i in issues if not i.confident and i.replacements and (
             i.partly_agreed or (i.sources == (local[0],) and not any(
                 o is not i and o.overlaps(i) and local[0] not in o.sources for o in issues)))]
-        if not partial:
+        # Désaccord franc (« Tu à raison » : « as » pour Grammalecte, « a » pour LanguageTool, dont la règle
+        # d'accent ne regarde pas le sujet) : voir plus bas.
+        contradicted = [i for i in issues if not i.confident and not i.agreed and not i.partly_agreed
+                        and i.category is Category.GRAMMAR and i.replacements and local[0] in i.sources
+                        and len(i.sources) > 1]
+        if not partial and not contradicted:
             return
-        offline = self.post_process(text, {local[0]: raw[local[0]]}, True, self._recheck(local[0], language))
+        recheck = self._recheck(local[0], language)
+        offline = self.post_process(text, {local[0]: raw[local[0]]}, True, recheck)
         settled = {_corrected(text, o) for o in offline if o.confident and o.replacements}
         for issue in partial:
             issue.confident = _corrected(text, issue) in settled
+        if not contradicted:
+            return
+        # La correction de Grammalecte l'emporte s'il en est sûr hors ligne et s'il resignale aussitôt celle de
+        # LanguageTool appliquée (« Tu a raison » : « a » -> « as »). Si les deux passent sa contre-épreuve, ce
+        # sont deux lectures (« Les enfants on joué » : « on joue » ou « ont joué ») : l'utilisateur choisit.
+        trials = _Trials(text, issues, recheck)
+        for issue in contradicted:
+            if _corrected(text, issue) not in settled:
+                continue
+            remote = [o for name, found in raw.items() if name != local[0] for o in found
+                      if o.replacements and o.category is Category.GRAMMAR and o.overlaps(issue)]
+            issue.confident = bool(remote) and all(
+                _corrected(text, o) != _corrected(text, issue) and trials._clean_fix(o) is False for o in remote)
 
     def _confirm_remote(self, text: str, raw: dict[str, list[Issue]], issues: list[Issue], language: str) -> None:
         """LanguageTool seul propose une correction, et Grammalecte signale juste à côté une faute qu'il corrige
@@ -620,6 +641,12 @@ def is_confident(text: str, issue: Issue) -> bool:
         rivals = [r for r in issue.replacements[1:] if same_letters(original, r) and r.casefold() != first.casefold()]
         if same_letters(original, first) and not rivals:
             return True
+        # « Nous avont fini » -> « avons » : une faute de frappe, et la seule suggestion à la terminaison
+        # qu'impose le sujet.
+        ending = subject_ending(text, issue.start)
+        if (ending and first.endswith(ending) and one_edit(original, first)
+                and sum(r.endswith(ending) for r in issue.replacements) == 1):
+            return True
         return issue.agreed and len(issue.replacements) <= 3
     if issue.agreed:
         return True
@@ -638,8 +665,9 @@ _SOLO_TRIALS_SECONDS = 10.0
 # Mesurées en injectant des fautes typiques (a/à, son/sont, on/ont, é/er, pluriels…) dans 2 500 phrases
 # justes de la suite de tests de Grammalecte : chacune y a rétabli la phrase d'origine au moins 95 fois
 # sur 100, sans rien toucher dans les phrases justes. Les autres corrigent trop souvent le mauvais mot :
-# « Mes parents son partis » -> « son parti » (gn_mon_ton_son : 0 sur 43), « c'étais » -> « s'étais »
-# (conf_c_s_verbe : 5 sur 12), « Nous les avons finis » -> « fini » (ppas_nous_vous_avoir : 0 sur 3).
+# « Mes parents son partis » -> « son parti » (gn_mon_ton_son : 0 sur 43), « Nous les avons finis » -> « fini »
+# (ppas_nous_vous_avoir : 0 sur 3). Certaines n'entrent qu'avec un garde-fou (voir solo_context_ok) :
+# « c'étais » -> « s'étais » (conf_c_s_verbe : 5 sur 12 sans lui, 4 sur 4 avec).
 _SOLO_RULES = frozenset({
     # à / a
     "conf_à_a", "conf_à_a_après_verbes", "conf_à_a_infinitif", "conf_à_a_locutions", "conf_à_a_verbes_locutions",
@@ -647,7 +675,7 @@ _SOLO_RULES = frozenset({
     # homophones
     "conf_ces_ses_c_est", "conf_ce_ceux_se", "conf_se_ceux_ce", "conf_ce_se_verbe", "conf_ont", "conf_on_ont",
     "conf_ils_non_verbe", "conf_tu_non_verbe", "conf_son_sont", "conf_peu_peut_peux", "conf_la_là", "conf_est_et",
-    "conf_et_est2", "conf_m_a_ma", "conf_mai_mais_mes", "conf_où_ou", "conf_quand_quant_qu_en", "conf_quant_quand_qu_en",
+    "conf_et_est2", "conf_m_a_ma", "conf_c_s_verbe", "conf_mai_mais_mes", "conf_où_ou", "conf_quand_quant_qu_en", "conf_quant_quand_qu_en",
     "conf_dans_dan_d_en", "conf_nôtre_notre", "conf_ça_çà_sa", "conf_déterminant_fem_sing_verbe", "conf_leurs_verbe",
     "conf_c_est_était", "conf_près_prêt_pré", "conf_peut_être", "conf_peut_être2",
     # déterminant + nom
@@ -661,6 +689,7 @@ _SOLO_RULES = frozenset({
     # participes passés (voir aussi solo_context_ok)
     "ppas_avoir", "ppas_être_confusion", "ppas_sujet_être_accord_pluriel", "ppas_ne_me_te_se_être",
     "ppas_3pl_mas_verbe_état", "ppas_3pl_fem_verbe_état", "ppas_3sg_fem_verbe_état", "ppas_nous_verbe_état",
+    "ppas_pronom_avoir", "ppas_pronom_sujet_verbe_état_verbe",
 })
 # Jamais sûres, même avec l'accord des deux moteurs : le participe d'un verbe pronominal s'accorde selon
 # son complément (« nous nous sommes lavés », mais « nous nous sommes téléphoné »), ce qu'aucun ne sait voir.
@@ -729,6 +758,17 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         if m and m.group(1).isupper():
             return False
     first = issue.replacements[0] if issue.replacements else ""
+    if family == "conf_c_s_verbe":
+        # « Il c'est trompé » -> « s'est » ; mais « c'étais eux » (pour « c'était ») n'est pas « s'étais ».
+        m = re.search(r"\b(\w+)\s+$", text[max(0, issue.start - 20):issue.start])
+        if not m or m.group(1).lower() not in ("il", "elle", "on", "ils", "elles"):
+            return False
+    if family in ("ppas_pronom_avoir", "ppas_pronom_sujet_verbe_état_verbe"):
+        # Seule la fin du participe change (« put » -> « pu », « partit » -> « partie ») : pas « Elle n'a pas
+        # sont mot de passe » -> « été », ni « a elle seule » -> « eu ».
+        word = text[issue.start:issue.end]
+        if not first or word.lower().rstrip("tse") != first.lower().rstrip("es") or len(word.rstrip("tse")) < 2:
+            return False
     if family == "infi_verbes":
         word = text[issue.start:issue.end]
         if (not before or before[0] not in _GO_COME or not word.endswith("é") or first != word[:-1] + "er"

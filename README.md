@@ -253,6 +253,12 @@ flowchart LR
    lecture possible. « Ils on mangé » devient « Ils ont mangé », mais dans « les résultats que j'ai obtenu
    sont bon », « son bon » et « sont bons » font chacun disparaître l'autre faute : la phrase reste à
    vérifier dans la fenêtre.
+   En ligne, la même contre-épreuve départage les deux moteurs quand ils ne sont pas d'accord. Dans « Tu à
+   raison », Grammalecte veut « as » et LanguageTool « a ». Grammalecte resignale aussitôt « Tu a raison » :
+   c'est « as » qui est appliqué. Dans « Mes parents son partis », seul LanguageTool propose « sont », et
+   Grammalecte bute juste à côté sur « partis ». Corriger « son » le fait taire, donc « sont » est appliqué.
+   Quand les deux corrections passent la contre-épreuve, ce sont deux lectures possibles, et rien n'est
+   appliqué.
    Quelques corrections ne sont jamais appliquées d'office, même quand les deux moteurs sont d'accord : l'accord
    du participe des verbes pronominaux en fait partie (« nous nous sommes téléphoné » est juste).
 6. Les corrections sûres s'appliquent en cascade. Dans « les enfant était ravis », les deux moteurs voudraient

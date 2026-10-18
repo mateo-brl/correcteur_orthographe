@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import threading
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -53,6 +53,30 @@ LT_MODES = [
     ("premium", "Compte LanguageTool Premium"),
 ]
 
+
+
+class HotkeyEdit(QKeySequenceEdit):
+    """Champ de raccourci où Tab et Maj+Tab passent au champ voisin au lieu d'être enregistrés : sans cela, on
+    ne pouvait plus en sortir au clavier (un raccourci global sans Ctrl, Alt ou Win est de toute façon refusé)."""
+
+    def __init__(self, sequence: QKeySequence) -> None:
+        super().__init__(sequence)
+        self.setMaximumSequenceLength(1)
+        self._kept = sequence
+
+    def event(self, event) -> bool:
+        if event.type() == QEvent.Type.FocusIn:
+            self._kept = self.keySequence()
+        elif event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            free = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier
+            if not event.modifiers() & free:
+                if self.keySequence().isEmpty():
+                    # Maj, appuyée seule avant Tab, a lancé l'enregistrement et vidé le champ.
+                    self.setKeySequence(self._kept)
+                self.focusNextPrevChild(event.key() == Qt.Key.Key_Tab
+                                        and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                return True
+        return super().event(event)
 
 class _Signals(QObject):
     progress = Signal(int, int)
@@ -190,11 +214,9 @@ class SettingsDialog(QDialog):
         self.hotkeys_enabled = QCheckBox("Activer les raccourcis globaux")
         self.hotkeys_enabled.setChecked(g.hotkeys_enabled)
         box_form.addRow(self.hotkeys_enabled)
-        self.hk_check = QKeySequenceEdit(QKeySequence(hotkeys.to_qt(g.hotkey_check)))
-        self.hk_check.setMaximumSequenceLength(1)
+        self.hk_check = HotkeyEdit(QKeySequence(hotkeys.to_qt(g.hotkey_check)))
         box_form.addRow("Vérifier la sélection :", self.hk_check)
-        self.hk_express = QKeySequenceEdit(QKeySequence(hotkeys.to_qt(g.hotkey_autocorrect)))
-        self.hk_express.setMaximumSequenceLength(1)
+        self.hk_express = HotkeyEdit(QKeySequence(hotkeys.to_qt(g.hotkey_autocorrect)))
         box_form.addRow("Correction express :", self.hk_express)
         explain = QLabel(
             "<b>Vérifier la sélection</b> ouvre la fenêtre du correcteur sur le texte sélectionné.<br>"

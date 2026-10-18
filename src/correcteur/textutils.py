@@ -231,6 +231,46 @@ def strip_accents(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
 
 
+# « nous » ou « vous » sujets : en tête de phrase, après une ponctuation ou une conjonction (« Ils nous ont
+# dit » : « nous » complément, le verbe s'accorde avec « ils »).
+_SUBJECT_ENDINGS = {"nous": "ons", "vous": "ez"}
+_SUBJECT_BEFORE_RE = re.compile(r"(?:(?P<start>\A)|[.!?…;:,(«\"]\s*|\b(?:et|mais|ou|donc|puis|alors|que|qu|quand|si|"
+                                r"comme|lorsque|car)\s+)(nous|vous)\s+\Z", re.IGNORECASE)
+
+
+def subject_ending(text: str, start: int) -> str | None:
+    """Terminaison du verbe qui suit « nous » ou « vous » sujets juste avant `start` (« ons », « ez »), sinon
+    None."""
+    lo = max(0, start - 60)
+    m = _SUBJECT_BEFORE_RE.search(text, lo, start)
+    if m is None or (m.group("start") is not None and lo > 0):
+        return None
+    return _SUBJECT_ENDINGS[m.group(2).lower()]
+
+
+def agree_with_subject(text: str, start: int, suggestions: Sequence[str]) -> tuple[str, ...]:
+    """« Nous avont fini » : « avons », seule suggestion qui s'accorde avec « nous », passe en tête (Grammalecte
+    la classait 4e, après « amont » et « avant »)."""
+    ending = subject_ending(text, start)
+    matching = [s for s in suggestions if ending and s.endswith(ending)]
+    if len(matching) != 1:
+        return tuple(suggestions)
+    return (matching[0], *(s for s in suggestions if s != matching[0]))
+
+
+def one_edit(a: str, b: str) -> bool:
+    """Une seule faute de frappe d'écart : une lettre en trop, en moins, remplacée, ou deux voisines échangées."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        diff = [i for i in range(len(a)) if a[i] != b[i]]
+        return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1 and a[diff[0]] == b[diff[1]]
+                                  and a[diff[1]] == b[diff[0]])
+    short, long_ = sorted((a, b), key=len)
+    i = next((k for k in range(len(short)) if short[k] != long_[k]), len(short))
+    return short[i:] == long_[i + 1:]
+
+
 def same_letters(a: str, b: str) -> bool:
     """Vrai si deux mots ne diffèrent que par les accents ou la casse."""
     return a != b and strip_accents(a).casefold() == strip_accents(b).casefold()
@@ -244,7 +284,20 @@ def match_case(original: str, suggestion: str) -> str:
 
 
 def describe_changes(before: str, after: str, limit: int = 4) -> str:
-    """« aller → allé, a → à, obtenu → obtenus… » : ce qu'une correction a changé, mot à mot."""
-    changes = [(before[s:e].strip(), rep.strip()) for s, e, rep in diff_edits(before, after)]
-    changes = [f"{old} → {new}" for old, new in changes if old.split() != new.split()]
-    return ", ".join(changes[:limit]) + ("…" if len(changes) > limit else "")
+    """« aller → allé, a → à, obtenu → obtenus… » : ce qu'une correction a changé, mot à mot. Les espaces
+    corrigées sont comptées à la fin (« a → à, 1 espace corrigée »), pour que la liste corresponde au nombre
+    de corrections annoncé ; seules, elles n'ont rien de lisible à montrer : "" (le nombre suffit)."""
+    words, spaces = [], 0
+    for s, e, rep in diff_edits(before, after):
+        old, new = before[s:e].strip(), rep.strip()
+        if old.split() != new.split():
+            words.append(f"{old} → {new}")
+        else:
+            spaces += 1
+    if not words:
+        return ""
+    if len(words) > limit:
+        return ", ".join(words[:limit]) + "…"
+    if spaces:
+        words.append("1 espace corrigée" if spaces == 1 else f"{spaces} espaces corrigées")
+    return ", ".join(words)
