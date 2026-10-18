@@ -634,15 +634,20 @@ def test_hotkey_fields_let_tab_move_the_focus(qapp, home):
 
 
 def test_shift_f10_opens_the_menu_of_the_word(qapp, window, monkeypatch):
-    from PySide6.QtTest import QTest
-
+    """Maj+F10 ouvre le menu du mot sous le curseur, et, après F8 (le focus n'est plus dans la zone de texte),
+    celui de la faute sélectionnée."""
     open_and_wait(qapp, window)
-    opened = []
+    opened, clicked = [], []
     monkeypatch.setattr(type(window.editor), "contextMenuEvent", lambda self, event: opened.append(event.reason()))
-    QTest.keyClick(window.editor, Qt.Key.Key_F10, Qt.KeyboardModifier.ShiftModifier)
+    monkeypatch.setattr(window, "_on_issue_clicked", lambda issue, pos: clicked.append(issue.uid))
+    window._open_menu()
     from PySide6.QtGui import QContextMenuEvent
 
-    assert opened == [QContextMenuEvent.Reason.Keyboard]
+    assert opened == [QContextMenuEvent.Reason.Keyboard] and clicked == []
+    window._select_relative(+1)
+    window.setFocus()
+    window._open_menu()
+    assert clicked == [window._selected.uid]
 
 
 def test_english_text_checked_in_french_explains_the_underlines(qapp, make_window):
@@ -653,3 +658,15 @@ def test_english_text_checked_in_french_explains_the_underlines(qapp, make_windo
     window.open_with(english)
     assert wait_until(qapp, lambda: window._ready)
     assert "ne semble pas être en français" in window.auto_note.text() and window.auto_note.isVisible()
+
+
+def test_redo_brings_back_the_highlight_and_the_note(qapp, make_window):
+    window = auto_window(make_window)
+    window.open_with(TEXT)
+    assert wait_until(qapp, lambda: window.editor.plain_text() == FIXED)
+    marked = window.editor.marked_ranges()
+    window.editor.undo()
+    assert window.editor.marked_ranges() == [] and not window.auto_note.isVisible()
+    window.editor.redo()
+    assert window.editor.plain_text() == FIXED
+    assert window.editor.marked_ranges() == marked and window.auto_note.isVisible()

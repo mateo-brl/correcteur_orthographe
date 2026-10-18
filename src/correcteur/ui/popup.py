@@ -356,6 +356,7 @@ class CorrectionWindow(QWidget):
         self._fix_on_replace = False   # corriger d'office avant de remplacer (réglage, ou bouton « Corriger et… »)
         self._fix_tried = False        # correction d'office déjà tentée pour ce remplacement
         self._auto_cancelled = False   # correction automatique annulée par une frappe avant la fin des moteurs
+        self._last_fix: tuple[str, list[tuple[int, int]], str] | None = None  # texte, surlignage, bilan
 
         self.setWindowTitle("Correcteur")
         self.resize(640, 540)
@@ -491,6 +492,8 @@ class CorrectionWindow(QWidget):
             ("Ctrl+R", lambda: self._start_check()),
             ("F8", lambda: self._select_relative(+1)),
             ("Shift+F8", lambda: self._select_relative(-1)),
+            # Pour toute la fenêtre : après F8, le focus n'est plus forcément dans la zone de texte.
+            ("Shift+F10", self._open_menu),
         ]
         for keys, callback in bindings:
             shortcut = QShortcut(QKeySequence(keys), self)
@@ -534,6 +537,7 @@ class CorrectionWindow(QWidget):
         self._auto_pending = bool(self.controller.settings.general.auto_correct and text.strip())
         self._ready = not text.strip()
         self._replace_pending = self._fix_tried = self._auto_cancelled = False
+        self._last_fix = None
         self.auto_note.hide()
         cursor = self.editor.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -595,6 +599,9 @@ class CorrectionWindow(QWidget):
             if self._auto_pending:
                 self._auto_pending, self._auto_cancelled = False, True
         new = self.editor.plain_text()
+        if not self._applying and self._last_fix is not None and new == self._last_fix[0]:
+            self.editor.mark_ranges(self._last_fix[1])  # rétabli par Ctrl+Maj+Z
+            self._show_note(self._last_fix[2], ok=True)
         self._issues = shift_issues(self._issues, self._text, new, self._applying)
         if self._selected is not None:
             self._selected = self._by_uid(self._selected.uid)
@@ -883,6 +890,16 @@ class CorrectionWindow(QWidget):
             idx = 0 if step > 0 else len(self._issues) - 1
         self._select(self._issues[idx])
 
+    def _open_menu(self) -> None:
+        """Maj+F10 : menu de la faute sélectionnée (F8), sinon celui du mot sous le curseur."""
+        if self._selected is None:
+            self.editor.setFocus()
+            self.editor.open_menu_at_cursor()
+            return
+        self.editor.select_issue(self._selected)
+        rect = self.editor.cursorRect()
+        self._on_issue_clicked(self._selected, self.editor.viewport().mapToGlobal(rect.bottomLeft()))
+
     def _on_issue_clicked(self, issue: Issue, global_pos: QPoint) -> None:
         self._select(issue, reveal=False)
         menu = QMenu(self)
@@ -1002,8 +1019,11 @@ class CorrectionWindow(QWidget):
         changes = describe_changes(before, after)
         rest = " Cliquez une suggestion pour corriger le reste." if any(
             i.replacements for i in self._issues if i.uid not in self._applying) else ""
-        self._show_note((done + " automatiquement" if auto else done) + (f" : {changes}" if changes else "")
-                        + " (surlignées, Ctrl+Z pour annuler)." + rest, ok=True)
+        note = ((done + " automatiquement" if auto else done) + (f" : {changes}" if changes else "")
+                + " (surlignées, Ctrl+Z pour annuler)." + rest)
+        self._show_note(note, ok=True)
+        # Ctrl+Z puis Ctrl+Maj+Z : le texte corrigé revient, le surlignage et le bilan aussi (_on_text_changed).
+        self._last_fix = (self.editor.plain_text(), ranges, note)
         self._start_check()
         if not auto:
             self.controller.notify(done + ".")

@@ -243,6 +243,54 @@ def test_contradiction_settled_when_grammalecte_rejects_the_other_fix(home):
         c.close()
 
 
+def test_agreed_fixes_that_are_still_wrong_are_not_sure():
+    """Les deux moteurs d'accord, et pourtant faux : « Ils se sont téléphoné » (« se » complément indirect, pas
+    d'accord) et « Il faut que je fait » (« fasse », pas « fais »)."""
+    from correcteur.checker import solo_context_ok
+
+    text = "Ils se sont téléphoné hier soir."
+    assert not solo_context_ok(text, word_issue(text, "téléphoné", ["téléphonés"], "grammalecte",
+                                                "gv1__ppas_3p_mas_se_être_verbe__b1_a1_1"), agreed=True)
+    text = "Ils se sont lavés."
+    assert solo_context_ok(text, word_issue(text, "lavés", ["lavés"], "grammalecte",
+                                            "gv1__ppas_3p_mas_se_être_verbe__b1_a1_1"), agreed=True)
+    rule = "g2__conj_je__b2_a1_1"
+    text = "Il faut que je fait mes courses."
+    assert not solo_context_ok(text, word_issue(text, "fait", ["fais"], "grammalecte", rule), agreed=True)
+    text = "Je crois que je fait fausse route."
+    assert solo_context_ok(text, word_issue(text, "fait", ["fais"], "grammalecte", rule), agreed=True)
+
+
+def test_languagetool_homophone_sure_when_grammalecte_has_nothing_to_say(home):
+    """« Je me suis fait mal a la main » : LanguageTool seul, et Grammalecte ne signale rien, ni avant ni après.
+    Pas pour « a l'air » (« Patrick a l'air sombre ») ni « a toutes les chances » : « a » est le verbe."""
+    s = Settings()
+
+    def engines(word, fix):
+        lt = lambda t: present([word_issue(t, word, [fix], "languagetool", "A_ACCENT")])
+        return [FakeEngine(s, "grammalecte"), FakeEngine(s, "languagetool", lt)]
+
+    for text, expected in (("Je me suis fait mal a la main.", "Je me suis fait mal à la main."),
+                           ("Patrick a l'air sombre.", "Patrick a l'air sombre."),
+                           ("Une volonté a toutes les chances.", "Une volonté a toutes les chances.")):
+        c = Checker(s, PersonalDictionary(), engines=engines("a", "à"))
+        assert c.autocorrect(text)[0] == expected
+        c.close()
+
+
+def test_languagetool_suggestion_first_when_grammalecte_rule_is_weak(home):
+    """« Les filles son belles » : « sa » (Grammalecte, règle peu fiable) puis « sont » (LanguageTool). Alt+1
+    doit donner « sont ». Rien d'appliqué d'office."""
+    text = "Les filles son belles."
+    s = Settings()
+    g = lambda t: present([word_issue(t, "son", ["sa", "sont"], "grammalecte", "g3__gn_mon_ton_son_1m__b1_a2_1")])
+    lt = lambda t: present([word_issue(t, "son", ["sont"], "languagetool", "SON_SONT")])
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "grammalecte", g), FakeEngine(s, "languagetool", lt)])
+    [issue] = c.check(text).issues
+    assert issue.replacements[0] == "sont" and not issue.confident
+    c.close()
+
+
 def test_solo_only_trusts_reliable_rule_families(home):
     """Seul, Grammalecte n'est cru que pour des familles de règles vérifiées : « Mes parents son partis »
     -> « son parti » (gn_mon_ton_son prend « son » pour un déterminant) n'est jamais appliqué."""
