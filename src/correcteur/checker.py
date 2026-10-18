@@ -13,7 +13,7 @@ from typing import Callable, Iterable
 
 from correcteur.config import PersonalDictionary, Settings
 from correcteur.engines.base import Engine, EngineError
-from correcteur.engines.regles import INDICATIVE_BEFORE_QUE
+from correcteur.engines.regles import INDICATIVE_BEFORE_QUE, VETO
 from correcteur.models import ENGINE_LABELS, ENGINE_PRIORITY, Category, CheckResult, EngineStatus, Issue
 from correcteur.textutils import (
     adapt_to_user_style,
@@ -232,9 +232,11 @@ class Checker:
             return
         # Aussi quand l'autre moteur ne dit rien de ce passage : il ne contredit pas, et la correction en ligne
         # ne doit pas en faire moins que hors ligne (« Tu à raison », que LanguageTool laisse passer).
+        # Les règles du correcteur aussi quand LanguageTool propose autre chose au même endroit (« Je pense que ces
+        # vrai » : « c'est » contre « ce vrai ») : elles ne se déclenchent que quand le contexte impose leur correction.
         partial = [i for i in issues if not i.confident and i.replacements and (
-            i.partly_agreed or (i.sources == (local[0],) and not any(
-                o is not i and o.overlaps(i) and local[0] not in o.sources for o in issues)))]
+            i.partly_agreed or (i.sources == (local[0],) and (rule_family(i.rule_id).startswith("corr_") or not any(
+                o is not i and o.overlaps(i) and local[0] not in o.sources for o in issues))))]
         # Désaccord franc (« Tu à raison » : « as » pour Grammalecte, « a » pour LanguageTool, dont la règle
         # d'accent ne regarde pas le sujet) : voir plus bas.
         contradicted = [i for i in issues if not i.confident and not i.agreed and not i.partly_agreed
@@ -308,9 +310,13 @@ class Checker:
                      recheck: Recheck | None = None) -> list[Issue]:
         strict = self.settings.strict_typography
         ignored_rules = set(self.settings.ignored_rules)
+        # Zones que les règles du correcteur déclarent justes (engines/regles.py) : aucun moteur n'y corrige.
+        vetoes = [(i.start, i.end) for issues in raw.values() for i in issues if i.rule_id == VETO]
         cleaned: list[Issue] = []
         for issues in raw.values():
             for issue in issues:
+                if issue.rule_id == VETO or any(s <= issue.start and issue.end <= e for s, e in vetoes):
+                    continue
                 fixed = self._clean(text, issue, strict, ignored_rules)
                 if fixed is not None:
                     cleaned.append(fixed)
@@ -867,8 +873,9 @@ _SOLO_RULES = frozenset({
     # Mesurées sur les injections (ppas_3sg_mas_verbe_état : 28 sur 28) ou sans phrase voisine à risque : « Il si
     # connaît », « Ils se sont rendus compte », « deux milles euros », « dés demain » (voir solo_context_ok).
     "conf_s_y_si", "ppas_s_être_rendu_compte", "gn_mille", "ppas_3sg_mas_verbe_état", "conf_dès_des_dés",
-    # « d'y allé » -> « aller », « Est-se » -> « Est-ce » (voir solo_context_ok).
-    "infi_de_verbe", "inte_verbes_composés_interrogatifs",
+    # « d'y allé » -> « aller », « Est-se » -> « Est-ce », « ne peut pas allé » -> « aller », « deux heure » ->
+    # « heures » (voir solo_context_ok).
+    "infi_de_verbe", "inte_verbes_composés_interrogatifs", "infi_pouvoir", "gn_nombre_lettres_1m",
 })
 # Jamais sûres, même avec l'accord des deux moteurs : le participe d'un verbe pronominal s'accorde selon
 # son complément (« nous nous sommes lavés », mais « nous nous sommes téléphoné »), ce qu'aucun ne sait voir.
@@ -1006,10 +1013,19 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         if m and m.group(1).isupper():
             return False
     if family == "infi_de_verbe" and (not word.endswith("é") or re.search(
-            r"\b(?:rien|ça|sa|cela|quoi|personne|chose|aucun|aucune|quelqu['’]un|autre|y\s+a-t-il|il\s+y\s+a)\s+"
-            r"(?:[\w'’-]+\s+){0,2}(?:de|d['’])\s*(?:\w+\s+)?$", text[max(0, issue.start - 40):issue.start], re.I)):
+            r"\b(?:rien|ça|sa|cela|quoi|personne|chose|aucun|aucune|quelqu['’]un|autre|y\s+[aà]-t-il|il\s+y\s+a)\s+"
+            r"(?:[\w'’-]+,?\s+){0,4}(?:de|d['’])\s*(?:\w+\s+)?$", text[max(0, issue.start - 60):issue.start], re.I)):
         # « rien de changé », « qu'y a-t-il de changé ? », « je n'ai rien mangé de souillé » : « de » + participe,
         # juste. Et seulement le participe en -é mis pour l'infinitif (pas « de m'a part » -> « avoir »).
+        return False
+    if family == "infi_pouvoir" and (not (word.endswith("é") and first.lower() == word[:-1] + "er") or re.search(
+            r"\b(?:un|très|trop|si|assez|bien|fort|soit)\s+peu[tx]\s+(?:\w+\s+)?$", text[max(0, issue.start - 30):issue.start],
+            re.IGNORECASE)):
+        return False  # « Il est un peut fatigué » : « peut » est « peu », « fatigué » est juste
+    if family == "gn_nombre_lettres_1m" and (
+            re.search(r"\b(?:les|tous|toutes|à)\s+\w+\s+$", text[max(0, issue.start - 25):issue.start], re.IGNORECASE)
+            or word in ("besoin", "envie", "peur", "faim", "soif", "raison", "tort", "honte") or first.endswith(("ées", "és"))):
+        # « nous avions tous les deux besoin », « le basket-ball à trois créée par » : le nombre ne compte pas ce nom
         return False
     if family == "inte_verbes_composés_interrogatifs" and word != "se" and not same_sound(
             re.sub(r"[-‐]t?$", "", word), re.sub(r"[-‐]t?$", "", first.lower())):

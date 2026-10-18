@@ -88,6 +88,9 @@ jobs:
         run: |
           dist/Correcteur/correcteur corriger --hors-ligne "Je vais a la plage , et il faut que tu viens." > sortie.txt
           python -c "t = open('sortie.txt', encoding='utf-8').read(); print(t); assert 'à la plage, et' in t"
+          # Règles du correcteur, avec le module de conjugaison de Grammalecte embarqué dans le paquet.
+          dist/Correcteur/correcteur corriger --hors-ligne "Il faut que je fait mes courses. Ils se sont parlés." > regles.txt
+          python -c "t = open('regles.txt', encoding='utf-8').read(); print(t); assert 'je fasse' in t and 'parlé.' in t"
 
       # Le paquet lancé comme par un utilisateur : Ctrl+Alt+X dans une vraie fenêtre (écran X11 virtuel).
       - name: Test du paquet sur un bureau (Linux)
@@ -100,6 +103,8 @@ jobs:
         run: |
           dist\Correcteur\correcteur-cli.exe corriger --hors-ligne "Je vais a la plage , et il faut que tu viens." > sortie.txt
           python -c "t = open('sortie.txt', encoding='utf-8').read(); print(t); assert 'à la plage, et' in t"
+          dist\Correcteur\correcteur-cli.exe corriger --hors-ligne "Il faut que je fait mes courses. Ils se sont parlés." > regles.txt
+          python -c "t = open('regles.txt', encoding='utf-8').read(); print(t); assert 'je fasse' in t and 'parlé.' in t"
 
       - name: Archive Linux
         if: runner.os == 'Linux'
