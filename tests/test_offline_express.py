@@ -54,6 +54,14 @@ FIXED = [
     # Rapport de test de la 0.1.8.
     ("Je suis sur que tu vas réussir.", "Je suis sûr que tu vas réussir."),
     ("C'est la maison dont je t'ai parler.", "C'est la maison dont je t'ai parlé."),
+    # Rapport de test de la 0.1.9.
+    ("Je ne sais pas si il viendra.", "Je ne sais pas s'il viendra."),
+    ("Si il pleut, on reste.", "S'il pleut, on reste."),
+    ("Je vous est envoyé le dossier.", "Je vous ai envoyé le dossier."),
+    ("Quelque soit le temps, nous partirons.", "Quel que soit le temps, nous partirons."),
+    ("Quelque soit la météo, nous partirons.", "Quelle que soit la météo, nous partirons."),
+    ("C'est eux qui on gagné.", "C'est eux qui ont gagné."),
+    ("Vous avez finis vos devoirs ?", "Vous avez fini vos devoirs ?"),
 ]
 
 UNTOUCHED = [
@@ -82,6 +90,8 @@ UNTOUCHED = [
     "Il ces levé tôt ce matin.",           # « levés » s'accorderait avec « ces », lui-même faux (« s'est »)
     "Je suis sur la route.",
     "Il est sur le point de partir.",
+    "Nous les avons finis hier.",          # complément placé avant : l'accord est juste
+    "La galette que nous avons mangée.",
     "Les Échos a publié un article.",
     "Rendez-vous place du 8 Mai 1945.",
     "Ma mère et ma sœur sont partit.",    # « parties » : le masculin par défaut serait faux
