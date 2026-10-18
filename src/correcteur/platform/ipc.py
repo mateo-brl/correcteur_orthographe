@@ -242,10 +242,11 @@ class IpcServer:
 
     def stop(self) -> None:
         self._stopping = True
-        if self._listener is not None:
-            addr = self._listener.address
+        listener, self._listener = self._listener, None  # un 2e appel ne fait rien (Listener fermé : AttributeError)
+        if listener is not None:
+            addr = listener.address
             try:
-                self._listener.close()
+                listener.close()
             except Exception:
                 pass
             if sys.platform == "win32":

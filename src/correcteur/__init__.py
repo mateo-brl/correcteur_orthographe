@@ -1,5 +1,5 @@
 """Correcteur : correcteur d'orthographe et de grammaire pour tout le système."""
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 APP_NAME = "Correcteur"
 APP_ID = "correcteur"

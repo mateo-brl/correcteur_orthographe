@@ -183,7 +183,10 @@ moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
 ## Limites connues
 
 - Dans un terminal, le remplacement automatique échoue. Le correcteur envoie <kbd>Ctrl</kbd> + <kbd>V</kbd>, alors
-  que les terminaux collent avec <kbd>Ctrl</kbd> + <kbd>Maj</kbd> + <kbd>V</kbd>.
+  que les terminaux collent avec <kbd>Ctrl</kbd> + <kbd>Maj</kbd> + <kbd>V</kbd>. Sous Wayland, il ne peut pas savoir
+  que le collage a échoué : la notification annonce quand même les corrections. Dans un terminal, ouvrez plutôt
+  la fenêtre de correction, copiez le texte corrigé, puis collez-le avec <kbd>Ctrl</kbd> + <kbd>Maj</kbd> +
+  <kbd>V</kbd>.
 - Sous Wayland, le remplacement automatique passe par `wtype` ou `ydotool` (sous GNOME, uniquement `ydotool`). Si
   l'outil manque, le texte corrigé est seulement copié dans le presse-papiers et il faut le coller soi-même avec
   <kbd>Ctrl</kbd> + <kbd>V</kbd>.
@@ -237,9 +240,11 @@ flowchart LR
 
 1. Le raccourci est capté par `RegisterHotKey` sous Windows et par `pynput` sous X11. Sous Wayland, c'est le
    bureau qui le gère.
-2. Le correcteur lit le texte sélectionné (sélection primaire X11 ou `wl-paste`), et simule
-   <kbd>Ctrl</kbd> + <kbd>C</kbd> s'il n'y arrive pas. Il remet ensuite le presse-papiers d'origine, images et
-   fichiers compris sous Windows.
+2. Le correcteur lit le texte sélectionné. Sous X11, il prend la sélection primaire seulement si elle appartient
+   à la fenêtre active, et sinon il simule <kbd>Ctrl</kbd> + <kbd>C</kbd>. Sous Wayland, il simule toujours
+   <kbd>Ctrl</kbd> + <kbd>C</kbd> : la sélection primaire peut venir d'une autre fenêtre. Il remet ensuite le
+   presse-papiers d'origine, images et fichiers compris sous Windows et sous Wayland. Sous Wayland, il attend
+   pour cela une pause de frappe, peu après le collage.
 3. Les deux moteurs tournent en parallèle. Les résultats de Grammalecte s'affichent tout de suite, ceux de
    LanguageTool s'ajoutent dès qu'ils arrivent.
 4. Une faute signalée par les deux moteurs devient une seule remarque, qui garde en mémoire leur accord.

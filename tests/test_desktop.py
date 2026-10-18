@@ -138,6 +138,49 @@ def test_capture_keeps_an_image_in_the_clipboard(qapp, home):
         owner.wait()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="sélections X11")
+def test_selection_owner_client_is_compared_by_resource_base():
+    """Deux connexions X sont deux clients : seule la fenêtre du client propriétaire de la sélection compte."""
+    from Xlib import display
+
+    from correcteur.platform.x11_selection import SelectionOwner, selection_owned_by_client_of
+
+    owner = SelectionOwner()
+    other = display.Display()
+    try:
+        assert owner.set_text("texte", selection="PRIMARY")
+        mine = owner._current.win.id
+        stranger = other.screen().root.create_window(0, 0, 1, 1, 0, 0)
+        other.flush()
+        assert selection_owned_by_client_of("PRIMARY", mine)
+        assert selection_owned_by_client_of("PRIMARY", mine + 5)  # autre ressource du même client
+        assert not selection_owned_by_client_of("PRIMARY", stranger.id)
+    finally:
+        owner.stop()
+        other.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sélections X11")
+def test_capture_ignores_a_selection_made_in_another_window(qapp, home):
+    """Texte sélectionné dans une fenêtre, puis passage à une autre sans rien y sélectionner : la capture ne
+    prend pas la sélection de la première (Ctrl+Alt+X la corrigeait et la collait dans la seconde)."""
+    from correcteur.platform.bridge import create_bridge
+    from correcteur.platform.x11_selection import SelectionOwner, read_selection
+
+    other_application = SelectionOwner()  # un autre client X, où l'on vient de sélectionner du texte
+    try:
+        assert other_application.set_text("Il pense a toi.", selection="PRIMARY")
+        bridge = create_bridge(lambda ms, fn: fn())
+        target = Target("", 4000)  # au premier plan, rien de sélectionné
+        assert read_selection("PRIMARY") == "Il pense a toi."
+        capture = bridge.capture()
+        bridge.release(capture)
+        assert capture.text == ""
+        assert target.final_text() == ""
+    finally:
+        other_application.stop()
+
+
 def test_replace_after_another_app_copied(qapp, home):
     """Cas réel : l'utilisateur a copié quelque chose dans une autre application,
     et le correcteur tourne depuis longtemps avec des fenêtres ouvertes."""

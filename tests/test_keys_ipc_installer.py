@@ -438,3 +438,14 @@ def test_ipc_runtime_dir_open_to_others_is_not_used(home, tmp_path, monkeypatch)
     assert not path.startswith(str(runtime)) and (os.stat(runtime).st_mode & 0o777) == 0o755
     os.chmod(runtime, 0o700)
     assert ipc.address()[0].startswith(str(runtime))
+
+
+def test_ipc_server_stops_twice(home):
+    """quit() puis aboutToQuit : un 2e arrêt levait AttributeError (Listener déjà fermé)."""
+    from correcteur.platform.ipc import IpcServer
+
+    server = IpcServer(lambda command, data: None)
+    if not server.start():
+        pytest.skip("IPC indisponible ici")
+    server.stop()
+    server.stop()
