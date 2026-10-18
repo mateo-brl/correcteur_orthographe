@@ -72,6 +72,8 @@ FIXED = [
     ("Ses parents son très gentils.", "Ses parents sont très gentils."),
     ("Il faut que je fait mes courses.", "Il faut que je fasse mes courses."),
     ("Il ces levé tôt ce matin.", "Il s'est levé tôt ce matin."),
+    # Grammalecte proposait « S'étais » : c'est « C'était » (règle du correcteur).
+    ("C'étais lui le plus jeune.", "C'était lui le plus jeune."),
 ]
 
 UNTOUCHED = [
@@ -85,7 +87,6 @@ UNTOUCHED = [
     "Ils vont pressés au marché.",
     "Voici ma donnée la plus fiable.",
     "Ils nous avont dit.",                 # « nous » complément : « ont », pas « avons »
-    "C'étais lui le plus jeune.",          # « C'était », pas « S'étais »
     "Elle n'a pas sont mot de passe.",     # « son », pas « été »
     "Ils se sont téléphoné hier soir.",    # « se » complément indirect : pas d'accord (test de la 0.1.7)
     "Patrick a l'air sombre.",

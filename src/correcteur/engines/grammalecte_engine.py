@@ -265,6 +265,9 @@ class GrammalecteEngine(Engine):
                 and not any(f.start <= e[0] and e[1] <= f.end for f in fautes)]
         for f in fautes:
             if f.replacement is None:
+                # Veto : la zone est juste. Transmis au checker, qui y écarte aussi les remarques de LanguageTool
+                # (« Je pense que le chat a la grippe » : « à » proposé à tort).
+                kept.append((f.start, f.end, "", (), f.category, regles.VETO, ""))
                 continue
             # Grammalecte propose la même correction au même endroit : ses autres suggestions restent
             # en second choix (« viennes », puis « vinsses » en typographie stricte).

@@ -97,6 +97,19 @@ FIXES = [
     ("Et-il arrivé ?", "Et", "Est", "corr_locution"),
     ("Il se sentai de nouveau bien.", "sentai", "sentait", "corr_conj_sujet"),
     ("Elle se querellent sans cesse.", "Elle", "Elles", "corr_conj_sujet"),
+    ("S'est une vertu rare.", "S'", "C'", "corr_c_est"),
+    ("Allez voir ce que s'est.", "s'", "c'", "corr_c_est"),
+    ("C'étais il y a longtemps.", "étais", "était", "corr_c_est"),
+    ("Sont élégance est rare.", "Sont", "Son", "corr_sont_son"),
+    ("Il risque de voir sont travail volé.", "sont", "son", "corr_sont_son"),
+    ("Elles se son succédé.", "son", "sont", "corr_son_on_pluriel"),
+    ("Est j'ai des gens en main.", "Est", "Et", "corr_et"),
+    ("Des petites zone favorables.", "zone", "zones", "corr_pluriel_nom"),
+    ("Rien de particulié.", "particulié", "particulier", "corr_orthographe"),
+    ("Ça se conçoi.", "conçoi", "conçoit", "corr_conj_sujet"),
+    ("Le ministre de l'Intérieur à estimé que tout va bien.", "à", "a", "corr_a_verbe"),
+    ("Nous avons à cherché des issues.", "cherché", "chercher", "corr_a_participe"),
+    ("Il ne nous reste qu'à démontré le contraire.", "démontré", "démontrer", "corr_a_participe"),
 ]
 
 
@@ -162,6 +175,14 @@ UNTOUCHED = [
     "Il ou elle ne conçoivent même plus.",
     "Là commence la forêt.",
     "Il ne reste rien de changé.",
+    "Il s'est un peu calmé.",
+    "Il s'est en effet trompé.",
+    "Mais s'est-il trompé ?",
+    "Les petits pois sont bons.",
+    "Est-ce que je viens ?",
+    "Un moteur à cylindrée fixe.",
+    "La tâche à effectuer, il s'en moquait.",
+    "La maison à colombages.",
 ]
 
 
@@ -175,6 +196,18 @@ def test_veto_drops_a_wrong_grammalecte_fix(lex):
     text = "Ils se sont téléphoné hier soir."
     vetoes = [f for f in fautes(text, lex) if f.replacement is None]
     assert [(text[f.start:f.end], f.rule) for f in vetoes] == [("téléphoné", "corr_ppas_pronominal_indirect")]
+
+
+@pytest.mark.parametrize("text, zones", [
+    ("Je pense que le chat a la grippe.", ["a"]),               # LanguageTool proposait « à »
+    ("Paul a la clé.", ["a"]),
+    ("Ni lui ni elle ne viendront.", ["elle", "viendront"]),   # les deux moteurs voulaient « elles »
+    ("Le voyage a la mer était long.", []),                     # « à la mer » : « était » est le verbe
+])
+def test_vetoes_protect_correct_zones(lex, text, zones):
+    from correcteur.engines.regles import check
+
+    assert [text[f.start:f.end] for f in check(text, lex, strict=True) if f.replacement is None] == zones
 
 
 def test_tokenize_splits_elisions_but_keeps_dictionary_words(lex):

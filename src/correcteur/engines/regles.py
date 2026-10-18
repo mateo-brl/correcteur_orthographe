@@ -20,6 +20,10 @@ from correcteur.models import Category
 from correcteur.textutils import same_sound
 
 
+# Règle des vetos : une zone juste, où aucun moteur ne doit corriger (voir Checker.post_process).
+VETO = "corr_veto"
+
+
 @dataclass
 class Faute:
     start: int
@@ -446,7 +450,7 @@ def regle_conj_sujet(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faut
     propose « pensa » pour « il pensai », « Il » pour « Ils mange »). « nous » et « vous » sont souvent
     compléments (« Cela vous dégoûtait ») : « vous » seulement en tête d'une question (« Vous allé bien ? »)."""
     for k, subject in enumerate(words):
-        who = SUBJECTS.get(subject.low)
+        who = SUBJECTS.get(subject.low) or (":3s" if subject.low in ("ça", "cela") else None)
         if who is None and _plural_subject_start(text, words, k + 1, lex) and subject.low not in CLITICS:
             who = ":3p"
         if who is None and subject.low == "qui":
@@ -471,7 +475,7 @@ def regle_conj_sujet(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faut
         if subject.low not in SUBJECTS and (lex.is_noun(verb.text) or lex.has(verb.text, ":A")):
             continue  # « les valeurs limites », « des petites zones » : nom ou adjectif, pas un verbe
         readings = lex.verbs(verb.text)
-        if not readings and subject.low in SUBJECTS and not lex.known(verb.text):
+        if not readings and (subject.low in SUBJECTS or subject.low in ("ça", "cela")) and not lex.known(verb.text):
             # « il se sentai », « tu croyai », « J'avai » : mot inconnu, une lettre muette de moins qu'une forme de
             # la bonne personne.
             found = {c for c in (verb.text + e for e in ("s", "t", "x", "e", "es", "nt", "ent"))
@@ -558,6 +562,12 @@ def regle_son_on_pluriel(text: str, words: list[Mot], lex: Lexique) -> Iterable[
     ou « feint » pour le mot d'après : ces remarques sont écartées."""
     for i in range(1, len(words) - 1):
         word, nxt = words[i], words[i + 1]
+        if (word.low == "son" and words[i - 1].low in ("se", "s'") and _joined(text, words[i - 1], word)
+                and participle_like(nxt.text, lex) and not lex.is_noun(nxt.text)):
+            # « Elles se son succédé » : après « se », « son » ne peut être que « sont ».
+            yield Faute(word.start, word.end, "sont", "« sont » (verbe être) après « se ».", "corr_son_on_pluriel",
+                        drop=((nxt.start, nxt.end),))
+            continue
         if word.low not in ("son", "on") or not _joined(text, words[i - 1], word) or not (
                 _plural_subject_before(words, i, lex) or _coordinated_subject_before(words, i, lex)):
             continue
@@ -748,6 +758,98 @@ def regle_a_verbe(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
                                       and nxt.low not in ("découvert", "couvert")):
             yield Faute(word.start, word.end, "a", "« a » (verbe avoir) après le sujet.", "corr_a_verbe",
                         drop=((nxt.start, nxt.end),))
+
+
+_SUBORDINATORS = frozenset("que qu' qui dont où quand si lorsque lorsqu' puisque puisqu' parce comme et mais ou car".split())
+
+
+def _verb_in(words: list[Mot], lex: Lexique) -> bool:
+    """Un verbe conjugué parmi ces mots : pas un nom qui a aussi une lecture verbale (« la tâche », « le linge »),
+    sauf après un pronom sujet ou complément (« il tâche », « nous le linge » non : « le » est un déterminant)."""
+    pronouns = (set(SUBJECTS) | CLITICS) - DETERMINERS
+    for n, w in enumerate(words):
+        prev = words[n - 1].low if n > 0 else ""
+        if lex.finite_verb(w.text) and (not lex.is_noun(w.text) or prev in pronouns or (
+                (w.low in ETRE or w.low in AVOIR) and prev not in DETERMINERS)):  # « est » : verbe, sauf « l'est »
+            return True
+    return False
+
+
+def regle_a_participe(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« à » + participe en -é. Sans verbe conjugué dans la proposition, « à » est le verbe avoir : « Le ministre de
+    l'Intérieur à estimé que… » -> « a estimé ». Après un verbe conjugué, le participe est l'infinitif mal écrit :
+    « nous avons à cherché des issues » -> « à chercher », « Il ne reste qu'à démontré » -> « démontrer »."""
+    for i in range(1, len(words) - 1):
+        a, part = words[i], words[i + 1]
+        if a.low != "à" or not _joined(text, words[i - 1], a) or not _joined(text, a, part) or not part.low.endswith("é"):
+            continue
+        reading = lex.participle(part.text)
+        if not reading or not reading[1].startswith("1") or lex.is_noun(part.text):
+            continue
+        k = i - 1  # début de la proposition
+        while k > 0 and words[k].low not in _SUBORDINATORS and not re.search(r"[.!?;:,()«»]", text[words[k - 1].end:words[k].start]):
+            k -= 1
+        before = words[k:i]
+        m = i + 2  # fin de la proposition principale, après le participe
+        while m < len(words) and words[m].low not in _SUBORDINATORS and not re.search(r"[.!?;:,()«»]", text[words[m - 1].end:words[m].start]):
+            m += 1
+        after = words[i + 2:m]
+        nxt = words[i + 2] if i + 2 < len(words) and _joined(text, part, words[i + 2]) else None
+        sentence_end = re.match(r"\s*(?:[.!?…]|$)", text[part.end:part.end + 3]) is not None
+        if words[i - 1].low == "qu'" or _verb_in(before, lex):
+            # « Il ne nous reste qu'à démontré », « nous avons à cherché » : l'infinitif
+            inf = part.text[:-1] + "er"
+            if lex.has(inf, ":Y"):
+                yield Faute(part.start, part.end, inf, "Infinitif après « à ».", "corr_a_participe",
+                            drop=((a.start, a.end),))
+        elif (before and lex.is_noun(words[i - 1].text) and not _verb_in(after, lex)
+              and words[i - 1].low not in ("rien", "tout", "personne", "chose", "beaucoup", "peu", "trop", "assez") and (
+                (nxt is None and sentence_end and len(reading[1]) > 2 and reading[1][2] == "i")
+                or (nxt is not None and (nxt.low in DETERMINERS or nxt.low in PREPOSITIONS or nxt.low in ("que", "qu'"))))):
+            # « Le film à commencé. », « Le ministre à estimé que » ; pas « la tâche à effectué, il… » (« à
+            # effectuer »), ni « un moteur à cylindré fixe ».
+            yield Faute(a.start, a.end, "a", "« a » (verbe avoir) : la phrase n'a pas d'autre verbe.", "corr_a_verbe",
+                        drop=((part.start, part.end),))
+
+
+def veto_a_verbe(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Je pense que le chat a la grippe », « Paul a la clé » : un sujet en tête de proposition, puis « a » et un
+    déterminant, sans autre verbe dans la proposition : « a » est le verbe avoir (LanguageTool proposait « à »).
+    Pas « Le voyage a la mer était long » (« à la mer » : « était » est le verbe)."""
+    for i in range(1, len(words) - 1):
+        a, nxt = words[i], words[i + 1]
+        if a.low != "a" or nxt.low not in _AFTER_PREPOSITION_A or not (_joined(text, words[i - 1], a) and _joined(text, a, nxt)):
+            continue
+        prev = words[i - 1]
+        if prev.low in ("il", "elle", "on", "qui") or (prev.text[:1].isupper() and lex.has(prev.text, ":M")):
+            s = i - 1
+        elif i >= 2 and words[i - 2].low in DETERMINERS and lex.is_noun(prev.text):
+            s = i - 2
+        else:
+            continue
+        if not (s == 0 or _sentence_start(words, s, text) or words[s - 1].low in _CLAUSE_START_WORDS):
+            continue
+        m = i + 2
+        while m < len(words) and words[m].low not in _SUBORDINATORS and not re.search(r"[.!?;:,()«»]", text[words[m - 1].end:words[m].start]):
+            m += 1
+        if not _verb_in(words[i + 2:m], lex):
+            yield Faute(a.start, a.end, None, "", "corr_veto_a_verbe")
+
+
+def veto_sujets_coordonnes(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Ni lui ni elle ne viendront », « Paul et elle partent » : deux sujets coordonnés, le verbe au pluriel est
+    juste (les deux moteurs voulaient « elles »)."""
+    for k in range(1, len(words) - 1):
+        pron = words[k]
+        if words[k - 1].low not in ("et", "ou", "ni") or pron.low not in ("il", "elle", "lui", "eux", "elles", "ils",
+                                                                          "moi", "toi", "nous", "vous"):
+            continue
+        j = k + 1
+        while j < len(words) and words[j].low in CLITICS and j - k <= 3:
+            j += 1
+        if j < len(words) and re.search(r":[123]p", " ".join(t for _, _, t in lex.verbs(words[j].text))):
+            yield Faute(pron.start, pron.end, None, "", "corr_veto_sujets")
+            yield Faute(words[j].start, words[j].end, None, "", "corr_veto_sujets")
 
 
 def veto_a_ete_adjectif(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
@@ -1084,6 +1186,67 @@ def regle_la_article(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faut
                         "lieu.", "corr_la_article")
 
 
+_CLAUSE_START_WORDS = frozenset("et mais car donc or puis alors que qu' parce".split())
+
+
+def regle_c_est(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« S'est une vertu rare » -> « C'est », « ce que s'est » -> « ce que c'est », « s'est-à-dire » ; « c'étais
+    eux » -> « c'était ». « s'est » devant un déterminant, en tête de proposition (pas « Il s'est un peu calmé »)."""
+    for i in range(len(words) - 1):
+        a, b = words[i], words[i + 1]
+        if a.low == "c'" and b.start == a.end and b.low in ("étais", "étai", "étaie"):
+            yield Faute(b.start, b.end, "était", "« c'était » : le verbe s'accorde avec « ce ».", "corr_c_est")
+            continue
+        if a.low != "s'" or b.start != a.end or b.low not in ("est", "est-à-dire") or i + 2 > len(words):
+            continue
+        start = i == 0 or _sentence_start(words, i, text) or words[i - 1].low in _CLAUSE_START_WORDS
+        nxt = words[i + 2] if i + 2 < len(words) else None
+        end = re.match(r"\s*(?:[.!?,;:…)]|$)", text[b.end:b.end + 3]) is not None
+        if b.low == "est-à-dire" or (start and end) or (start and nxt is not None and nxt.low in DETERMINERS
+                                     and nxt.low not in ("de", "d'", "tout", "toute", "tous", "toutes")
+                                     and not (nxt.low == "un" and i + 3 < len(words) and words[i + 3].low == "peu")):
+            yield Faute(a.start, a.end, match_case(a.text, "c'"), "« c'est » (cela est) : « s'est » est le verbe "
+                        "pronominal (« il s'est levé »).", "corr_c_est")
+
+
+def regle_et(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Est j'ai des gens en main » -> « Et j'ai » : « est » en tête de phrase devant « je » (pas une question :
+    « Est-ce que je » prend un trait d'union)."""
+    for i in range(len(words) - 1):
+        if words[i].low == "est" and words[i + 1].low in ("je", "j'") and (i == 0 or _sentence_start(words, i, text)):
+            yield Faute(words[i].start, words[i].end, match_case(words[i].text, "et"), "« et » (conjonction).",
+                        "corr_et")
+
+
+# Adjectifs qui se placent avant le nom : « les petites zone », pas « plusieurs arrivées demain » (« arrivées »
+# est le nom) ni « Les rieurs son pour vous ».
+_BEFORE_NOUN = frozenset("""petit grand beau bel bon mauvais jeune vieux vieil nouveau nouvel gros long haut joli premier
+    dernier autre même seul vrai faux meilleur pire double ancien cher pauvre propre brave certain différent divers
+    nombreux prochain gentil vaste énorme immense large court bref""".split())
+
+
+def _lemma_of_adjective(word: str, lex: Lexique) -> str:
+    m = next((re.match(r">([^/]+)/", mm) for mm in lex.morph(word) if ":A" in mm), None)
+    return m.group(1) if m else ""
+
+
+def regle_pluriel_nom(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Des petites zone favorables » -> « zones » : déterminant pluriel, adjectif au pluriel, puis un nom au
+    singulier. Seulement quand le pluriel du nom existe et que le mot n'est pas aussi un verbe."""
+    for i in range(2, len(words)):
+        det, adj, noun = words[i - 2], words[i - 1], words[i]
+        if det.low not in PLURAL_DETERMINERS or not (_joined(text, det, adj) and _joined(text, adj, noun)):
+            continue
+        if not re.search(r":A:[mfe]:p", " ".join(lex.morph(adj.text))) or _lemma_of_adjective(adj.text, lex) not in _BEFORE_NOUN:
+            continue
+        gn = lex.noun_gender_number(noun.text)
+        if gn is None or gn[1] != "s" or lex.has(noun.text, ":A") or lex.has(noun.text, ":W") or noun.text[:1].isupper():
+            continue
+        plural = noun.text + ("x" if noun.low.endswith(("au", "eau", "eu")) else "s")
+        if lex.noun_gender_number(plural) is not None and lex.noun_gender_number(plural)[1] == "p":
+            yield Faute(noun.start, noun.end, plural, "Le nom s'accorde avec le déterminant pluriel.", "corr_pluriel_nom")
+
+
 def regle_la_lieu(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
     """« Je serai la demain » -> « là », « Il est la, » -> « là » : « la » après être, devant un mot de temps, une
     préposition ou une ponctuation (pas « Elle est la meilleure »)."""
@@ -1181,16 +1344,27 @@ def regle_quel_genre(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faut
 def regle_sont_son(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
     """« Il a pris sont manteau » -> « son manteau » : « sont » devant un nom singulier, après un verbe ou une
     préposition (jamais après un sujet)."""
-    for i in range(1, len(words) - 1):
-        word, prev, noun = words[i], words[i - 1], words[i + 1]
-        if word.low != "sont" or not _joined(text, prev, word) or not _joined(text, word, noun):
+    for i in range(len(words) - 1):
+        word, noun = words[i], words[i + 1]
+        if word.low != "sont" or not _joined(text, word, noun):
             continue
         gn = lex.noun_gender_number(noun.text)
         if gn is None or gn[1] != "s" or lex.has(noun.text, ":V") or lex.has(noun.text, ":A") or lex.has(noun.text, ":G"):
             continue
+        if i == 0 or _sentence_start(words, i, text):
+            # « Sont élégance est rare » : en tête de phrase, devant un nom singulier, « sont » n'a pas de sujet.
+            if i + 2 < len(words) and lex.finite_verb(words[i + 2].text):
+                det = "sa" if gn[0] == "f" and not re.match(r"(?i)[aeiouyhéèêàâîôû]", noun.text) else "son"
+                yield Faute(word.start, word.end, match_case(word.text, det), f"« {det} » (déterminant possessif) "
+                            "devant un nom.", "corr_sont_son", drop=((noun.start, noun.end),))
+            continue
+        prev = words[i - 1]
+        if not _joined(text, prev, word):
+            continue
         after_verb = prev.low in PREPOSITIONS or (lex.participle(prev.text) and prev.low not in ETRE) or (
-            lex.finite_verb(prev.text) and prev.low not in ETRE and not lex.is_noun(prev.text))
-        if not after_verb or prev.low in SUBJECTS or (i >= 2 and words[i - 2].low in DETERMINERS):
+            lex.finite_verb(prev.text) and prev.low not in ETRE and not lex.is_noun(prev.text)) or (
+            lex.has(prev.text, ":Y") and not lex.is_noun(prev.text))
+        if not after_verb or prev.low in SUBJECTS or (i >= 2 and words[i - 2].low in DETERMINERS and lex.is_noun(prev.text)):
             continue  # « les abrutis sont légion » : un nom sujet, « sont » est le verbe
         if any(w.low in ("que", "qu'", "qui", "dont", "où") for w in words[max(0, i - 6):i - 1]):
             continue  # « Les livres que tu m'as prêtés sont super » : fin de la relative, puis le verbe
@@ -1289,22 +1463,29 @@ FREQUENT = {
 def regle_orthographe_frequente(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
     for w in words:
         fix = FREQUENT.get(w.low)
+        if fix is None and w.low.endswith("ié") and len(w.low) > 4 and not lex.known(w.text):
+            # « particulié » -> « particulier », « papié » -> « papier » : nom ou adjectif en -ier (pas un verbe,
+            # où « -ié » serait peut-être un participe : « envié »).
+            candidate = w.low[:-1] + "er"
+            if lex.known(candidate) and not lex.has(candidate, ":V"):
+                fix = candidate
         if fix is not None and not (w.low == "language" and lex.known(w.text)):
             yield Faute(w.start, w.end, match_case(w.text, fix), f"Orthographe : « {fix} ».", "corr_orthographe",
                         Category.SPELLING)
 
 
 RULES: tuple[Callable[[str, list[Mot], Lexique], Iterable[Faute]], ...] = (
+    # Participes, modes, conjugaison
     regle_pronominal_indirect, regle_pronominal_sujet, regle_subjonctif, regle_si_conditionnel, regle_conj_sujet,
-    regle_sest,
-    regle_son_on_pluriel, regle_qui_on, regle_ce_se, regle_ces_cest, regle_cest_ces, regle_mais_mes,
-    regle_a_accent, regle_a_verbe, regle_ou_lieu, regle_peu, regle_pret, regle_ca, regle_la_demonstratif, regle_leurs,
-    regle_locutions, regle_s_en, regle_t_euphonique, regle_il_faut, regle_m_a, regle_infinitif, regle_avoir_participe,
-    regle_la_article, regle_la_lieu,
-    regle_c_est_a_dire, regle_ni_ny,
-    regle_prie,
-    regle_avoir_ete, regle_je_ai,
-    regle_quel_genre, regle_sont_son, regle_cod_que, regle_orthographe_frequente, veto_a_ete_adjectif,
+    # Homophones
+    regle_sest, regle_son_on_pluriel, regle_qui_on, regle_ce_se, regle_ces_cest, regle_cest_ces, regle_mais_mes,
+    regle_a_accent, regle_a_verbe, regle_a_participe, regle_ou_lieu, regle_peu, regle_pret, regle_ca,
+    regle_la_demonstratif, regle_leurs, regle_locutions, regle_s_en, regle_t_euphonique, regle_il_faut, regle_m_a,
+    regle_infinitif, regle_avoir_participe, regle_la_article, regle_c_est, regle_et, regle_pluriel_nom, regle_la_lieu,
+    regle_c_est_a_dire, regle_ni_ny, regle_prie, regle_avoir_ete, regle_je_ai, regle_quel_genre, regle_sont_son,
+    regle_cod_que, regle_orthographe_frequente,
+    # Vetos, en dernier : une zone déjà corrigée par une règle n'est pas déclarée juste
+    veto_a_ete_adjectif, veto_a_verbe, veto_sujets_coordonnes,
 )
 
 

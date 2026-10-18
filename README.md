@@ -264,9 +264,10 @@ flowchart LR
    dictionnaire (nature, genre, nombre, temps de chaque mot) et son module de conjugaison. Une règle ne propose
    qu'une correction, et seulement quand le contexte l'impose : « Ils mange » devient « mangent » parce que
    « mangent » se prononce comme ce qui est écrit, mais « Ils prend » reste à vérifier (« Il prend » ou « Ils
-   prennent » ?). Elles remplacent la remarque de Grammalecte sur le même mot et écartent celles qu'elles savent
-   fausses : dans « Ils se sont téléphoné », Grammalecte voudrait « téléphonés », à tort. Leur coût est
-   négligeable : 0,1 s pour 170 000 caractères, quand Grammalecte en met plus de 60.
+   prennent » ?). Elles remplacent la remarque de Grammalecte sur le même mot et écartent, chez les deux moteurs,
+   celles qu'elles savent fausses : dans « Ils se sont téléphoné », Grammalecte voudrait « téléphonés » ; dans
+   « Je pense que le chat a la grippe », LanguageTool voudrait « à ». Leur coût est négligeable : 0,1 s pour
+   170 000 caractères, quand Grammalecte en met plus de 60.
 4. Une faute signalée par les deux moteurs devient une seule remarque, qui garde en mémoire leur accord.
 5. Une correction est considérée comme sûre si les deux moteurs proposent la même, si c'est un accent
    (« ecole » → « école ») ou une ponctuation évidente.
@@ -330,11 +331,11 @@ Mesuré sous Linux, avec l'application empaquetée :
 
 ## Tests et qualité
 
-La CI lance plus de 750 tests sous Windows et Linux (Python 3.10 et 3.13) à chaque modification :
+La CI lance plus de 950 tests sous Windows et Linux (Python 3.10 et 3.13) à chaque modification :
 
 - moteurs, fusion, corrections sûres, correction en cascade, dictionnaire, paramètres ;
-- banc d'essai (`tests/banc_fautes.py`) : plus de 150 fautes courantes qui doivent être corrigées d'office sans
-  LanguageTool, et plus de 130 phrases justes ou ambiguës qui ne doivent pas bouger ; chaque règle du correcteur
+- banc d'essai (`tests/banc_fautes.py`) : plus de 220 fautes courantes qui doivent être corrigées d'office sans
+  LanguageTool, et plus de 170 phrases justes ou ambiguës qui ne doivent pas bouger ; chaque règle du correcteur
   a ses propres tests, sur des phrases fautives et sur leurs voisines justes ;
 - interface (fenêtre, soulignements, annulation, paramètres) ;
 - tests « vrai bureau » sous Linux, sur un écran X11 virtuel : une vraie application tourne dans un autre

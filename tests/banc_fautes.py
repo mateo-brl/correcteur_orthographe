@@ -243,7 +243,16 @@ FAUTES = [
     ("Vous allez la lui donné.", "Vous allez la lui donner."),
     ("Ne fais rien jusqu'a demain.", "Ne fais rien jusqu'à demain."),
     ("Il faut manger a la cantine.", "Il faut manger à la cantine."),
-    ("Elles se querellent sans cesse, elle ne sont jamais d'accord.", "Elles se querellent sans cesse, elles ne sont jamais d'accord."),
+    ("Elles se querellent sans cesse, elle ne sont jamais d'accord.",
+     "Elles se querellent sans cesse, elles ne sont jamais d'accord."),
+    ("S'est une vertu rare.", "C'est une vertu rare."),
+    ("C'étais il y a bien longtemps.", "C'était il y a bien longtemps."),
+    ("Vingt mille lieues sous là mer.", "Vingt mille lieues sous la mer."),
+    ("Il est deux heure.", "Il est deux heures."),
+    ("Mon enfant ne peut pas allé à l'école.", "Mon enfant ne peut pas aller à l'école."),
+    ("Le patron de l'entreprise à démissionné.", "Le patron de l'entreprise a démissionné."),
+    ("Il ne nous reste qu'à démontré le contraire.", "Il ne nous reste qu'à démontrer le contraire."),
+    ("Rien de particulié à signaler.", "Rien de particulier à signaler."),
 ]
 
 # Phrases justes (ou sans correction certaine) : rien ne doit y être changé d'office.
@@ -430,4 +439,7 @@ PIEGES = [
     "Il est là maman.",
     "Là commence la forêt.",
     "Il ne reste rien de changé.",
+    "Il est un peu fatigué.",
+    "Il s'est un peu calmé.",
+    "La tâche à effectuer, il s'en moquait.",
 ]

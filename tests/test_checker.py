@@ -756,3 +756,20 @@ def test_slow_engine_waits_longer_for_a_long_text():
     assert 15 < _slow_timeout(8.0, "x" * 3800) < 16
     assert _slow_timeout(8.0, "x" * 100_000) == 32.0
     assert _slow_timeout(None, "x" * 3800) is None
+
+
+def test_rules_veto_also_drops_languagetool_remark(home):
+    """Une zone que les règles du correcteur déclarent juste (veto) : la remarque de LanguageTool y est écartée
+    aussi (« Je pense que le chat a la grippe » : « à » proposé à tort), et le veto n'est jamais affiché."""
+    from correcteur.engines.regles import VETO
+
+    text = "Je pense que le chat a la grippe."
+    s = Settings()
+    g = lambda t: present([word_issue(t, "a", [], "grammalecte", VETO)])
+    lt = lambda t: present([word_issue(t, "a", ["à"], "languagetool", "A_ACCENT"),
+                            word_issue(t, "grippe", ["grippes"], "languagetool", "PLURIEL")])
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "grammalecte", g), FakeEngine(s, "languagetool", lt)])
+    found = c.check(text).issues
+    assert [text[i.start:i.end] for i in found] == ["grippe"]
+    assert c.autocorrect(text)[0] in (text, "Je pense que le chat a la grippes.")
+    c.close()
