@@ -232,13 +232,16 @@ class GrammalecteEngine(Engine):
                 err["nStart"], err["nEnd"], err.get("sMessage", ""), suggestions,
                 _CATEGORY_BY_TYPE.get(err.get("sType", ""), Category.GRAMMAR), rule, err.get("URL", ""),
             ))
+        unknown = [(e["nStart"], e["nEnd"]) for e in spell]
         for err in spell:
             word = err.get("sValue", "")
             suggestions = agree_with_subject(paragraph, err["nStart"],
                                              rank_spelling(word, tuple(err.get("aSuggestions") or ())))
             # « Helene » -> « Hélène » : un nom propre, que la personne écrit peut-être ainsi (jamais d'office).
-            rule = ("grammalecte_nom_propre" if word[:1].isupper() and suggestions and self._proper_noun(suggestions[0])
-                    else "grammalecte_orthographe")
+            # De même un mot à majuscule collé à un autre mot inconnu : « Beta vulgaris », « Órfãos da Terra ».
+            beside = any(0 < s - err["nEnd"] <= 2 or 0 < err["nStart"] - e <= 2 for s, e in unknown)
+            rule = ("grammalecte_nom_propre" if word[:1].isupper() and suggestions
+                    and (beside or self._proper_noun(suggestions[0])) else "grammalecte_orthographe")
             found.append((
                 err["nStart"], err["nEnd"], f"Mot inconnu du dictionnaire : « {word} ».",
                 suggestions, Category.SPELLING, rule, "",

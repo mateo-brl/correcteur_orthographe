@@ -258,6 +258,30 @@ def agree_with_subject(text: str, start: int, suggestions: Sequence[str]) -> tup
     return (matching[0], *(s for s in suggestions if s != matching[0]))
 
 
+_E_SOUND_RE = re.compile(r"(?:ées|ée|és|er|ez)$")
+_SILENT_ENDINGS = ("ds", "ts", "es", "e", "s", "t", "x", "d")
+_DOUBLE_END_RE = re.compile(r"([^aeiouyéèêàâîôûnm])\1$")  # « appell » comme « appel » ; « prenn » n'est pas « pren »
+
+
+def _sound_keys(word: str) -> set[str]:
+    word = _E_SOUND_RE.sub("é", word.lower().replace("’", "'"))
+    ending = next((e for e in _SILENT_ENDINGS if word.endswith(e) and len(word) - len(e) >= 2), "")
+    stems = {word[:len(word) - len(ending)]}
+    if word.endswith("ent") and len(word) >= 6:
+        stems.add(word[:-3])  # « mangent », « attendent » se prononcent « mange », « attende »
+    return {_DOUBLE_END_RE.sub(r"\1", stem) for stem in stems}
+
+
+def same_sound(a: str, b: str) -> bool:
+    """Deux formes qui ne diffèrent que par des lettres muettes de fin : « fini / finis / finit », « allé /
+    allez », « appel / appelle », « sui / suis ». Parmi les conjugaisons que propose Grammalecte (« Je fini » :
+    « finis » ou « finissais » ?), c'est celle que la personne voulait écrire. Mots de 3 lettres au moins :
+    « ni » n'est pas « nie »."""
+    if min(len(a), len(b)) < 3:
+        return a.lower() == b.lower()
+    return bool(_sound_keys(a) & _sound_keys(b))
+
+
 def one_edit(a: str, b: str) -> bool:
     """Une seule faute de frappe d'écart : une lettre en trop, en moins, remplacée, ou deux voisines échangées."""
     if a == b or abs(len(a) - len(b)) > 1:

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 from correcteur.models import Category
+from correcteur.textutils import same_sound
 
 
 @dataclass
@@ -179,12 +180,12 @@ def _joined(text: str, a: Mot, b: Mot) -> bool:
 
 # Pronom complément indirect (« se parler » : parler à quelqu'un) : le participe ne s'accorde jamais.
 INDIRECT_PRONOMINAL = frozenset("""parler téléphoner sourire rire succéder ressembler mentir nuire suffire survivre
-    déplaire complaire plaire convenir demander répondre""".split())
+    déplaire complaire plaire convenir demander répondre permettre""".split())
 # Pronom complément direct ou verbe essentiellement pronominal : accord avec le sujet, sauf si un complément
 # d'objet suit (« Elles se sont lavé les mains »).
 DIRECT_PRONOMINAL = frozenset("""regarder laver lever coucher habiller déshabiller maquiller coiffer raser blesser
-    promener réveiller préparer installer battre aimer détester haïr voir rencontrer quitter embrasser marier
-    séparer cacher perdre tromper arrêter asseoir endormir reposer amuser ennuyer inquiéter présenter retrouver
+    promener réveiller préparer installer battre aimer détester haïr voir rencontrer quitter embrasser marier surprendre
+    séparer cacher perdre tromper arrêter asseoir assoir endormir reposer amuser ennuyer inquiéter présenter retrouver
     revoir croiser disputer connaître réunir sauver enfuir évanouir souvenir absenter moquer écrier efforcer
     méfier repentir taire plaindre tuer noyer brûler couper appeler lancer jeter mettre engager inscrire
     intéresser occuper entraîner sentir trouver montrer comporter conduire défendre rendre décider dépêcher
@@ -192,14 +193,39 @@ DIRECT_PRONOMINAL = frozenset("""regarder laver lever coucher habiller déshabil
     écrouler effondrer envoler endormir réjouir accrocher agenouiller allonger étendre égarer""".split())
 
 
+def participle_like(word: str, lex: Lexique) -> tuple[str, str] | None:
+    """(lemme, type) du participe passé, ou du verbe conjugué qui se prononce comme lui : « Elle s'est mit »,
+    « assit », « permit » (passé simple) mis pour « mise », « assise », « permis » ; « s'est lever »."""
+    found = lex.participle(word)
+    if found:
+        return found
+    # Plusieurs lemmes possibles s'ils mènent au même participe (« assit » : asseoir et assoir).
+    readings = {}
+    for lemma, vtyp, _ in lex.verbs(word):
+        base = conj(lemma, ":Q", ":m:s")
+        if base and base != word.lower() and same_sound(word, base):
+            readings.setdefault(base, (lemma, vtyp))
+    return next(iter(readings.values())) if len(readings) == 1 else None
+
+
 def _participle_after_etre(words: list[Mot], i: int, lex: Lexique) -> int | None:
     """Indice du participe passé qui suit l'auxiliaire être en position i (adverbes sautés), ou None."""
     j = i + 1
     while j < len(words) and words[j].low in BETWEEN and j - i <= 3:
         j += 1
-    if j < len(words) and lex.participle(words[j].text):
+    if j < len(words) and participle_like(words[j].text, lex):
         return j
     return None
+
+
+def _object_before(words: list[Mot], i: int, lex: Lexique) -> bool:
+    """Un complément d'objet placé avant, repris par « que » : « Les questions qu'ils se sont posées », « Les
+    libertés qu'elle s'est permises ». Le participe s'accorde alors avec lui : pas de règle sur le sujet."""
+    for k in range(max(1, i - 3), i):
+        if words[k].low in ("que", "qu'"):
+            prev = words[k - 1]
+            return lex.is_noun(prev.text) or prev.low in ("ce", "celle", "celles", "ceux", "celui")
+    return False
 
 
 def regle_pronominal_indirect(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
@@ -208,10 +234,10 @@ def regle_pronominal_indirect(text: str, words: list[Mot], lex: Lexique) -> Iter
         if words[i].low not in REFLEXIVE or words[i + 1].low not in ETRE:
             continue
         j = _participle_after_etre(words, i + 1, lex)
-        if j is None:
+        if j is None or _object_before(words, i, lex):
             continue
         word = words[j]
-        lemma, _ = lex.participle(word.text)
+        lemma, _ = participle_like(word.text, lex)
         if lemma not in INDIRECT_PRONOMINAL or word.low in ("plus", "plu"):
             continue
         base = conj(lemma, ":Q", ":m:s")
@@ -237,10 +263,10 @@ def regle_pronominal_sujet(text: str, words: list[Mot], lex: Lexique) -> Iterabl
         if i + 1 >= len(words) or words[i].low not in ("se", "s'") or words[i + 1].low not in ETRE:
             continue
         j = _participle_after_etre(words, i + 1, lex)
-        if j is None:
+        if j is None or _object_before(words, k, lex):
             continue
         word = words[j]
-        lemma, vtyp = lex.participle(word.text)
+        lemma, vtyp = participle_like(word.text, lex)
         if lemma not in DIRECT_PRONOMINAL:
             continue
         nxt = words[j + 1] if j + 1 < len(words) else None
@@ -266,7 +292,8 @@ _SUBJUNCTIVE_TRIGGERS = re.compile(
     r"|souhaite|souhaites|souhaitons|souhaitez|souhaitent|souhaiterais|souhaiterait|aimerais|aimerait|préfère|"
     r"préfères|préférerais|préférerait|exige|exiges|exigeons|exigez|exigent|ordonne|attends|attend|doute|doutes|"
     r"crains|craint|regrette|regrettes|"
-    r"pour|afin|avant|bien|sans|moins|pourvu|condition|crainte|peur|jusqu['’]à\s+ce|en\s+attendant)\s+qu(?:e\s+|['’])$")
+    r"pour|afin|avant|(?:^|[,;:]\s*|\b(?:et|mais|or|car|donc)\s+)bien|sans|à\s+moins|pourvu|condition|crainte|peur|"
+    r"jusqu['’]à\s+ce|en\s+attendant)\s+qu(?:e\s+|['’])$")
 _QUOIQUE_RE = re.compile(r"(?i)\bquoiqu(?:e\s+|['’])$")
 
 
@@ -280,8 +307,8 @@ def regle_subjonctif(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faut
         before = text[max(0, words[k - 1].start - 40):subject.start]
         if not (_SUBJUNCTIVE_TRIGGERS.search(before) or _QUOIQUE_RE.search(before)):
             continue
-        if re.search(r"(?i)\bsi\s+bien\s+qu(?:e\s+|['’])$", before):
-            continue  # « si bien que » : conséquence, à l'indicatif
+        if re.search(r"(?i)\b(?:si\s+bien|sans\s+doute)\s+qu(?:e\s+|['’])$", before):
+            continue  # « si bien que » (conséquence), « sans doute que » : à l'indicatif
         j = k + 1
         while j < len(words) and words[j].low in CLITICS and j - k <= 3:
             j += 1
@@ -292,8 +319,8 @@ def regle_subjonctif(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faut
         lemmas = {lemma for lemma, _, tags in readings if re.search(r":(?:Ip|Iq|Is|If|K|Sp|Sq)\b", tags)}
         if len(lemmas) != 1:
             continue  # « suis » : être ou suivre ? On ne choisit pas.
-        if any(":Sp" in tags and who in tags for _, _, tags in readings):
-            continue  # déjà au subjonctif à la bonne personne
+        if any(re.search(r":S[pq]\b", tags) and who in tags for _, _, tags in readings):
+            continue  # déjà au subjonctif à la bonne personne (« qu'il commençât », « qu'il y eût »)
         lemma = next(iter(lemmas))
         form = conj(lemma, ":Sp", who)
         if not form or form == verb.low:
@@ -332,6 +359,80 @@ def regle_si_conditionnel(text: str, words: list[Mot], lex: Lexique) -> Iterable
         if form and form != verb.low:
             yield Faute(verb.start, verb.end, form, "Après le « si » d'une hypothèse, l'imparfait et non le conditionnel "
                         "(« Si j'avais su »).", "corr_si_imparfait")
+
+
+# Après « que », le verbe est peut-être au subjonctif (« à ce qu'il ne sais point » -> « sache ») : la
+# conjugaison à l'indicatif n'est sûre qu'après les mots qui appellent l'indicatif.
+INDICATIVE_BEFORE_QUE = frozenset("""parce pense penses pensons pensez pensent pensais pensait crois croit croyons
+    croyez croient croyais croyait sais sait savons savez savent savais savait dis dit disons dites disent disais
+    disait vois voit voyons voyez voient voyais voyait trouve trouves trouvons trouvez trouvent trouvais trouvait
+    espère espères espérons espérez espèrent sûr sûre sûrs sûres certain certaine évident vrai clair dès pendant
+    alors tandis depuis maintenant ainsi vu étant tellement tant remarque constate apprends apprend""".split())
+# Temps voisins à l'oreille : « il pensai » (passé simple, 1re pers.) est « pensait » ; « elle saurai » (futur)
+# est « saurait ».
+_SOUND_ALIKE_TENSES = {"Is": ("Is", "Iq"), "If": ("If", "K"), "Q": ("Ip",), "Y": ("Ip",)}
+
+
+def _after_que_ok(words: list[Mot], k: int) -> bool:
+    """Le sujet en position k ne suit pas un « que » qui appellerait le subjonctif."""
+    if k == 0 or words[k - 1].low not in ("que", "qu'"):
+        return True
+    return k >= 2 and words[k - 2].low in INDICATIVE_BEFORE_QUE
+
+
+def _plural_subject_start(text: str, words: list[Mot], k: int, lex: Lexique) -> bool:
+    """« Les femmes | porte » : groupe nominal pluriel en tête de proposition, juste avant le mot k."""
+    return (2 <= k < len(words) and words[k - 2].low in PLURAL_DETERMINERS and _plural_subject_before(words, k, lex)
+            and _joined(text, words[k - 2], words[k - 1]) and _joined(text, words[k - 1], words[k])
+            and (k == 2 and not text[:words[0].start].strip() or k > 2 and re.search(
+                r"[.!?;:,]\s*$", text[words[k - 3].end:words[k - 2].start]) is not None
+                 or k > 2 and words[k - 3].low in ("et", "mais", "car", "puis", "donc", "alors")))
+
+
+def regle_conj_sujet(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Ils mange » -> « mangent », « Il finis » -> « finit », « Tu parle » -> « parles », « il pensai » ->
+    « pensait », « Les femmes porte » -> « portent » : le verbe ne s'accorde pas avec le pronom sujet. Une seule
+    correction possible : la forme de la bonne personne qui se prononce comme ce qui est écrit (Grammalecte
+    propose « pensa » pour « il pensai », « Il » pour « Ils mange »). « nous » et « vous » sont souvent
+    compléments (« Cela vous dégoûtait ») : « vous » seulement en tête d'une question (« Vous allé bien ? »)."""
+    for k, subject in enumerate(words):
+        who = SUBJECTS.get(subject.low)
+        if who is None and _plural_subject_start(text, words, k + 1, lex) and subject.low not in CLITICS:
+            who = ":3p"
+        if who is None or who == ":1p":
+            continue
+        if who == ":2p" and not (_sentence_start(words, k, text) and re.match(r"[^.!?]*\?", text[subject.end:])):
+            continue
+        if not _after_que_ok(words, k) or (k > 0 and words[k - 1].low in ("et", "ou", "ni")):
+            continue  # « Il ou elle ne conçoivent » : deux sujets, le pluriel est juste
+        if subject.low == "on" and k > 0 and (words[k - 1].low in ("ils", "elles", "eux", "nous", "vous", "qui")
+                                              or _plural_subject_before(words, k, lex)):
+            continue  # « Elles on accompli », « Les enfants on recours » : « on » est « ont »
+        j = k + 1
+        while j < len(words) and words[j].low in CLITICS and j - k <= 3:
+            j += 1
+        if j >= len(words) or not _joined(text, words[j - 1], words[j]):
+            continue
+        verb = words[j]
+        if who == ":3s" and lex.has(verb.text, ":3p"):
+            continue  # « Il se dédient » : « Il se dédie » ou « Ils se dédient » ? On ne choisit pas.
+        if verb.low in SUBJECTS or verb.low in DETERMINERS:
+            continue
+        if subject.low not in SUBJECTS and (lex.is_noun(verb.text) or lex.has(verb.text, ":A")):
+            continue  # « les valeurs limites », « des petites zones » : nom ou adjectif, pas un verbe
+        readings = lex.verbs(verb.text)
+        if not readings or any(who in tags and re.search(r":(?:Ip|Iq|Is|If|K|Sp|Sq)\b", tags) for _, _, tags in readings):
+            continue
+        tenses = set()
+        for lemma, _, tags in readings:
+            for tense in re.findall(r":(Ip|Iq|Is|If|K|Sp|Sq|Q|Y)\b", tags):
+                tenses.update((lemma, t) for t in _SOUND_ALIKE_TENSES.get(tense, (tense,)))
+        forms = {conj(lemma, ":" + tense, who) for lemma, tense in tenses}
+        forms = {f for f in forms if f and same_sound(verb.text, f)}
+        if len(forms) == 1:
+            drop = ((subject.start, subject.end),) if subject.low in SUBJECTS else ()
+            yield Faute(verb.start, verb.end, match_case(verb.text, forms.pop()), f"Le verbe s'accorde avec son sujet "
+                        f"« {subject.text} ».", "corr_conj_sujet", drop=drop)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -458,6 +559,43 @@ def regle_mais_mes(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]
 
 
 _MOVE_VERBS = frozenset("aller partir venir arriver rentrer retourner revenir monter descendre passer rester entrer sortir".split())
+# Ce qui suit un « à » préposition : « à la fête », « à mon frère », « à Paris », « à 8 heures ».
+_AFTER_PREPOSITION_A = frozenset("""la l' le les un une mon ma mes ton ta tes son sa ses notre nos votre vos leur leurs
+    ce cet cette ces chaque""".split())
+_QUANTITY_DE = frozenset("beaucoup peu plein trop assez énormément tant pas point plus moins".split())
+_SUBJECT_WORDS = frozenset(SUBJECTS) | {"c'", "ce", "ça", "cela", "qui"}
+
+
+def _verb_and_object_before(text: str, words: list[Mot], i: int, lex: Lexique) -> bool:
+    """Le mot i suit-il « sujet + verbe + complément d'objet » : « Il y a du monde | », « Elle mange une
+    pomme | », « Je n'ai pas de voiture | », « Il a vu le chat | » ? Le complément est déjà là : le « a » qui
+    suit ne peut pas être le verbe avoir."""
+    j = i - 1
+    if j >= 1 and lex.has(words[j].text, ":A") and not lex.is_noun(words[j].text):
+        j -= 1  # adjectif après le nom
+    if j < 2 or not lex.is_noun(words[j].text) or words[j].text[:1].isupper():
+        return False
+    k = j - 1
+    if words[k].low not in DETERMINERS | {"du", "de", "d'", "des"}:
+        return False
+    if words[k].low in ("de", "d'"):
+        if words[k - 1].low not in _QUANTITY_DE:
+            return False
+        k -= 1
+    v = k - 1
+    if v < 1 or not all(_joined(text, words[n], words[n + 1]) for n in range(v, i)):
+        return False
+    verb = words[v]
+    if lex.participle(verb.text) and not lex.finite_verb(verb.text):
+        v -= 1  # « a vu le chat » : l'auxiliaire avant le participe
+        if v < 1 or (words[v].low not in AVOIR and words[v].low not in ETRE) or not _joined(text, words[v], verb):
+            return False
+    elif not lex.finite_verb(verb.text) or verb.low in DETERMINERS or verb.low in CLITICS:
+        return False
+    s = v - 1
+    while s >= 0 and words[s].low in CLITICS and v - s <= 3:
+        s -= 1
+    return s >= 0 and words[s].low in _SUBJECT_WORDS and _joined(text, words[s], words[s + 1])
 
 
 def regle_a_accent(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
@@ -479,6 +617,8 @@ def regle_a_accent(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]
             if part and part[0] in _MOVE_VERBS and (nxt.low in ("la", "l'", "les", "un", "une") or nxt.text[:1].isupper()
                                                    or nxt.text[:1].isdigit()):
                 fix = True
+            elif (nxt.low in _AFTER_PREPOSITION_A or nxt.text[:1].isdigit()) and _joined(text, word, nxt):
+                fix = _verb_and_object_before(text, words, i, lex)  # « Il y a du monde a la fête »
         if fix:
             yield Faute(word.start, word.end, match_case(word.text, "à"), "« à » (préposition) : le verbe avoir est "
                         "impossible ici.", "corr_a_preposition")
@@ -495,15 +635,24 @@ def regle_a_verbe(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
                 continue
             yield Faute(word.start, word.end, "a", "« a lieu » (verbe avoir lieu).", "corr_a_verbe")
             continue
-        subject = prev.low in ("il", "elle", "on", "qui") or (i >= 2 and words[i - 2].low in ("le", "la", "l'", "un",
-                                                                                                "une", "ce", "cet",
-                                                                                                "cette", "mon", "ma",
-                                                                                                "ton", "ta", "son",
-                                                                                                "sa") and lex.is_noun(prev.text))
-        if not subject:
+        pronoun = prev.low in ("il", "elle", "on", "qui")
+        # Nom sujet : seulement en tête de proposition (« Le film à commencé ») ; « l'incapacité à trouvé un
+        # partenaire » est « à trouver », « un moteur à cylindré fixe » est « à cylindrée ».
+        noun = (i >= 2 and words[i - 2].low in ("le", "la", "l'", "un", "une", "ce", "cet", "cette", "mon", "ma", "ton",
+                                                 "ta", "son", "sa") and lex.is_noun(prev.text)
+                and (i == 2 or re.search(r"[.!?;:,]\s*$|^\s*$", text[:words[i - 2].start]) is not None
+                     or words[i - 3].low in ("et", "mais", "car", "puis", "donc")))
+        if not (pronoun or noun):
             continue
-        if nxt.low in AVOIR_NOUNS or (lex.participle(nxt.text) and not lex.is_noun(nxt.text)
-                                      and nxt.low not in ("découvert", "couvert")):
+        after = words[i + 2] if i + 2 < len(words) and _joined(text, nxt, words[i + 2]) else None
+        if noun and after is not None and (lex.has(after.text, ":A") or lex.is_noun(after.text)) and not (
+                after.low in DETERMINERS or after.low in PREPOSITIONS):
+            continue  # « à cylindré fixe » : un groupe nominal suit, pas un complément du verbe
+        part = lex.participle(nxt.text)
+        if noun and part and len(part[1]) > 2 and part[1][2] != "i" and (
+                after is None or after.low not in DETERMINERS and after.low not in CLITICS):
+            continue  # « la tâche à effectué, il s'en foutait » : « à effectuer » (verbe sans emploi intransitif)
+        if nxt.low in AVOIR_NOUNS or (part and not lex.is_noun(nxt.text) and nxt.low not in ("découvert", "couvert")):
             yield Faute(word.start, word.end, "a", "« a » (verbe avoir) après le sujet.", "corr_a_verbe",
                         drop=((nxt.start, nxt.end),))
 
@@ -516,6 +665,139 @@ def veto_a_ete_adjectif(text: str, words: list[Mot], lex: Lexique) -> Iterable[F
             yield Faute(words[i].start, words[i].end, None, "", "corr_veto")
 
 
+# « Je ne sais pas ou il est » : savoir, ignorer, oublier, se demander… puis « ou » et une proposition.
+_WHERE_VERBS = frozenset("savoir ignorer oublier demander indiquer expliquer deviner".split())
+_WHERE_IMPERATIVE_RE = re.compile(r"(?i)^(?:dis|dites|montre|montrez|explique|expliquez|indique|indiquez|rappelle|"
+                                  r"rappelez|demande|demandez)-(?:moi|nous|lui|leur)$")
+# Verbes qui disent un lieu : « Je ne sais plus ou j'ai mis mes clés » (même sujet que « sais »).
+_LOCATION_VERBS = frozenset("""être aller habiter vivre mettre ranger poser laisser garer trouver cacher partir venir
+    dormir travailler passer naître rester""".split())
+_SKIPPED_BEFORE_OU = frozenset("pas plus jamais vraiment bien toujours même exactement trop point".split())
+
+
+def _clause_after(text: str, words: list[Mot], i: int, lex: Lexique) -> tuple[str, str] | None:
+    """(sujet, lemme du verbe) de la proposition qui commence au mot i : pronom sujet, pronoms compléments
+    (pas de négation), verbe conjugué ; ou verbe être, aller, se trouver directement (« ou est la gare »)."""
+    if i >= len(words):
+        return None
+    if words[i].low in SUBJECTS:
+        subject, j = words[i].low.replace("j'", "je"), i + 1
+        while j < len(words) and words[j].low in CLITICS - {"ne", "n'"} and j - i <= 3:
+            j += 1
+        if j >= len(words) or not _joined(text, words[j - 1], words[j]):
+            return None
+    else:
+        subject, j = "", i
+    verb = words[j]
+    readings = [(lemma, tags) for lemma, _, tags in lex.verbs(verb.text) if re.search(r":(?:Ip|Iq|If|K|Is|Sp)\b", tags)]
+    if not readings:
+        return None
+    lemma = readings[0][0]
+    if lemma in ("avoir", "être") and j + 1 < len(words) and lex.participle(words[j + 1].text):
+        lemma = lex.participle(words[j + 1].text)[0]  # « j'ai mis » : mettre
+    if not subject and lemma not in ("être", "aller", "trouver"):
+        return None
+    return subject, lemma
+
+
+def regle_ou_lieu(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Je ne sais pas ou il est » -> « où », « Je me demande ou il habite », « Dis-moi ou tu es », « dans la
+    mesure ou », « partout ou il va ». Pas « Je ne sais pas ou je ne veux pas » (négation : conjonction), ni
+    « Tu sais ou tu crois savoir » (même sujet, verbe sans idée de lieu)."""
+    for i in range(1, len(words) - 1):
+        ou = words[i]
+        if ou.low != "ou" or not _joined(text, words[i - 1], ou):
+            continue
+        clause = _clause_after(text, words, i + 1, lex)
+        if clause is None:
+            continue
+        before = " ".join(w.low for w in words[max(0, i - 3):i])
+        if before.endswith(("dans la mesure", "partout")):
+            yield Faute(ou.start, ou.end, "où", "« où » (lieu, moment) : « ou » sans accent veut dire « ou bien ».",
+                        "corr_ou_lieu")
+            continue
+        j = i - 1
+        while j > 0 and words[j].low in _SKIPPED_BEFORE_OU:
+            j -= 1
+        main = words[j]
+        if _WHERE_IMPERATIVE_RE.match(main.text):
+            main_subject = "tu"
+        else:
+            if not any(lemma in _WHERE_VERBS for lemma, _, _ in lex.verbs(main.text)):
+                continue
+            s = j - 1
+            while s >= 0 and (words[s].low in CLITICS or words[s].low in AVOIR) and j - s <= 4:
+                s -= 1
+            main_subject = words[s].low.replace("j'", "je") if s >= 0 and words[s].low in SUBJECTS else ""
+        subject, lemma = clause
+        if subject and subject == main_subject and lemma not in _LOCATION_VERBS:
+            continue  # « Je sais ou je crois savoir » : « ou bien »
+        yield Faute(ou.start, ou.end, "où", "« où » (lieu) : « ou » sans accent veut dire « ou bien ».", "corr_ou_lieu")
+
+
+def regle_peu(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Il en reste peut. » -> « peu », « sous peut », « depuis peut », « il y a peut. » : « peut » (verbe pouvoir)
+    est impossible après un autre verbe conjugué ou une préposition, en fin de groupe."""
+    for i in range(1, len(words)):
+        word = words[i]
+        if word.low not in ("peut", "peux") or not _joined(text, words[i - 1], word):
+            continue
+        end = re.match(r"\s*(?:[.!?,;:…)]|$)", text[word.end:word.end + 3]) is not None
+        de_after = re.match(r"\s+(?:de\b|d['’])", text[word.end:word.end + 4], re.I) is not None
+        prev = words[i - 1]
+        before = " ".join(w.low for w in words[max(0, i - 3):i])
+        if prev.low == "sous" or (prev.low == "ici" and before.endswith("d' ici")):
+            fix = end or i + 1 >= len(words)
+        elif prev.low == "depuis" or before.endswith("il y a"):
+            fix = end or de_after
+        else:
+            # « Le chat peut. » : un nom sujet ; « Il en reste peut » : « reste » verbe, après un pronom.
+            verb = lex.finite_verb(prev.text) and (not lex.is_noun(prev.text) or (
+                i >= 2 and (words[i - 2].low in CLITICS or words[i - 2].low in SUBJECTS)))
+            fix = (end and verb and prev.low not in SUBJECTS and prev.low not in CLITICS
+                   and prev.low not in ("qui", "veut", "que", "qu'"))
+        if fix:
+            yield Faute(word.start, word.end, match_case(word.text, "peu"), "« peu » (petite quantité) : « peut » est le "
+                        "verbe pouvoir.", "corr_peu")
+
+
+def regle_pret(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Je suis près à partir » -> « prêt », « Elle est près à tout » -> « prête » : « près à » suivi d'un
+    infinitif. L'accord suit le sujet (Grammalecte propose toujours « prêt » ou « prêts »)."""
+    forms = {("m", "s"): "prêt", ("f", "s"): "prête", ("m", "p"): "prêts", ("f", "p"): "prêtes"}
+    pronouns = {"je": ("m", "s"), "j'": ("m", "s"), "tu": ("m", "s"), "il": ("m", "s"), "on": ("m", "s"),
+                "elle": ("f", "s"), "ils": ("m", "p"), "elles": ("f", "p")}
+    for i in range(2, len(words) - 2):
+        word = words[i]
+        if word.low != "près" or words[i + 1].low != "à" or not _joined(text, word, words[i + 1]):
+            continue
+        nxt = words[i + 2]
+        if not (lex.has(nxt.text, ":Y") or nxt.low == "tout"):
+            continue
+        j = i - 1
+        while j > 0 and words[j].low in BETWEEN:
+            j -= 1
+        if words[j].low not in ETRE:
+            continue
+        s = j - 1
+        if s >= 0 and words[s].low in ("ne", "n'"):
+            s -= 1
+        if s < 0:
+            continue
+        agreement = pronouns.get(words[s].low)
+        if agreement is None and s >= 1 and words[s - 1].low in DETERMINERS:
+            gn = lex.noun_gender_number(words[s].text)
+            if gn is not None and gn[1] in ("s", "p"):
+                # Nom épicène (« les enfants », « l'élève ») : le déterminant dit le genre, sinon le masculin.
+                gender = gn[0] if gn[0] != "e" else ("f" if words[s - 1].low in ("la", "une", "cette", "ma", "ta", "sa")
+                                                    else "m")
+                agreement = (gender, gn[1])
+        if agreement is None:
+            continue
+        yield Faute(word.start, word.end, match_case(word.text, forms[agreement]), "« prêt à » (disposé à) : « près » "
+                    "veut dire « à côté ».", "corr_pret")
+
+
 def regle_c_est_a_dire(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
     """« c'est a dire » ou « c'est à dire » -> « c'est-à-dire »."""
     for m in re.finditer(r"(?i)\bc['’]est[\s-]+[aà][\s-]+dire\b", text):
@@ -525,10 +807,14 @@ def regle_c_est_a_dire(text: str, words: list[Mot], lex: Lexique) -> Iterable[Fa
 
 
 def regle_ni_ny(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
-    """« Il ni a rien » -> « Il n'y a rien »."""
+    """« Il ni a rien » -> « Il n'y a rien », « je ni prendrai pas le train » -> « je n'y prendrai » : « ni »
+    entre un pronom sujet et un verbe."""
     for i in range(1, len(words) - 1):
-        if words[i].low == "ni" and words[i - 1].low in ("il", "elle", "on", "ils", "elles") and (
-                words[i + 1].low in AVOIR or words[i + 1].low in ("en", "aura", "aurait", "avait")):
+        if words[i].low != "ni" or words[i - 1].low not in SUBJECTS or not _joined(text, words[i - 1], words[i]):
+            continue
+        nxt = words[i + 1]
+        if nxt.low in AVOIR or nxt.low == "en" or (lex.finite_verb(nxt.text) and not lex.is_noun(nxt.text)
+                                                   and nxt.low not in SUBJECTS and nxt.low not in CLITICS):
             yield Faute(words[i].start, words[i].end, "n'y", "« n'y » (négation et pronom « y »).", "corr_ni_ny")
 
 
@@ -560,9 +846,11 @@ def regle_je_ai(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
             j += 1
         if j + 1 >= len(words) or words[j].low not in ("aient", "ait", "aies", "aie", "est", "es", "et"):
             continue
-        part = lex.participle(words[j + 1].text)
-        if part is None or lex.finite_verb(words[j + 1].text):
-            continue
+        nxt = words[j + 1]
+        part = lex.participle(nxt.text)
+        if part is None or lex.finite_verb(nxt.text) or nxt.low in SUBJECTS or nxt.low in CLITICS or not (
+                _joined(text, subject, words[k + 1]) and _joined(text, words[j], nxt)):
+            continue  # « les pronoms “je” et “tu” » : « tu » n'est pas le participe de « taire »
         vtyp = part[1]
         if len(vtyp) > 8 and vtyp[7] == "e" and vtyp[8] != "a":
             fix = "suis"  # « Je est venu » -> « Je suis venu »
@@ -581,6 +869,11 @@ def regle_quel_genre(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faut
         gn = lex.noun_gender_number(noun.text)
         if gn is None or gn[0] not in ("m", "f") or gn[1] not in ("s", "p") or lex.has(noun.text, ":V"):
             continue
+        if lex.has(noun.text, ":A") or noun.low in DETERMINERS:
+            continue  # « quelles grande idiotes » : l'adjectif a le genre du nom qui suit, pas forcément le sien
+        number = "p" if word.low.endswith("s") else "s"
+        if gn[1] != number:
+            continue  # « Quels changement » : « Quel changement » ou « Quels changements » ? On ne choisit pas.
         form = forms[gn]
         if form != word.low:
             yield Faute(word.start, word.end, match_case(word.text, form), f"« {form} » s'accorde avec « {noun.text} ».",
@@ -599,11 +892,22 @@ def regle_sont_son(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]
             continue
         after_verb = prev.low in PREPOSITIONS or (lex.participle(prev.text) and prev.low not in ETRE) or (
             lex.finite_verb(prev.text) and prev.low not in ETRE and not lex.is_noun(prev.text))
-        if not after_verb or prev.low in SUBJECTS:
-            continue
+        if not after_verb or prev.low in SUBJECTS or (i >= 2 and words[i - 2].low in DETERMINERS):
+            continue  # « les abrutis sont légion » : un nom sujet, « sont » est le verbe
         det = "sa" if gn[0] == "f" and not re.match(r"(?i)[aeiouyhéèêàâîôû]", noun.text) else "son"
         yield Faute(word.start, word.end, det, f"« {det} » (déterminant possessif) devant un nom.", "corr_sont_son",
                     drop=((noun.start, noun.end),))
+
+
+# « l'impression qu'il a réussi », « l'idée que tu as eue » : après ces noms, « que » est souvent une
+# conjonction (le contenu de l'impression), pas un pronom qui reprend le nom.
+_CONTENT_NOUNS = frozenset("""impression idée sentiment fait espoir peur crainte certitude preuve nouvelle pensée opinion
+    avis conviction hypothèse raison sensation illusion assurance garantie promesse annonce rumeur""".split())
+# Verbes après lesquels « que » est une conjonction (« il explique que… ») : le nom d'avant n'est pas repris.
+_SAYING = frozenset("""dit dis disent explique expliquent écrit écrivent raconte racontent annonce annoncent affirme
+    affirment répond répondent promet promettent assure assurent montre montrent rappelle rappellent pense pensent
+    crois croit croient sait sais savent vois voit voient trouve trouvent espère espèrent sent sens prétend prétendent
+    jure jurent avoue avouent""".split())
 
 
 def regle_cod_que(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
@@ -616,8 +920,10 @@ def regle_cod_que(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
             continue
         noun, det = words[q - 1], words[q - 2]
         gn = lex.noun_gender_number(noun.text)
-        if gn is None or det.low not in DETERMINERS or not _joined(text, det, noun):
+        if gn is None or det.low not in DETERMINERS or not _joined(text, det, noun) or noun.low in _CONTENT_NOUNS:
             continue
+        if q >= 3 and (words[q - 3].low in ("et", "ou", "ni") or text[words[q - 3].end:det.start].strip() == ","):
+            continue  # « La vision et la philosophie que j'ai élaborées » : l'antécédent est double
         gender, number = gn
         if gender == "e":
             gender = gender_of_det.get(det.low, "m")
@@ -628,9 +934,11 @@ def regle_cod_que(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
         k = q + 1
         if words[k].low not in SUBJECTS:
             continue
+        if any(lex.has(w.text, ":V") and w.low in _SAYING for w in words[max(0, q - 8):q - 2]):
+            continue  # « Marina m'explique dans ses lettres qu'elle a échoué » : « que » conjonction
         j = k + 1
-        while j < len(words) and words[j].low in ("ne", "n'", "lui", "leur", "y", "en", "me", "m'", "te", "t'", "nous",
-                                                  "vous") and j - k <= 3:
+        # « que tu m'as contacté » : « m' » est le complément d'objet, pas le nom d'avant.
+        while j < len(words) and words[j].low in ("ne", "n'", "lui", "leur", "y") and j - k <= 3:
             j += 1
         if j + 1 >= len(words) or words[j].low not in AVOIR:
             continue
@@ -645,11 +953,13 @@ def regle_cod_que(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
         lemma, vtyp = part
         if len(vtyp) < 7 or vtyp[3] != "t" or vtyp[6] == "m" or lemma in ("faire", "laisser", "falloir", "valoir",
                                                                              "coûter", "peser", "mesurer", "vivre",
-                                                                             "durer", "courir", "dormir", "régner"):
+                                                                             "durer", "courir", "dormir", "régner",
+                                                                             "pouvoir", "devoir"):
             continue
-        if p + 1 < len(words) and _joined(text, words[p], words[p + 1]) and (
-                lex.has(words[p + 1].text, ":Y") or words[p + 1].low in DETERMINERS):
-            continue  # « que j'ai vu partir », « que j'ai donné à » ... : pas sûr
+        nxt = words[p + 1] if p + 1 < len(words) and _joined(text, words[p], words[p + 1]) else None
+        if nxt is not None and (nxt.low in CLITICS or nxt.low in DETERMINERS or nxt.low in ("à", "de", "d'", "que", "qu'")
+                                or lex.has(nxt.text, ":Y")):
+            continue  # « que j'ai vu partir », « qu'il a voulu me passer », « qu'il a appris à » : pas sûr
         form = conj(lemma, ":Q", f":{gender}:{number}")
         if form and form != words[p].low:
             yield Faute(words[p].start, words[p].end, form, f"Complément d'objet placé avant (« {noun.text} ») : le "
@@ -678,15 +988,18 @@ def regle_orthographe_frequente(text: str, words: list[Mot], lex: Lexique) -> It
 
 
 RULES: tuple[Callable[[str, list[Mot], Lexique], Iterable[Faute]], ...] = (
-    regle_pronominal_indirect, regle_pronominal_sujet, regle_subjonctif, regle_si_conditionnel, regle_sest,
+    regle_pronominal_indirect, regle_pronominal_sujet, regle_subjonctif, regle_si_conditionnel, regle_conj_sujet,
+    regle_sest,
     regle_son_on_pluriel, regle_qui_on, regle_ce_se, regle_ces_cest, regle_cest_ces, regle_mais_mes,
-    regle_a_accent, regle_a_verbe, regle_c_est_a_dire, regle_ni_ny, regle_prie, regle_avoir_ete, regle_je_ai,
+    regle_a_accent, regle_a_verbe, regle_ou_lieu, regle_peu, regle_pret, regle_c_est_a_dire, regle_ni_ny, regle_prie,
+    regle_avoir_ete, regle_je_ai,
     regle_quel_genre, regle_sont_son, regle_cod_que, regle_orthographe_frequente, veto_a_ete_adjectif,
 )
 
 
-def check(text: str, lex: Lexique) -> list[Faute]:
-    """Fautes trouvées par les règles du correcteur, sans doublon de zone (la première règle l'emporte)."""
+def check(text: str, lex: Lexique, strict: bool = False) -> list[Faute]:
+    """Fautes trouvées par les règles du correcteur, sans doublon de zone (la première règle l'emporte).
+    `strict` : une règle en défaut lève son exception (tests) au lieu d'être ignorée."""
     words = tokenize(text, lex.known)
     found: list[Faute] = []
     taken: list[tuple[int, int]] = []
@@ -698,5 +1011,7 @@ def check(text: str, lex: Lexique) -> list[Faute]:
                 found.append(faute)
                 taken.append((faute.start, faute.end))
         except Exception:  # une règle en défaut ne doit jamais empêcher la vérification
+            if strict:
+                raise
             continue
     return found
