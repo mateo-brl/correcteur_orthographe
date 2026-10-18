@@ -503,9 +503,11 @@ _A_VERB_NEXT_RE = re.compile(r"\s+(?:l['’]air\b|tou(?:t|te|s|tes)\b|peine\s+à
 
 
 def _remote_homophone_ok(text: str, issue: Issue) -> bool:
-    """Tournures où LanguageTool se trompe trop souvent, mesurées sur corpus : « Quand à mon tour je réalise »
-    (QUAND_QUANT : 0 bonne sur 2), « a » verbe suivi de « l'air », « tout », « peine à »."""
-    if "QUAND_QUANT" in issue.rule_id:
+    """Règles et tournures où LanguageTool se trompe trop souvent, mesurées sur deux échantillons du corpus :
+    « Quand à mon tour je réalise » (QUAND_QUANT : 0 bonne sur 2), « Où sont Papa est Maman » -> « son »
+    (SONT_SON : 2 sur 3), « à » -> « a » (A_ACCENT_A : 4 sur 5), « a » verbe suivi de « l'air », « tout »,
+    « peine à ». Les autres règles : environ 100 bonnes pour 1 dégât."""
+    if "QUAND_QUANT" in issue.rule_id or issue.rule_id in ("SONT_SON", "A_ACCENT_A"):
         return False
     if text[issue.start:issue.end].lower() == "a" and _A_VERB_NEXT_RE.match(text, issue.end):
         return False
