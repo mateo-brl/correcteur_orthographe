@@ -26,9 +26,10 @@ FIXED = [
     ("Les filles sont parti tôt car elles étaient fatigué.",
      "Les filles sont parties tôt, car elles étaient fatiguées."),
     ("J'aime ce voiture rouge.", "J'aime cette voiture rouge."),
-    # Une correction sûre à un endroit ne l'est pas ailleurs pour le même mot (« Il ce lave » : ce -> se).
-    ("J'aime ce voiture rouge. Il ce lave les mains.", "J'aime cette voiture rouge. Il ce lave les mains."),
-    ("Les manteau sont rangés. Il a pris sont manteau.", "Les manteaux sont rangés. Il a pris sont manteau."),
+    # Une correction sûre à un endroit ne l'est pas ailleurs pour le même mot : « ce » -> « cette » d'un
+    # côté, « Il ce lave » -> « se » de l'autre (règle du correcteur, engines/regles.py).
+    ("J'aime ce voiture rouge. Il ce lave les mains.", "J'aime cette voiture rouge. Il se lave les mains."),
+    ("Les manteau sont rangés. Il a pris sont manteau.", "Les manteaux sont rangés. Il a pris son manteau."),
     # Familles de règles ajoutées après mesure sur corpus (rapport de test de la 0.1.5 : couverture trop faible).
     ("Elle à mangé.", "Elle a mangé."),
     ("Tu à raison.", "Tu as raison."),
@@ -62,17 +63,19 @@ FIXED = [
     ("Quelque soit la météo, nous partirons.", "Quelle que soit la météo, nous partirons."),
     ("C'est eux qui on gagné.", "C'est eux qui ont gagné."),
     ("Vous avez finis vos devoirs ?", "Vous avez fini vos devoirs ?"),
+    # Règles du correcteur (engines/regles.py) : Grammalecte corrigeait ici le mauvais mot (« son parti »,
+    # « on faims », « levés ») ou proposait une forme fautive (« fais »).
+    ("Il a pris sont manteau.", "Il a pris son manteau."),
+    ("Mes parents son partis en vacances.", "Mes parents sont partis en vacances."),
+    ("Les enfants on faim.", "Les enfants ont faim."),
+    ("Les filles son belles.", "Les filles sont belles."),
+    ("Ses parents son très gentils.", "Ses parents sont très gentils."),
+    ("Il faut que je fait mes courses.", "Il faut que je fasse mes courses."),
+    ("Il ces levé tôt ce matin.", "Il s'est levé tôt ce matin."),
 ]
 
 UNTOUCHED = [
-    # Grammalecte croit "sont" verbe et voudrait "sont manteaux" : sans confirmation, on n'y touche pas.
-    "Il a pris sont manteau.",
-    # Corrections de Grammalecte qui tombent sur le mauvais mot (rapport de test, 0.1.2) : la faute
-    # est « son » -> « sont », « on » -> « ont », « c'est » -> « s'est », ou la phrase est juste.
-    "Mes parents son partis en vacances.",
-    "Les enfants on faim.",
-    "Les filles son belles.",
-    "Ses parents son très gentils.",
+    # Phrase juste : « se » complément indirect, pas d'accord.
     "Nous nous sommes téléphoné.",
     # Autre lecture possible, que Grammalecte seul ne peut pas exclure (rapport de test de la 0.1.5).
     "Il y a manger et manger.",           # « à manger »
@@ -85,9 +88,7 @@ UNTOUCHED = [
     "C'étais lui le plus jeune.",          # « C'était », pas « S'étais »
     "Elle n'a pas sont mot de passe.",     # « son », pas « été »
     "Ils se sont téléphoné hier soir.",    # « se » complément indirect : pas d'accord (test de la 0.1.7)
-    "Il faut que je fait mes courses.",    # « fasse », pas « fais »
     "Patrick a l'air sombre.",
-    "Il ces levé tôt ce matin.",           # « levés » s'accorderait avec « ces », lui-même faux (« s'est »)
     "Je suis sur la route.",
     "Il est sur le point de partir.",
     "Nous les avons finis hier.",          # complément placé avant : l'accord est juste
