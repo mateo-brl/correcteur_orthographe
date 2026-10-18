@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import os
 import sys
 from pathlib import Path
@@ -50,8 +51,21 @@ def qapp():
     pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
+    from correcteur.ui.garbage import MainThreadGarbageCollector
+
     app = QApplication.instance() or QApplication([])
+    collector = MainThreadGarbageCollector(app)  # comme l'application (voir run_app)
     yield app
+    collector.stop()
+
+
+@pytest.fixture(autouse=True)
+def _collect_in_main_thread():
+    """Ramasse-miettes coupé par qapp : les déchets d'un test (fenêtres fermées...) sont ramassés après lui,
+    dans ce fil, plutôt que de s'accumuler jusqu'au prochain test qui traite les événements Qt."""
+    yield
+    if not gc.isenabled():
+        gc.collect()
 
 
 def pytest_collection_modifyitems(config, items):

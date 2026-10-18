@@ -22,6 +22,7 @@ from correcteur.platform.bridge import Capture, create_bridge
 from correcteur.platform.ipc import IpcServer
 from correcteur.platform.keys import display as hotkey_display
 from correcteur.textutils import diff_edits
+from correcteur.ui.garbage import MainThreadGarbageCollector
 from correcteur.ui.popup import CorrectionWindow
 from correcteur.ui.theme import apply_theme, current_theme
 
@@ -636,6 +637,7 @@ def run_app(initial_command: str | None = None, startup: bool = False, debug: bo
         except Exception:
             pass
     app = QApplication(sys.argv[:1])
+    collector = MainThreadGarbageCollector(app)  # noqa: F841 (actif jusqu'à la fin de app.exec())
     load_qt_translation(app)
     controller = Controller(app, startup=startup)
     app.aboutToQuit.connect(controller.checker.close)

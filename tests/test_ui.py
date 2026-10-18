@@ -579,3 +579,38 @@ def test_without_auto_correct_the_edited_text_is_pasted_as_is(qapp, window):
     assert wait_until(qapp, lambda: window._ready and not window._running)
     window.replace_text()
     assert requested == [edited]
+
+
+def test_garbage_is_collected_in_the_interface_thread(qapp):
+    """Ramassé dans un fil de vérification, un objet Qt détruit hors du fil de l'interface faisait planter
+    l'application (violation d'accès sous Windows)."""
+    import gc
+    import threading
+
+    from correcteur.ui.garbage import MainThreadGarbageCollector
+
+    assert not gc.isenabled()  # coupé par le ramasse-miettes du fil de l'interface (fixture qapp)
+    threads = []
+
+    def spy(phase, info):
+        if phase == "start":
+            threads.append(threading.current_thread())
+
+    gc.callbacks.append(spy)
+    try:
+        def allocate():
+            for _ in range(5000):
+                cycle = []
+                cycle.append(cycle)
+
+        worker = threading.Thread(target=allocate)
+        worker.start()
+        worker.join()
+        assert threads == []  # rien de ramassé dans l'autre fil
+        collector = MainThreadGarbageCollector(interval_ms=10)
+        assert wait_until(qapp, lambda: threads, 2)
+        collector._timer.stop()
+        assert set(threads) == {threading.main_thread()}
+    finally:
+        gc.callbacks.remove(spy)
+        gc.disable()  # stop() n'a pas été appelé : la fixture garde la main
