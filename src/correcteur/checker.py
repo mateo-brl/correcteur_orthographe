@@ -13,6 +13,7 @@ from typing import Callable, Iterable
 
 from correcteur.config import PersonalDictionary, Settings
 from correcteur.engines.base import Engine, EngineError
+from correcteur.engines.regles import INDICATIVE_BEFORE_QUE
 from correcteur.models import ENGINE_LABELS, ENGINE_PRIORITY, Category, CheckResult, EngineStatus, Issue
 from correcteur.textutils import (
     adapt_to_user_style,
@@ -22,6 +23,8 @@ from correcteur.textutils import (
     one_edit,
     only_typographic_difference,
     same_letters,
+    same_sound,
+    strip_accents,
     subject_ending,
     typo_normalize,
 )
@@ -546,6 +549,11 @@ def _solo_pick(text: str, issue: Issue) -> str | None:
     first = issue.replacements[0]
     if family in ("conj_je", "conj_tu") and first in ("ai", "as") and _PARTICIPLE_AFTER_RE.match(text, issue.end):
         return first
+    if family.startswith("conj_") or family.endswith("_non_verbe"):
+        # « Je fini » : « finis » ou « finissais » ? Celle qui se prononce comme ce qui est écrit.
+        same = [r for r in issue.replacements if same_sound(text[issue.start:issue.end], r)]
+        if len(same) == 1:
+            return same[0]
     if family == "conf_quel_que_soit":
         m = _QUEL_QUE_NEXT_RE.match(text, issue.end)
         det = m.group(1).lower() if m else ""
@@ -715,6 +723,10 @@ def doubtful_text(text: str, issues: list[Issue], language: str) -> bool:
     return len(words) >= 4 and unknown > 0.3 * len(words)
 
 
+def _accent_count(word: str) -> int:
+    return sum(1 for ch in word if strip_accents(ch) != ch)
+
+
 def is_confident(text: str, issue: Issue) -> bool:
     """Une correction est "sûre" (appliquée par la correction express) si :
     - c'est une faute d'accent ou de majuscule avec une suggestion évidente ;
@@ -734,6 +746,13 @@ def is_confident(text: str, issue: Issue) -> bool:
     if issue.category is Category.SPELLING:
         if first.casefold() == original.casefold() and _next_to_number(text, issue):
             return False  # « place du 8 Mai 1945 », « rue du 14 Juillet » : un nom propre, pas une date
+        if _accent_count(first) < _accent_count(original) and (
+                original[:1].isupper() or re.search(r"(?:é|ée|és|ées)$", original.lower())):
+            # « Sîn en akkadien » -> « Sin » : un nom écrit avec ses accents, exprès ; « avoir semblés » ->
+            # « sembles » : la faute est le « s », pas l'accent.
+            return False
+        if first.lower() == original.lower() and any(ch.isupper() for ch in first[1:]):
+            return False  # « el » -> « EL », « nt » -> « nT » : une majuscule inventée
         # "ecole" -> "école" est sûr ; "tache" -> "tâche"/"tachè" ne l'est pas.
         rivals = [r for r in issue.replacements[1:] if same_letters(original, r) and r.casefold() != first.casefold()]
         if same_letters(original, first) and not rivals:
@@ -789,6 +808,14 @@ _SOLO_RULES = frozenset({
     "ppas_3pl_mas_verbe_état", "ppas_3pl_fem_verbe_état", "ppas_3sg_fem_verbe_état", "ppas_nous_verbe_état",
     "ppas_pronom_avoir", "ppas_pronom_sujet_verbe_état_verbe", "ppas_n_m_t_l_avoir", "conf_sûr_sur",
     "conf_ont_on", "ppas_nous_vous_avoir", "conf_quel_que_soit",
+    # Banc d'essai de la 0.1.11 (tests/banc_fautes.py) : verbe mal écrit après « je », « il », « on » (« Je
+    # m'appel », voir solo_context_ok), locutions (« entrain », « sensé », « comme même », « en faite »,
+    # « d'avantage »), « J'ai du partir », « Il y a peut de monde », « Le jour ou il est parti ». La conjugaison
+    # après « il », « elle », « on », « ils », « vous » reste à la règle du correcteur (corr_conj_sujet) :
+    # Grammalecte proposait « pensa » pour « il pensai » (80 bonnes sur 100), « Il » pour « Ils mange ».
+    "conf_je_non_verbe", "conf_il_non_verbe", "conf_on_non_verbe", "conf_quelle_qu_elle", "conf_en_train_entrain",
+    "conf_censé_sensé", "conf_quand_même", "conf_en_fait", "conf_davantage_d_avantages", "ppas_avoir_dû_vinfi",
+    "conf_peut_peux_peu2", "conf_det_nom_où_pronom",
 })
 # Jamais sûres, même avec l'accord des deux moteurs : le participe d'un verbe pronominal s'accorde selon
 # son complément (« nous nous sommes lavés », mais « nous nous sommes téléphoné »), ce qu'aucun ne sait voir.
@@ -807,13 +834,21 @@ _WORD_BEFORE_RE = re.compile(r"([\w'’-]+)\W*$")
 _INDIRECT_PRONOMINAL = frozenset("""téléphoné parlé souri plu déplu complu succédé ressemblé menti nui suffi survécu
     ri convenu écrit dit demandé donné promis permis rendu répondu voulu fait laissé""".split())
 _REFLEXIVE = ("se", "me", "te", "nous", "vous", "s'", "m'", "t'")
-# Après ces déclencheurs, « que » appelle le subjonctif : « Il faut que je fait » n'est pas « je fais » (les deux
-# moteurs le proposent) mais « je fasse ». Une correction de conjugaison n'y est jamais sûre.
-_SUBJUNCTIVE_QUE_RE = re.compile(
-    r"\b(?:faut|faudrait|faudra|fallait|veux|veut|voulons|voulez|veulent|voudrais|voudrait|souhaite|souhaites|"
-    r"aimerais|aimerait|pour|avant|afin|sans|bien|quoique|moins|importe|important|nécessaire|possible|dommage|"
-    r"exige|préfère|préférerais|attends|attend|doute|crains|craint|peur)\s+qu(?:e\s+|['’])(?:(?:je|tu|il|elle|on|"
-    r"nous|vous|ils|elles)\s+|j['’])$", re.IGNORECASE)
+# Après « que » et un pronom sujet, le verbe est peut-être au subjonctif : « Il faut que je fait » n'est pas
+# « je fais » (les deux moteurs le proposent) mais « je fasse », « à ce qu'il ne sais point » est « sache ».
+# La conjugaison proposée, à l'indicatif, n'est sûre qu'après les mots qui appellent l'indicatif.
+_QUE_SUBJECT_RE = re.compile(
+    r"(?:^|[^\w'’])(?:([\w'’-]+)\s+)?(quoi|lors|puis)?qu(?:e\s+|['’]\s*)(?:je\s+|j['’]|tu\s+|il\s+|elle\s+|on\s+|"
+    r"nous\s+|vous\s+|ils\s+|elles\s+)(?:(?:ne|me|te|se|le|la|les|lui|leur|y|en|nous|vous)\s+|[nmtsl]['’])*$",
+    re.IGNORECASE)
+# « Ils on l'air contents » : « on » est « ont », pas le sujet d'un verbe mal écrit (« aire »).
+_ON_NOT_SUBJECT_RE = re.compile(r"\b(?:ils|elles|eux|nous|vous|qui|(?:les|des|mes|tes|ses|nos|vos|leurs|ces)\s+[\w-]+)"
+                                r"\s+on\s+(?:[\w'’-]+\s+)?$", re.IGNORECASE)
+# « Je voudrais d'avantage de temps » -> « davantage » ; mais « pas d'avantage fiscal », « toutes sortes
+# d'avantages » : le nom « avantage ».
+_NOUN_AVANTAGE_BEFORE = frozenset("""pas point plus jamais guère aucun sans peu beaucoup trop assez autant moins tant
+    sorte sortes genre type plein manque""".split())
+_AFTER_DAVANTAGE_RE = re.compile(r"\s*(?:[.!?,;:)…]|$)|\s+(?:de\b|d['’]|que\b|qu['’])", re.IGNORECASE)
 # « Je vais acheté du pain » : après aller ou venir, un participe en -é est l'infinitif mal écrit seulement si un
 # complément suit (« Je vais fatigué au travail », « Ils vont pressés au marché » sont justes).
 _GO_COME = frozenset("""vais vas va allons allez vont allais allait allions alliez allaient irai iras ira irons irez
@@ -870,8 +905,24 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
     if (word in _INDIRECT_PRONOMINAL and first.lower().startswith(word) and len(first) > len(word)
             and any(w in _REFLEXIVE or w.startswith(_REFLEXIVE[5:]) for w in _words_before(text, issue.start, 3))):
         return False
-    if family.startswith("conj_") and _SUBJUNCTIVE_QUE_RE.search(text[max(0, issue.start - 60):issue.start]):
+    if family.startswith("conj_") and re.search(r"[\"“«]\s*\w+\s*[\"”»]\s*$", text[max(0, issue.start - 20):issue.start]):
+        return False  # « les pronoms “je” est “tu” » : « je » cité, pas sujet
+    if family.startswith("conj_"):
+        m = _QUE_SUBJECT_RE.search(text, max(0, issue.start - 80), issue.start)
+        if m:
+            prefix, before_que = (m.group(2) or "").lower(), (m.group(1) or "").lower()
+            if not (prefix in ("lors", "puis") or (not prefix and before_que in INDICATIVE_BEFORE_QUE)):
+                return False
+    if family.endswith("_non_verbe") and not (same_sound(word, first) or word == "à"):
+        # « Je m'appel » -> « appelle », « Tu à raison » -> « as » ; mais « je ni prendrai » n'est pas « je nie »
+        # (« je n'y »).
         return False
+    if family in ("conf_on_non_verbe", "conj_on") and _ON_NOT_SUBJECT_RE.search(text, max(0, issue.start - 60), issue.start):
+        return False
+    if family == "conf_davantage_d_avantages":
+        if (text[issue.start:issue.end].lower().replace("’", "'") != "d'avantage"
+                or (before and before[0] in _NOUN_AVANTAGE_BEFORE) or not _AFTER_DAVANTAGE_RE.match(text, issue.end)):
+            return False
     if family in _PARTICIPLE_FAMILIES and before and before[0] in _CONFUSABLE_AUXILIARIES:
         if len(before) < 2 or before[1] not in _SUBJECTS:
             return False
@@ -881,7 +932,8 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
             return False
     if family == "conj_les_nom":
         # « Les Misérables est un roman » : un titre ; « Les contes est légendes » : « est » mis pour « et ».
-        if text[issue.start:issue.end].lower() == "est":
+        # « Les femmes porte toutes » : « portent » (verbe), pas « portes » (nom).
+        if text[issue.start:issue.end].lower() == "est" or not first.endswith("nt"):
             return False
         m = re.search(r"\b[Ll]es\s+(\w)", text[max(0, issue.start - 80):issue.start])
         if m and m.group(1).isupper():
@@ -948,7 +1000,7 @@ def solo_candidate(issue: Issue, text: str | None = None) -> bool:
                 issue.replacements = [pick] + [r for r in issue.replacements if r != pick]
             return True
     feminine = first[:-1] + "es" if first.endswith("s") else first + "e"
-    return all(r == feminine for r in issue.replacements[1:])
+    return all(r in (feminine, first + "e") for r in issue.replacements[1:])  # « allés / allées », « permis / permise »
 
 
 def mark_solo_confident(text: str, issues: list[Issue], recheck: Recheck | None = None) -> None:

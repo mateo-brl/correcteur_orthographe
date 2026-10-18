@@ -52,7 +52,13 @@ La fenêtre de correction, ouverte par <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>C
 Deux moteurs tournent en même temps, [Grammalecte](https://grammalecte.net) sur le PC et
 [LanguageTool](https://languagetool.org), et ils ne repèrent pas les mêmes fautes. Quand ils proposent la même
 correction, elle est appliquée d'office ; sinon elle reste à vérifier. C'est pour ça que la correction express ne
-change pas « fesait » en « fessait » : aucun des deux n'est sûr de lui sur ce mot.
+change pas « tache » en « tâche » : rien ne dit lequel des deux mots était voulu.
+
+Un troisième moteur, propre au correcteur, rattrape ce que les deux autres laissent passer ou corrigent mal :
+« Il ces levé » devient « Il s'est levé » (Grammalecte proposait « sait » et « levés »), « Mes parents son
+partis » devient « sont partis » (et non « son parti »), « Il faut que je fait » devient « fasse », « Je ne sais
+pas ou il est » devient « où », « Elle s'est assit » devient « assise », « fesait » devient « faisait ». Ce sont
+des règles écrites à la main, chacune mesurée sur plusieurs milliers de phrases avant d'être appliquée d'office.
 
 Il n'y a pas d'IA, seulement des règles de grammaire. Grammalecte fonctionne sans Internet, et LanguageTool peut
 tourner sur le PC si on ne veut rien envoyer en ligne. Sous Linux, l'application occupe environ 130 Mo de RAM et
@@ -194,8 +200,11 @@ moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
 - Sous Windows, la capture de la sélection et le remplacement n'ont pas encore été essayés sur un vrai bureau. La CI
   GitHub n'a pas de bureau interactif : les tests unitaires Windows y passent, mais le parcours complet n'y est pas
   exécuté.
-- Les suggestions d'orthographe peuvent manquer le bon mot. « fesait » est bien repéré, mais « faisait » ne fait pas
-  partie des propositions.
+- Les suggestions d'orthographe peuvent manquer le bon mot. Les fautes les plus fréquentes (« fesait », « malgrès »,
+  « parmis ») ont leur correction dans le moteur du correcteur ; pour les autres, la bonne suggestion n'est pas
+  toujours en tête.
+- Sans LanguageTool, certaines fautes restent signalées sans être corrigées d'office, faute d'indice pour choisir :
+  « Il vont » (« Il va » ou « Ils vont » ?), « Quels changement » (« Quel changement » ou « Quels changements » ?).
 - Le mode LanguageTool en ligne est limité à environ 20 vérifications par minute.
 
 ## Moteurs et confidentialité
@@ -230,7 +239,7 @@ Les fichiers sont dans `%LOCALAPPDATA%\Correcteur` (Windows) ou `~/.config/Corre
 
 ```mermaid
 flowchart LR
-    A["Texte sélectionné<br/>dans une application"] --> B["Grammalecte<br/>(local, 0,1 s)"]
+    A["Texte sélectionné<br/>dans une application"] --> B["Grammalecte<br/>et règles du correcteur<br/>(local, 0,1 s)"]
     A --> C["LanguageTool<br/>(en ligne ou local)"]
     B --> D{"Fusion<br/>et accord des moteurs"}
     C --> D
@@ -251,6 +260,13 @@ flowchart LR
    capturé et du texte corrigé, comme pour toute copie.
 3. Les deux moteurs tournent en parallèle. Les résultats de Grammalecte s'affichent tout de suite, ceux de
    LanguageTool s'ajoutent dès qu'ils arrivent.
+   Les règles du correcteur (`engines/regles.py`) passent dans le même temps que Grammalecte, avec son
+   dictionnaire (nature, genre, nombre, temps de chaque mot) et son module de conjugaison. Une règle ne propose
+   qu'une correction, et seulement quand le contexte l'impose : « Ils mange » devient « mangent » parce que
+   « mangent » se prononce comme ce qui est écrit, mais « Ils prend » reste à vérifier (« Il prend » ou « Ils
+   prennent » ?). Elles remplacent la remarque de Grammalecte sur le même mot et écartent celles qu'elles savent
+   fausses : dans « Ils se sont téléphoné », Grammalecte voudrait « téléphonés », à tort. Leur coût est
+   négligeable : 0,1 s pour 170 000 caractères, quand Grammalecte en met plus de 60.
 4. Une faute signalée par les deux moteurs devient une seule remarque, qui garde en mémoire leur accord.
 5. Une correction est considérée comme sûre si les deux moteurs proposent la même, si c'est un accent
    (« ecole » → « école ») ou une ponctuation évidente.
@@ -314,9 +330,12 @@ Mesuré sous Linux, avec l'application empaquetée :
 
 ## Tests et qualité
 
-La CI lance plus de 110 tests sous Windows et Linux (Python 3.10 et 3.13) à chaque modification :
+La CI lance plus de 750 tests sous Windows et Linux (Python 3.10 et 3.13) à chaque modification :
 
 - moteurs, fusion, corrections sûres, correction en cascade, dictionnaire, paramètres ;
+- banc d'essai (`tests/banc_fautes.py`) : plus de 150 fautes courantes qui doivent être corrigées d'office sans
+  LanguageTool, et plus de 130 phrases justes ou ambiguës qui ne doivent pas bouger ; chaque règle du correcteur
+  a ses propres tests, sur des phrases fautives et sur leurs voisines justes ;
 - interface (fenêtre, soulignements, annulation, paramètres) ;
 - tests « vrai bureau » sous Linux, sur un écran X11 virtuel : une vraie application tourne dans un autre
   processus, et le test y sélectionne du texte, le capture, lance la correction express, vérifie le remplacement,
@@ -349,7 +368,7 @@ Les choix visuels de l'interface sont expliqués dans [DESIGN.md](DESIGN.md).
 ```
 src/correcteur/
 ├── checker.py        orchestration, fusion des moteurs, corrections sûres et en cascade
-├── engines/          Grammalecte, LanguageTool (API + serveur local)
+├── engines/          Grammalecte, règles du correcteur (regles.py), LanguageTool (API + serveur local)
 ├── platform/         raccourcis, sélection et presse-papiers (Windows, X11, Wayland),
 │                     instance unique, démarrage automatique
 ├── ui/               application Qt : icône, fenêtre de correction, paramètres
