@@ -6,7 +6,7 @@ quand `capture_in_thread` est vrai (et les rappels des raccourcis).
 `defer(ms, fonction)` programme une action différée dans ce même thread
 (fourni par l'application Qt).
 
-Presse-papiers emprunté : pour copier la sélection (Ctrl+C simulé) ou coller
+Presse-papiers emprunté : pour copier la sélection (copie simulée) ou coller
 le texte corrigé, le correcteur écrit dans le presse-papiers, puis y remet ce
 qu'il contenait. Sous X11 et Windows, il ne sait remettre que du texte : un
 presse-papiers qui contient autre chose (image, fichiers copiés...) n'y est
@@ -38,7 +38,7 @@ _NO_PASTE_TOOL = ("Texte corrigé copié : collez-le avec Ctrl+V (installez wtyp
 # Phrase ajoutée à la notification quand l'ancien presse-papiers ne pourra pas être remis.
 _CLIPBOARD_LOST = ("L'ancien contenu du presse-papiers (trop gros ou illisible) n'a pas pu être gardé : il contient "
                    "maintenant le texte corrigé.")
-# Wayland : contenu sauvé avant un Ctrl+C simulé (une image peut peser lourd), et restauration après le collage :
+# Wayland : contenu sauvé avant une copie simulée (une image peut peser lourd), et restauration après le collage :
 # délai pour que l'application lise le collage (et sous GNOME, que le focus soit revenu), pause de saisie à
 # attendre, abandon passé ce délai après l'heure prévue.
 _MAX_SAVED = 50_000_000
@@ -47,7 +47,7 @@ _RESTORE_AFTER_PASTE_S = 0.5
 _IDLE_BEFORE_RESTORE_MS = 400
 _RESTORE_GIVE_UP_S = 5.0
 # Le raccourci du bureau part à l'appui des touches : quand la commande arrive, l'utilisateur tient peut-être
-# encore Ctrl+Alt, et un Ctrl+C simulé deviendrait Ctrl+Alt+C. Sous Wayland, impossible de savoir quand il les
+# encore Ctrl+Alt, et une copie simulée deviendrait Ctrl+Alt+Inser. Sous Wayland, impossible de savoir quand il les
 # relâche (un relâchement envoyé par ydotool n'agit pas sur les touches du vrai clavier) : on attend.
 _KEYS_RELEASE_S = 0.3
 # Sous GNOME, Mutter n'a pas le protocole data-control : wl-copy et wl-paste créent une surface pour obtenir le
@@ -60,6 +60,15 @@ _WINDOW_FOCUS_RETURN_MS = 400
 # n'agit que sur son clavier virtuel (touche restée enfoncée par une commande interrompue) : le noyau ignore le
 # relâchement d'une touche que ce clavier n'a pas enfoncée, d'où aussi l'attente de _KEYS_RELEASE_S.
 _YDOTOOL_RELEASE = ("29:0", "97:0", "56:0", "100:0", "42:0", "54:0", "125:0", "126:0")
+# Copie simulée sous Linux : Ctrl+Inser, jamais Ctrl+C, qui interrompt le programme en cours dans un terminal
+# (« ^C »). GTK, Qt, LibreOffice, Firefox, Chromium et les terminaux VTE copient avec Ctrl+Inser ; un terminal qui ne
+# le connaît pas reçoit une séquence d'échappement, sans conséquence. Le collage reste Ctrl+V : Maj+Inser collerait
+# la sélection primaire dans les terminaux VTE, c'est-à-dire le texte d'origine.
+_YDOTOOL_KEYS = {"copy": "110", "paste": "47"}  # KEY_INSERT, KEY_V
+_WTYPE_KEYS = {"copy": ["-k", "Insert"], "paste": ["v"]}
+# Marqueur posé sous un format à nous, sans aucun format texte : les historiques du presse-papiers (Clipboard
+# Indicator, GPaste, Klipper), qui ne gardent que du texte, l'ignorent.
+_MARKER_TYPE = "application/x-correcteur-marqueur"
 # Formats de texte brut et cibles de service X11 : un presse-papiers qui n'offre que ceux-là ne contient que du
 # texte, qu'on sait remettre. Tout autre format (image, page web, fichiers copiés...) serait perdu.
 _TEXT_FORMATS = {"UTF8_STRING", "STRING", "TEXT", "COMPOUND_TEXT", "TARGETS", "MULTIPLE", "TIMESTAMP",
@@ -67,6 +76,9 @@ _TEXT_FORMATS = {"UTF8_STRING", "STRING", "TEXT", "COMPOUND_TEXT", "TARGETS", "M
 
 
 _PLAIN_TEXT = {"UTF8_STRING", "STRING", "TEXT", "COMPOUND_TEXT"}
+
+
+_UNREAD = object()  # texte du presse-papiers non lu (voir WaylandBridge._clipboard_before)
 
 
 def _text_only(formats) -> bool:
@@ -78,7 +90,7 @@ def _has_text(formats) -> bool:
 
 
 def _clipboard_marker() -> str:
-    """Contenu unique mis dans le presse-papiers juste avant un Ctrl+C simulé. Comparer au contenu d'avant ne
+    """Contenu unique mis dans le presse-papiers juste avant une copie simulée. Comparer au contenu d'avant ne
     suffit pas : si l'utilisateur vient de copier le texte qu'il a sélectionné, la copie ne change rien et la
     sélection passerait pour vide (« Aucun texte sélectionné »)."""
     return f"⁣correcteur {time.monotonic_ns()}"
@@ -133,6 +145,7 @@ class Capture:
     clipboard_touched: bool = False
     started: float = 0.0           # time.monotonic() au début de la capture, juste après la frappe du raccourci
     left: Any = None               # ce que le correcteur a laissé dans le presse-papiers (marqueur, copie, texte collé)
+    owner: Any = None              # wl-copy --foreground qui possède ce qu'il a laissé (vivant : rien n'a changé)
 
 
 class Bridge:
@@ -174,7 +187,7 @@ class Bridge:
 
     def begin_capture(self) -> None:
         """Avant une capture (fil de l'interface). Jusqu'à end_capture, les restaurations du presse-papiers
-        attendent : pendant le Ctrl+C simulé, l'ancien contenu remplacerait le marqueur et passerait pour la
+        attendent : pendant la copie simulée, l'ancien contenu remplacerait le marqueur et passerait pour la
         copie du texte sélectionné (en correction express, il serait corrigé puis collé à sa place)."""
         with self._lock:
             self._capturing = True
@@ -236,7 +249,7 @@ class Bridge:
         return self._clipboard_read() if formats else ""
 
     def _clipboard_before(self) -> tuple[bool, str | None, str | None]:
-        """Presse-papiers avant un Ctrl+C simulé : (utilisable, texte pour la comparaison, texte à remettre).
+        """Presse-papiers avant une copie simulée : (utilisable, texte pour la comparaison, texte à remettre).
         Inutilisable s'il contient du texte qu'on n'a pas pu lire : sans contenu d'avant, l'ancien presse-papiers
         (un mot de passe, peut-être) passerait pour la copie de la sélection."""
         formats = self._clipboard_formats()
@@ -495,7 +508,8 @@ class X11Bridge(Bridge):
         return False
 
     @staticmethod
-    def _send_ctrl(letter: str) -> None:
+    def _send_keys(action: str) -> None:
+        """Copie (Ctrl+Inser) ou collage (Ctrl+V) simulés par XTEST, voir _YDOTOOL_KEYS."""
         from pynput.keyboard import Controller, Key
 
         kb = Controller()
@@ -504,7 +518,7 @@ class X11Bridge(Bridge):
                 kb.release(key)
             except Exception:
                 pass
-        key = xtest_key(letter)
+        key = Key.insert if action == "copy" else xtest_key("v")
         with kb.pressed(Key.ctrl):
             kb.press(key)
             kb.release(key)
@@ -553,7 +567,7 @@ class X11Bridge(Bridge):
         try:
             from correcteur.platform.x11_selection import selection_owned_by_client_of
         except ImportError:
-            return False  # sans python-xlib, impossible de savoir : Ctrl+C simulé
+            return False  # sans python-xlib, impossible de savoir : copie simulée
         return selection_owned_by_client_of("PRIMARY", window)
 
     def capture(self) -> Capture:
@@ -563,18 +577,24 @@ class X11Bridge(Bridge):
             text = self._read("PRIMARY") or ""
             if text.strip():
                 return Capture(text, target=target, from_selection=True, started=started)
-        # Pas de sélection primaire de l'application active : Ctrl+C simulé. Le presse-papiers n'est marqué (voir _clipboard_marker)
-        # que s'il ne contient que du texte qu'on a pu lire ; sinon, on compare avec son contenu d'avant.
+        # Pas de sélection primaire de l'application active : copie simulée (Ctrl+Inser). Le presse-papiers n'est
+        # marqué (voir _clipboard_marker) que s'il ne contient que du texte qu'on a pu lire ; sinon, on compare avec
+        # son contenu d'avant.
         usable, before, saved = self._clipboard_before()
         if not usable:
             return Capture("", target=target, started=started)
         marker = _clipboard_marker()
-        marked = saved is not None and self._write(marker, qt_fallback=not self.capture_in_thread)
+        marked = saved is not None and self._write_marker(marker)
         if marked:
-            before = marker
+            before = None  # le marqueur n'offre aucun texte : tout texte lu ensuite vient de la copie
         time.sleep(0.2)
+        if marked and not self._owner.owns():
+            # Un autre programme a pris le presse-papiers depuis le marqueur : l'utilisateur vient de copier autre
+            # chose. On ne copie pas par-dessus, et il n'y a rien à remettre.
+            log.info("Presse-papiers changé pendant la capture : copie simulée annulée.")
+            return Capture("", target=target, started=started)
         try:
-            self._send_ctrl("c")
+            self._send_keys("copy")
         except Exception:
             return Capture("", target=target, saved_clipboard=saved, clipboard_touched=marked, started=started,
                            left=marker if marked else None)
@@ -590,6 +610,19 @@ class X11Bridge(Bridge):
                        saved_clipboard=saved, clipboard_touched=changed or marked, started=started,
                        left=text if changed else (marker if marked else None))
 
+    def _write_marker(self, marker: str) -> bool:
+        """Marqueur sous un format à nous (_MARKER_TYPE), par python-xlib seulement (capture hors du fil de
+        l'interface) ; False sans python-xlib : on comparera avec le contenu d'avant."""
+        try:
+            if self._owner is None:
+                from correcteur.platform.x11_selection import SelectionOwner
+
+                self._owner = SelectionOwner()
+            return self._owner.set_data(marker.encode("utf-8"), _MARKER_TYPE)
+        except Exception as exc:
+            log.debug("Marqueur X11 impossible : %s", exc)
+            return False
+
     def _write_saved(self, saved: Any) -> None:
         self._write(saved)
 
@@ -604,7 +637,7 @@ class X11Bridge(Bridge):
             return False, "Fenêtre d'origine introuvable : texte corrigé copié, collez-le avec Ctrl+V."
         time.sleep(0.05)
         try:
-            self._send_ctrl("v")
+            self._send_keys("paste")
         except Exception as exc:
             return False, f"Collage automatique impossible ({exc}) : texte copié, faites Ctrl+V."
         if capture.saved_clipboard is None:
@@ -623,7 +656,7 @@ class X11Bridge(Bridge):
         return [
             "Session : X11",
             "Raccourcis : " + ("pynput" if ok else why),
-            "Sélection : sélection primaire X11 (repli : Ctrl+C simulé)",
+            "Sélection : sélection primaire X11 de l'application active (sinon Ctrl+Inser simulé)",
             "xdotool : " + ("oui" if which("xdotool") else "non (facultatif)"),
         ]
 
@@ -695,7 +728,7 @@ class _Restore:
 class WaylandBridge(Bridge):
     """Wayland interdit aux applications d'espionner le clavier ou les autres
     fenêtres : le raccourci se déclare dans les paramètres du bureau (commande
-    `correcteur selection`), la sélection se copie par un Ctrl+C simulé (wl-paste,
+    `correcteur selection`), la sélection se copie par un Ctrl+Inser simulé (wl-paste,
     wl-copy) et le collage se fait avec wtype ou ydotool s'ils sont installés.
 
     Depuis la fenêtre de correction, qui a le focus, le texte corrigé est posé par
@@ -795,25 +828,35 @@ class WaylandBridge(Bridge):
             return [line.strip() for line in out.stdout.splitlines() if line.strip()]
         return [] if _nothing_copied(out.stderr) else None
 
-    def _clipboard_before(self) -> tuple[bool, str | None, Any]:
-        """Presse-papiers avant un Ctrl+C simulé : (utilisable, texte pour la comparaison, contenu à remettre :
+    def _clipboard_before(self) -> tuple[bool, Any, Any]:
+        """Presse-papiers avant une copie simulée : (utilisable, texte pour la comparaison, contenu à remettre :
         texte, SavedClipboard, ou None s'il n'a pas pu être lu). Inutilisable si on ne sait pas ce qu'il contient,
         ou s'il contient du texte illisible : l'ancien presse-papiers (un mot de passe, peut-être) passerait pour
-        la copie de la sélection."""
+        la copie de la sélection. Texte de comparaison _UNREAD : une image ou des fichiers, sauvés tels quels,
+        dont le texte n'a pas été lu (le marqueur le rend inutile, et une lecture de moins fait gagner du temps)."""
         formats = self._clipboard_types()
         if formats is None:
             return False, None, None
         if not formats:
             return True, "", ""
-        readable = _has_text(formats)
-        text = self._paste(primary=False) if readable else None
-        if readable and text is None:
-            return False, None, None
         mime = _preferred_type(formats)
-        if mime is None:
-            return True, text, text
-        data = self._paste_bytes(mime)
-        return True, text, None if data is None else SavedClipboard(mime, data)
+        if mime is not None:
+            data = self._paste_bytes(mime)
+            if data is not None:
+                return True, _UNREAD if _has_text(formats) else None, SavedClipboard(mime, data)
+        if not _has_text(formats):
+            return True, None, None
+        text = self._paste(primary=False)
+        if text is None:
+            return False, None, None
+        return True, text, text if mime is None else None
+
+    def _still_left(self, left: Any) -> bool:
+        """Le presse-papiers contient-il encore ce que le correcteur y a laissé ? (relu par wl-paste)"""
+        if isinstance(left, SavedClipboard):
+            formats = self._clipboard_types() or []
+            return left.mime in formats and (left.mime == _MARKER_TYPE or self._paste_bytes(left.mime) == left.data)
+        return self._paste(primary=False) == left
 
     def _set_clipboard(self, text: str, qt_fallback: bool = True) -> bool:
         """Sans `qt_fallback`, jamais le presse-papiers de Qt (hors du fil de l'interface)."""
@@ -833,31 +876,33 @@ class WaylandBridge(Bridge):
             return self._run([tool, "--clear"], output=False) is not None
         return self._run([tool], data=saved, output=False) is not None
 
-    def _copy_and_keep(self, text: str) -> subprocess.Popen | None:
+    def _keep_copy(self, data: bytes, mime: str | None = None) -> subprocess.Popen | None:
         """wl-copy --foreground : le processus reste là tant qu'il possède le presse-papiers et s'arrête dès
-        qu'un autre programme copie quelque chose. Vivant, il prouve que le texte corrigé y est encore."""
+        qu'un autre programme copie quelque chose. Vivant, il prouve que ce qu'on y a mis y est encore."""
         tool = which("wl-copy")
         if not tool:
             return None
         self._copies = [proc for proc in self._copies if proc.poll() is None]
+        cmd = [tool, "--foreground"] + (["--type", mime] if mime else [])
         try:
-            proc = subprocess.Popen([tool, "--foreground"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, env=child_env())
-            proc.stdin.write(text.encode("utf-8"))
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    env=child_env())
+            proc.stdin.write(data)
             proc.stdin.close()
         except OSError:
             return None
         self._copies.append(proc)
         return proc
 
-    def _send_ctrl(self, letter: str) -> bool:
+    def _send_keys(self, action: str) -> bool:
+        """Copie (Ctrl+Inser) ou collage (Ctrl+V) simulés, voir _YDOTOOL_KEYS."""
         wtype = which("wtype")
         if wtype and "gnome" not in desktop_name():
-            if self._run([wtype, "-M", "ctrl", letter, "-m", "ctrl"]) is not None:
+            if self._run([wtype, "-M", "ctrl", *_WTYPE_KEYS[action], "-m", "ctrl"]) is not None:
                 return True
         ydotool = which("ydotool")
         if ydotool:
-            code = {"c": 46, "v": 47}[letter]
+            code = _YDOTOOL_KEYS[action]
             if self._run([ydotool, "key", *_YDOTOOL_RELEASE, "29:1", f"{code}:1", f"{code}:0", "29:0"]) is not None:
                 return True
         return False
@@ -888,33 +933,50 @@ class WaylandBridge(Bridge):
         self._wait_restoring()
         # Jamais la sélection primaire : c'est celle de la dernière application où l'on a sélectionné, pas
         # forcément celle qui est active (Ctrl+Alt+X collait dans Writer un texte sélectionné dans Zen). Toujours
-        # un Ctrl+C simulé, après avoir marqué le presse-papiers (voir _clipboard_marker) : sans sélection dans
-        # l'application active, le marqueur reste et rien n'est capturé. Marqué seulement si son contenu a pu être
-        # sauvé, et seulement par wl-copy : le presse-papiers de Qt est réservé au fil de l'interface.
+        # une copie simulée (Ctrl+Inser), après avoir marqué le presse-papiers (voir _clipboard_marker) : sans
+        # sélection dans l'application active, le marqueur reste et rien n'est capturé. Marqué seulement si son
+        # contenu a pu être sauvé, et seulement par wl-copy : le presse-papiers de Qt est réservé au fil de
+        # l'interface.
         usable, before, saved = self._clipboard_before()
         if not usable:
             return Capture("", started=started)
-        marker = _clipboard_marker()
-        marked = saved is not None and self._set_clipboard(marker, qt_fallback=False)
-        if marked:
-            before = marker
-        self._wait_for_keys(started)
-        if self._send_ctrl("c"):
-            # Sous GNOME, chaque wl-paste prend le focus un instant : l'application traite d'abord le Ctrl+C, et
-            # on lit moins souvent.
-            first, step, limit = (0.25, 0.15, 1.2) if self._tools_take_focus() else (0.05, 0.05, 0.6)
-            deadline = time.monotonic() + limit
-            time.sleep(first)
-            while True:
-                text = self._paste(primary=False)
-                if text and text != before:
-                    return Capture(text, from_selection=True, saved_clipboard=saved, clipboard_touched=True,
-                                   started=started, left=text)
+        marker = _clipboard_marker().encode("utf-8")
+        owner = self._keep_copy(marker, _MARKER_TYPE) if saved is not None else None
+        if owner is None and before is _UNREAD:
+            return Capture("", started=started)  # ni marqueur ni contenu d'avant pour comparer
+        if not self._wait_for_keys(started, owner):
+            # Le marqueur a perdu le presse-papiers avant la copie simulée : l'utilisateur vient de copier autre
+            # chose (ou wl-copy a échoué). Rien n'est copié par-dessus, et il n'y a rien à remettre.
+            log.info("Presse-papiers changé pendant la capture : copie simulée annulée.")
+            return Capture("", started=started)
+        left = SavedClipboard(_MARKER_TYPE, marker) if owner is not None else None
+        if not self._send_keys("copy"):
+            return Capture("", saved_clipboard=saved, clipboard_touched=owner is not None, started=started, left=left,
+                           owner=owner)
+        limit = 1.2 if self._tools_take_focus() else 0.6
+        deadline = time.monotonic() + limit
+        if owner is not None:
+            # L'application copie : le wl-copy du marqueur perd le presse-papiers et s'arrête. Rien à relire
+            # avant (sous GNOME, chaque wl-paste prendrait le focus un instant).
+            while owner.poll() is None:
                 if time.monotonic() >= deadline:
-                    break
-                time.sleep(step)
-        return Capture("", saved_clipboard=saved, clipboard_touched=marked, started=started,
-                       left=marker if marked else None)
+                    return Capture("", saved_clipboard=saved, clipboard_touched=True, started=started, left=left,
+                                   owner=owner)
+                time.sleep(0.02)
+            text = self._paste(primary=False)
+            return Capture(text or "", from_selection=bool(text), saved_clipboard=saved, clipboard_touched=True,
+                           started=started, left=text)
+        # Sans marqueur : comparaison avec le contenu d'avant. Sous GNOME, on lit moins souvent.
+        first, step = (0.25, 0.15) if self._tools_take_focus() else (0.05, 0.05)
+        time.sleep(first)
+        while True:
+            text = self._paste(primary=False)
+            if text and text != before:
+                return Capture(text, from_selection=True, saved_clipboard=saved, clipboard_touched=True,
+                               started=started, left=text)
+            if time.monotonic() >= deadline:
+                return Capture("", started=started)
+            time.sleep(step)
 
     def focused_capture(self) -> Capture | None:
         """Le correcteur a le focus : sélection primaire lue par Qt. Sous GNOME, wl-paste prendrait le focus à
@@ -946,6 +1008,9 @@ class WaylandBridge(Bridge):
         if not capture.clipboard_touched or saved is None:
             return
         capture.clipboard_touched = False  # une seule restauration par capture
+        owner = capture.owner
+        if sure_check is None and owner is not None:
+            sure_check = lambda: owner.poll() is None  # noqa: E731  (wl-copy vivant : il possède encore ce qu'il a mis)
         with self._lock:
             job = _Restore(saved, capture.left, self._generation, time.monotonic() + delay, main_check, sure_check)
         self._defer(int(delay * 1000), lambda: self._start_restore(job))
@@ -1000,7 +1065,7 @@ class WaylandBridge(Bridge):
                 if not job.sure_check():
                     self._forget(job, "un autre programme a copié quelque chose depuis")
                     return
-            elif self._paste(primary=False) != job.left:
+            elif not self._still_left(job.left):
                 self._forget(job, "le presse-papiers a changé depuis")
                 return
             with self._lock:
@@ -1041,13 +1106,14 @@ class WaylandBridge(Bridge):
         if not _qt_set_clipboard(text):
             return False, _COPY_FAILED
         capture.clipboard_touched = True
+        capture.owner = None  # posé par Qt : la restauration relira le contenu
         self._borrow(capture, text)
         return True, ""
 
     def paste_staged(self, capture: Capture) -> tuple[bool, str]:
         """Ctrl+V, `staged_paste_delay_ms` après stage_replace, quand l'application d'origine a repris le focus.
         Le correcteur possède le presse-papiers : c'est le fil de l'interface, resté libre, qui sert le collage."""
-        if not self._send_ctrl("v"):
+        if not self._send_keys("paste"):
             return False, _NO_PASTE_TOOL
         # Qt dit-il encore posséder le presse-papiers ? Simple indice : le contenu est relu avant d'écrire.
         self._restore_later(capture, self._settle_delay(), main_check=_qt_owns_clipboard)
@@ -1060,17 +1126,17 @@ class WaylandBridge(Bridge):
             # sa propriété, qui peut rester vrai après une copie faite ailleurs.
             capture.saved_clipboard = _qt_saved_text() if _qt_focused() else self._clipboard_before()[2]
         self._wait_restoring()
-        copy = self._copy_and_keep(text)
+        copy = self._keep_copy(text.encode("utf-8"))
         if copy is None and not self._set_clipboard(text):
             return False, "Copie du texte corrigé impossible (wl-copy a échoué) : rien n'a été collé."
         capture.clipboard_touched = True
+        capture.owner = copy
         self._borrow(capture, text)
         if not self._wait_for_keys(capture.started, copy):
             return False, "Copie du texte corrigé impossible (wl-copy a échoué) : rien n'a été collé."
-        if not self._send_ctrl("v"):
+        if not self._send_keys("paste"):
             return False, _NO_PASTE_TOOL
-        sure = (lambda: copy.poll() is None) if copy is not None else None
-        self._restore_later(capture, self._settle_delay(), sure_check=sure)
+        self._restore_later(capture, self._settle_delay())
         return True, _CLIPBOARD_LOST if capture.saved_clipboard is None else ""
 
     def copy(self, text: str) -> bool:

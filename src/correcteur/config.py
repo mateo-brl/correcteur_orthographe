@@ -7,6 +7,7 @@ import dataclasses
 import json
 import logging
 import os
+import stat
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -228,6 +229,7 @@ class PersonalDictionary:
         data, unreadable = b"", False
         try:
             data = self.path.read_bytes()
+            self._protect()
         except FileNotFoundError:
             pass
         except OSError as exc:
@@ -243,6 +245,19 @@ class PersonalDictionary:
         with self._lock:
             self._words = words
             self._folded = {w for w in words if w == w.lower()}
+
+    def _protect(self) -> None:
+        """Mots personnels (noms, adresses...) : un dictionnaire créé lisible par le groupe ou les autres (664 avec
+        la 0.1.6) est remis en 600 dès le chargement, sans attendre le prochain mot ajouté. Seulement s'il
+        appartient à l'utilisateur."""
+        if os.name != "posix":
+            return
+        try:
+            info = os.stat(self.path)
+            if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) & 0o077:
+                os.chmod(self.path, 0o600)
+        except OSError as exc:
+            log.debug("Droits du dictionnaire inchangés : %s", exc)
 
     def __contains__(self, word: str) -> bool:
         word = word.strip().replace("’", "'")

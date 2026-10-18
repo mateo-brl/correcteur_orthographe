@@ -123,7 +123,7 @@ def test_x11_delayed_restore_waits_for_the_capture(monkeypatch, clock):
     monkeypatch.setattr(x11, "_saved_text", lambda: clipboard["text"])
     monkeypatch.setattr(x11, "_write", lambda text, qt_fallback=True: written.append(text) or clipboard.update(text=text) or True)
     monkeypatch.setattr(x11, "_activate", lambda wid: True)
-    monkeypatch.setattr(x11, "_send_ctrl", lambda letter: None)
+    monkeypatch.setattr(x11, "_send_keys", lambda action: None)
     ok, _ = x11.replace(Capture("Ces un test", target=1, from_selection=True), "C'est un test")
     assert ok and written == ["C'est un test"] and len(deferred) == 1
     x11.begin_capture()
@@ -137,21 +137,25 @@ def test_x11_delayed_restore_waits_for_the_capture(monkeypatch, clock):
 
 
 def test_x11_marks_only_a_text_clipboard(monkeypatch, clock):
+    """Marqueur seulement sur un presse-papiers de texte lisible, posé sous un format à nous (sans format texte,
+    les historiques du presse-papiers l'ignorent), et copie simulée par Ctrl+Inser, jamais Ctrl+C."""
     from correcteur.platform import x11_selection
 
     x11 = X11Bridge(lambda ms, fn: None)
-    state, written, keys = {}, [], []
+    state, marked_with, keys = {}, [], []
 
-    def write(text, qt_fallback=True):
-        written.append((text, qt_fallback))
-        state["clipboard"] = text
+    def write_marker(marker):
+        marked_with.append(marker)
+        state["clipboard"] = None  # le marqueur n'offre aucun texte
+        x11._owner = SimpleNamespace(owns=lambda: True)
         return True
 
     monkeypatch.setattr(x11, "_active_window", lambda: None)
     monkeypatch.setattr(x11, "_read", lambda selection: None if selection == "PRIMARY" else state["clipboard"])
-    monkeypatch.setattr(x11, "_write", write)
-    monkeypatch.setattr(x11, "_send_ctrl", keys.append)
-    # (cibles TARGETS, texte lisible, marqué ?, Ctrl+C envoyé ?)
+    monkeypatch.setattr(x11, "_write", lambda text, qt_fallback=True: pytest.fail("marqueur écrit en texte"))
+    monkeypatch.setattr(x11, "_write_marker", write_marker)
+    monkeypatch.setattr(x11, "_send_keys", keys.append)
+    # (cibles TARGETS, texte lisible, marqué ?, copie envoyée ?)
     for targets, clipboard, marked, sent in ((["TARGETS", "image/png", "application/x-qt-image"], None, False, True),
                                              (["TARGETS", "text/html", "UTF8_STRING"], "gras", False, True),
                                              (["TARGETS", "UTF8_STRING", "text/plain;charset=utf-8"], "ancien", True,
@@ -159,17 +163,62 @@ def test_x11_marks_only_a_text_clipboard(monkeypatch, clock):
                                              ([], None, True, True),       # presse-papiers vide
                                              (None, "ancien", False, True),  # pas de réponse à TARGETS
                                              (["UTF8_STRING"], None, False, False)):  # texte illisible
-        written.clear()
+        marked_with.clear()
         keys.clear()
         state["clipboard"] = clipboard
         monkeypatch.setattr(x11_selection, "selection_targets", lambda selection, t=targets: t)
-        capture = x11.capture()  # rien de sélectionné : le Ctrl+C ne copie rien
-        assert capture.text == "" and keys == (["c"] if sent else []), targets
-        assert bool(written) is marked and capture.clipboard_touched is marked, targets
+        capture = x11.capture()  # rien de sélectionné : la copie simulée ne copie rien
+        assert capture.text == "" and keys == (["copy"] if sent else []), targets
+        assert bool(marked_with) is marked and capture.clipboard_touched is marked, targets
         if marked:
-            # Capture hors du fil de l'interface : jamais le presse-papiers de Qt pour le marqueur.
-            assert written[0][0].startswith("\u2063correcteur") and written[0][1] is False
+            assert marked_with[0].startswith("\u2063correcteur")
             assert capture.saved_clipboard == (clipboard or "")
+
+
+def test_x11_copy_is_ctrl_insert(monkeypatch):
+    """Dans un terminal, Ctrl+C interrompait le programme en cours (« ^C ») : la copie simulée est Ctrl+Inser."""
+    import contextlib
+    import types
+
+    pressed = []
+
+    class Controller:
+        def press(self, key):
+            pressed.append(("appui", key))
+
+        def release(self, key):
+            pressed.append(("relâche", key))
+
+        @contextlib.contextmanager
+        def pressed(self, key):
+            self.press(key)
+            yield
+            self.release(key)
+
+    keys = SimpleNamespace(**{name: name for name in ("ctrl", "insert", "alt", "alt_r", "shift", "shift_r", "cmd")})
+    module = types.ModuleType("pynput.keyboard")
+    module.Controller, module.Key = Controller, keys
+    monkeypatch.setitem(sys.modules, "pynput", types.ModuleType("pynput"))
+    monkeypatch.setitem(sys.modules, "pynput.keyboard", module)
+    X11Bridge._send_keys("copy")
+    assert [p for p in pressed if p[0] == "appui"] == [("appui", "ctrl"), ("appui", "insert")]
+    assert pressed[-2:] == [("relâche", "insert"), ("relâche", "ctrl")]
+
+
+def test_x11_never_copies_over_a_copy_made_during_the_capture(monkeypatch, clock):
+    """L'utilisateur copie autre chose pendant la capture : sa copie n'est pas écrasée par la copie simulée."""
+    from correcteur.platform import x11_selection
+
+    x11 = X11Bridge(lambda ms, fn: None)
+    keys = []
+    monkeypatch.setattr(x11, "_active_window", lambda: None)
+    monkeypatch.setattr(x11, "_read", lambda selection: None if selection == "PRIMARY" else "T1")
+    monkeypatch.setattr(x11_selection, "selection_targets", lambda selection: ["TARGETS", "UTF8_STRING"])
+    monkeypatch.setattr(x11, "_write_marker",
+                        lambda marker: setattr(x11, "_owner", SimpleNamespace(owns=lambda: False)) or True)
+    monkeypatch.setattr(x11, "_send_keys", keys.append)
+    capture = x11.capture()
+    assert capture.text == "" and not capture.clipboard_touched and keys == []
 
 
 def test_x11_uses_primary_only_from_the_active_application(monkeypatch, clock):
@@ -183,17 +232,19 @@ def test_x11_uses_primary_only_from_the_active_application(monkeypatch, clock):
     monkeypatch.setattr(x11, "_active_window", lambda: 0x2400007)
     monkeypatch.setattr(x11, "_read", lambda selection: "Il pense a toi." if selection == "PRIMARY" else None)
     monkeypatch.setattr(x11, "_write", lambda text, qt_fallback=True: True)
-    monkeypatch.setattr(x11, "_send_ctrl", keys.append)
+    monkeypatch.setattr(x11, "_send_keys", keys.append)
+    monkeypatch.setattr(x11, "_write_marker",
+                        lambda marker: setattr(x11, "_owner", SimpleNamespace(owns=lambda: True)) or True)
     monkeypatch.setattr(x11_selection, "selection_targets", lambda selection: [])
     for same_client, expected in ((False, ""), (True, "Il pense a toi.")):
         keys.clear()
         monkeypatch.setattr(x11_selection, "selection_owned_by_client_of",
                             lambda selection, window, same=same_client: asked.append((selection, window)) or same)
         capture = x11.capture()
-        assert capture.text == expected and keys == ([] if same_client else ["c"])
+        assert capture.text == expected and keys == ([] if same_client else ["copy"])
     assert asked == [("PRIMARY", 0x2400007)] * 2
     monkeypatch.setattr(x11, "_active_window", lambda: None)  # fenêtre active inconnue : Ctrl+C
-    assert x11.capture().text == "" and keys == ["c"]
+    assert x11.capture().text == "" and keys == ["copy"]
 
 
 def test_x11_write_without_qt_fallback(monkeypatch):
@@ -234,7 +285,7 @@ def test_x11_never_pastes_when_copy_failed(monkeypatch):
     pasted = []
     monkeypatch.setattr(x11, "_write", lambda text: False)
     monkeypatch.setattr(x11, "_activate", lambda wid: True)
-    monkeypatch.setattr(x11, "_send_ctrl", pasted.append)
+    monkeypatch.setattr(x11, "_send_keys", pasted.append)
     capture = Capture("Ces un test", target=42, from_selection=True, saved_clipboard="mot de passe secret")
     ok, message = x11.replace(capture, "C'est un test")
     assert not ok and "rien n'a été collé" in message

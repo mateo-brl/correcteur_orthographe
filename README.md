@@ -186,7 +186,8 @@ moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
   que les terminaux collent avec <kbd>Ctrl</kbd> + <kbd>Maj</kbd> + <kbd>V</kbd>. Sous Wayland, il ne peut pas savoir
   que le collage a échoué : la notification annonce quand même les corrections. Dans un terminal, ouvrez plutôt
   la fenêtre de correction, copiez le texte corrigé, puis collez-le avec <kbd>Ctrl</kbd> + <kbd>Maj</kbd> +
-  <kbd>V</kbd>.
+  <kbd>V</kbd>. Les terminaux qui ne copient pas avec <kbd>Ctrl</kbd> + <kbd>Inser</kbd> (kitty, Alacritty,
+  xterm) ne donnent pas leur sélection : le correcteur répond « Aucun texte sélectionné ».
 - Sous Wayland, le remplacement automatique passe par `wtype` ou `ydotool` (sous GNOME, uniquement `ydotool`). Si
   l'outil manque, le texte corrigé est seulement copié dans le presse-papiers et il faut le coller soi-même avec
   <kbd>Ctrl</kbd> + <kbd>V</kbd>.
@@ -241,10 +242,13 @@ flowchart LR
 1. Le raccourci est capté par `RegisterHotKey` sous Windows et par `pynput` sous X11. Sous Wayland, c'est le
    bureau qui le gère.
 2. Le correcteur lit le texte sélectionné. Sous X11, il prend la sélection primaire seulement si elle appartient
-   à la fenêtre active, et sinon il simule <kbd>Ctrl</kbd> + <kbd>C</kbd>. Sous Wayland, il simule toujours
-   <kbd>Ctrl</kbd> + <kbd>C</kbd> : la sélection primaire peut venir d'une autre fenêtre. Il remet ensuite le
-   presse-papiers d'origine, images et fichiers compris sous Windows et sous Wayland. Sous Wayland, il attend
-   pour cela une pause de frappe, peu après le collage.
+   à la fenêtre active. Sinon, et toujours sous Wayland (la sélection primaire peut y venir d'une autre fenêtre),
+   il simule <kbd>Ctrl</kbd> + <kbd>Inser</kbd>, la copie que comprennent aussi les terminaux :
+   <kbd>Ctrl</kbd> + <kbd>C</kbd> y interromprait le programme en cours. Sous Windows, c'est
+   <kbd>Ctrl</kbd> + <kbd>C</kbd>. Il remet ensuite le presse-papiers d'origine, images et fichiers compris sous
+   Windows et sous Wayland ; sous Wayland, il attend pour cela une pause de frappe, peu après le collage.
+   Un gestionnaire d'historique du presse-papiers (GPaste, Clipboard Indicator, Klipper) garde la trace du texte
+   capturé et du texte corrigé, comme pour toute copie.
 3. Les deux moteurs tournent en parallèle. Les résultats de Grammalecte s'affichent tout de suite, ceux de
    LanguageTool s'ajoutent dès qu'ils arrivent.
 4. Une faute signalée par les deux moteurs devient une seule remarque, qui garde en mémoire leur accord.

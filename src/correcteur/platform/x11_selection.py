@@ -150,18 +150,22 @@ def _read_incr(d, win, prop, timeout: float) -> bytes:
 
 
 class SelectionOwner:
-    """Possède une sélection et sert son texte aux autres applications."""
+    """Possède une sélection et sert son texte (ou des données d'un seul format) aux autres applications."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._current: _OwnerThread | None = None
 
     def set_text(self, text: str, selection: str = "CLIPBOARD") -> bool:
-        data = text.encode("utf-8")
+        return self.set_data(text.encode("utf-8"), None, selection)
+
+    def set_data(self, data: bytes, mime: str | None, selection: str = "CLIPBOARD") -> bool:
+        """Données offertes sous le seul format `mime` (aucun format texte), ou du texte UTF-8 si `mime` est
+        None."""
         if len(data) > _MAX_DIRECT:
             return False
         with self._lock:
-            owner = _OwnerThread(data, selection)
+            owner = _OwnerThread(data, selection, mime)
             if not owner.acquire():
                 return False
             previous, self._current = self._current, owner
@@ -181,15 +185,16 @@ class SelectionOwner:
 
 
 class _OwnerThread(threading.Thread):
-    def __init__(self, data: bytes, selection: str) -> None:
+    def __init__(self, data: bytes, selection: str, mime: str | None = None) -> None:
         super().__init__(name=f"selection-{selection.lower()}", daemon=True)
         from Xlib import X, display
 
         self.data = data
+        self.mime = mime
         self.d = display.Display()
         self.win = self.d.screen().root.create_window(0, 0, 1, 1, 0, X.CopyFromParent, event_mask=X.PropertyChangeMask)
         self.sel = self.d.intern_atom(selection)
-        self._stop = threading.Event()
+        self._stopping = threading.Event()  # pas « _stop » : méthode interne de Thread
 
     def _server_time(self) -> int:
         """Horodatage exact du serveur : on modifie une propriété de notre fenêtre."""
@@ -211,13 +216,13 @@ class _OwnerThread(threading.Thread):
         return ok
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stopping.set()
 
     def run(self) -> None:
         from Xlib import X
 
         try:
-            while not self._stop.is_set():
+            while not self._stopping.is_set():
                 ev = _wait_event(self.d, lambda e: e.type in (X.SelectionRequest, X.SelectionClear), 0.25)
                 if ev is None:
                     continue
@@ -245,7 +250,15 @@ class _OwnerThread(threading.Thread):
         prop = ev.property if ev.property != X.NONE else ev.target
         requestor = ev.requestor
         try:
-            if ev.target == targets:
+            if self.mime is not None:
+                own = d.intern_atom(self.mime)
+                if ev.target == targets:
+                    requestor.change_property(prop, Xatom.ATOM, 32, [targets, own])
+                elif ev.target == own:
+                    requestor.change_property(prop, own, 8, self.data)
+                else:
+                    prop = X.NONE
+            elif ev.target == targets:
                 requestor.change_property(prop, Xatom.ATOM, 32, [targets, utf8, text_atom, plain, Xatom.STRING])
             elif ev.target in (utf8, text_atom, plain):
                 requestor.change_property(prop, utf8 if ev.target == text_atom else ev.target, 8, self.data)

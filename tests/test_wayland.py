@@ -83,7 +83,10 @@ class FakeProc:
         if self.desktop.failures.get("wl-copy"):
             self.returncode = 1
             return
-        self.desktop.set_text(self._input.decode("utf-8"), owner=self)
+        if "--type" in self.cmd:
+            self.desktop.set_formats({self.cmd[self.cmd.index("--type") + 1]: self._input}, owner=self)
+        else:
+            self.desktop.set_text(self._input.decode("utf-8"), owner=self)
 
     def poll(self):
         return self.returncode
@@ -108,15 +111,18 @@ class Desktop:
         self.pasted: list[object] = []
         self.calls: list[tuple[float, list[str], dict]] = []
         self.failures: dict[str, object] = {}
+        self.interrupted = False   # un Ctrl+C a été envoyé (programme interrompu dans un terminal)
+        self.history: list[str] = []  # historique du presse-papiers (Clipboard Indicator, GPaste) : texte seulement
 
     # presse-papiers
     def set_text(self, text: str, owner=None) -> None:
-        self._take(owner)
-        self.formats = {t: text.encode("utf-8") for t in TEXT_TYPES}
+        self.set_formats({t: text.encode("utf-8") for t in TEXT_TYPES}, owner)
 
     def set_formats(self, formats: dict[str, bytes], owner=None) -> None:
         self._take(owner)
         self.formats = dict(formats)
+        if "text/plain;charset=utf-8" in formats:
+            self.history.append(formats["text/plain;charset=utf-8"].decode("utf-8"))
 
     def _take(self, owner) -> None:
         if self.owner is not None and self.owner is not owner:
@@ -161,11 +167,13 @@ class Desktop:
             else:
                 self.set_text(kwargs["input"])
             return done(0, None, None)
-        if name == "ydotool":
-            if "46:1" in args and self.selected is not None:
-                self.set_text(self.selected)
-            if "47:1" in args:
+        if name in ("ydotool", "wtype"):
+            if ("110:1" in args or "Insert" in args) and self.selected is not None:
+                self.set_text(self.selected)  # copie de l'application (Ctrl+Inser)
+            if "47:1" in args or (name == "wtype" and "v" in args):
                 self.pasted.append(self.text() if self.text() is not None else dict(self.formats))
+            if "46:1" in args or (name == "wtype" and "c" in args):
+                self.interrupted = True  # Ctrl+C : « ^C » dans un terminal
             return done()
         if name == "gdbus":
             return done(0, f"(uint64 {self.idle_ms},)\n")
@@ -309,8 +317,8 @@ def test_unreadable_clipboard_is_never_captured_nor_restored(setup):
     assert wl._paste(primary=False) == "" and wl._clipboard_before() == (True, "", "")
 
 
-def test_waits_for_the_shortcut_keys_before_ctrl_c(setup):
-    """Le raccourci GNOME part à l'appui : un Ctrl+C simulé aussitôt devenait Ctrl+Alt+C. On attend que
+def test_waits_for_the_shortcut_keys_before_the_copy(setup):
+    """Le raccourci GNOME part à l'appui : une copie simulée aussitôt devenait Ctrl+Alt+Inser. On attend que
     l'utilisateur ait relâché ses touches, et sous GNOME que le focus soit revenu après wl-paste et wl-copy."""
     for gnome, focus_wait in ((False, 0.25), (True, 0.5)):
         wl, desktop, clock = setup(gnome=gnome)
@@ -319,10 +327,10 @@ def test_waits_for_the_shortcut_keys_before_ctrl_c(setup):
         start = clock.now
         capture = wl.capture()
         assert capture.text == "Ces un test" and capture.started == start
-        (ctrl_c,), (at,) = desktop.ran("ydotool"), desktop.times("ydotool")
-        assert ctrl_c[2:] == [*RELEASES, "29:1", "46:1", "46:0", "29:0"]
+        (copy,), (at,) = desktop.ran("ydotool"), desktop.times("ydotool")
+        assert copy[2:] == [*RELEASES, "29:1", "110:1", "110:0", "29:0"]  # Ctrl+Inser
         last_tool = max(t for t, cmd, _ in desktop.calls if os.path.basename(cmd[0]).startswith("wl-") and t < at)
-        assert at >= start + 0.3 and at >= last_tool + 0.05 + focus_wait
+        assert at >= start + 0.3 and at >= last_tool + focus_wait
 
 
 def test_express_waits_for_focus_after_wl_copy(setup):
@@ -332,7 +340,7 @@ def test_express_waits_for_focus_after_wl_copy(setup):
     desktop.selected = "Ces un test"
     _, (ok, _) = express(wl, "C'est un test")
     assert ok and desktop.pasted == ["C'est un test"]
-    (copy_at,), (paste_at,) = desktop.times("wl-copy", "--foreground"), desktop.times("ydotool", "47:1")
+    copy_at, (paste_at,) = desktop.times("wl-copy", "--foreground")[-1], desktop.times("ydotool", "47:1")
     assert paste_at >= copy_at + 0.5
 
 
@@ -582,3 +590,74 @@ def test_diagnostics_show_the_gnome_shortcuts(setup, monkeypatch):
 
 def test_saved_clipboard_is_never_equal_to_text():
     assert SavedClipboard("image/png", b"x") != "x"
+
+
+# N1 : jamais Ctrl+C (il interrompt le programme en cours dans un terminal)
+
+@pytest.mark.parametrize("tool", ["ydotool", "wtype"])
+def test_copy_is_ctrl_insert_never_ctrl_c(setup, monkeypatch, tool):
+    """GNOME Terminal : chaque Ctrl+Alt+X envoyait Ctrl+C au programme en cours (« ^C »), puis « Aucun texte
+    sélectionné ». La copie simulée est Ctrl+Inser ; le collage reste Ctrl+V (Maj+Inser collerait la sélection
+    primaire dans les terminaux VTE)."""
+    wl, desktop, clock = setup(gnome=tool == "ydotool")  # wtype n'est pas utilisé sous GNOME
+    tools = {"wl-copy", "wl-paste", "gdbus", tool}
+    monkeypatch.setattr(bridge, "which", lambda *names: next((f"/usr/bin/{n}" for n in names if n in tools), None))
+    desktop.set_text("témoin")
+    desktop.selected = "Ces un test"
+    express(wl, "C'est un test")  # avec sélection
+    desktop.selected = None
+    express(wl, "x")  # sans sélection
+    clock.advance(10)
+    assert not desktop.interrupted and desktop.pasted == ["C'est un test"]
+    if tool == "wtype":
+        assert desktop.ran("wtype") == [["/usr/bin/wtype", "-M", "ctrl", "-k", "Insert", "-m", "ctrl"],
+                                        ["/usr/bin/wtype", "-M", "ctrl", "v", "-m", "ctrl"],
+                                        ["/usr/bin/wtype", "-M", "ctrl", "-k", "Insert", "-m", "ctrl"]]
+    else:
+        assert [cmd[-4:] for cmd in desktop.ran("ydotool")] == [["29:1", "110:1", "110:0", "29:0"],
+                                                               ["29:1", "47:1", "47:0", "29:0"],
+                                                               ["29:1", "110:1", "110:0", "29:0"]]
+
+
+# P10 : le marqueur n'apparaît jamais dans l'historique du presse-papiers
+
+def test_marker_is_never_in_the_clipboard_history(setup):
+    """Clipboard Indicator, GPaste et Klipper enregistraient « ⁣correcteur 8967567854227 » à chaque capture. Le
+    marqueur est posé sous un format à nous, sans format texte."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    seen = []
+    clock.at(clock.now + 0.4, lambda: seen.append(dict(desktop.formats)))  # pendant la capture
+    capture, _ = express(wl, "x")  # rien de sélectionné
+    clock.advance(10)
+    assert capture.text == "" and desktop.text() == "témoin"
+    assert list(seen[0]) == ["application/x-correcteur-marqueur"]
+    assert not any("correcteur" in entry for entry in desktop.history)
+    assert desktop.history == ["témoin", "témoin"]  # le témoin copié, puis remis
+
+
+def test_copy_is_read_at_once_without_polling(setup):
+    """Le marqueur est gardé par wl-copy --foreground : il s'arrête dès que l'application copie, et le texte est
+    lu une seule fois, sans wl-paste répétés (chacun prend le focus un instant sous GNOME)."""
+    wl, desktop, _ = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "Ces un test"
+    capture = wl.capture()
+    assert capture.text == "Ces un test"
+    (copy_at,) = desktop.times("ydotool")
+    reads = [t for t, cmd, _ in desktop.calls if os.path.basename(cmd[0]) == "wl-paste" and t > copy_at]
+    assert len(reads) == 1 and reads[0] - copy_at <= 0.1
+
+
+# P12 : une copie faite pendant la capture n'est pas écrasée
+
+def test_a_copy_made_during_the_capture_is_kept(setup):
+    """L'utilisateur copie T2 pendant la seconde de capture : la copie simulée l'écrasait, puis T1 était remis."""
+    wl, desktop, clock = setup()
+    desktop.set_text("T1")
+    desktop.selected = "Ces un test"
+    clock.at(clock.now + 0.3, lambda: desktop.set_text("T2"))  # avant la copie simulée
+    capture, outcome = express(wl, "C'est un test")
+    clock.advance(10)
+    assert capture.text == "" and outcome is None
+    assert desktop.ran("ydotool") == [] and desktop.restores() == [] and desktop.text() == "T2"
