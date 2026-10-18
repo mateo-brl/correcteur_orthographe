@@ -279,10 +279,11 @@ class Checker:
             if weak:
                 issue.confident = bool(trials._clean_fix(issue)) and all(
                     trials._still_there(issue, o) is False for o in weak)
-            elif not any(name in o.sources and trials.same_sentence(o, issue) for o in issues):
-                # Grammalecte ne dit rien de la phrase (« Je me suis fait mal a la main ») : l'homophone de
-                # LanguageTool est sûr si Grammalecte ne signale rien une fois la correction appliquée. Mesuré
-                # sur corpus : 64 bonnes sur 66, les 2 dégâts écartés par _remote_homophone_ok.
+            elif not any(o is not issue and trials.same_sentence(o, issue) for o in issues):
+                # Seule remarque de la phrase, et Grammalecte n'y trouve rien (« Je me suis fait mal a la main ») :
+                # l'homophone de LanguageTool est sûr si Grammalecte ne signale rien une fois la correction
+                # appliquée. Une autre faute dans la phrase rend la lecture incertaine (« Où sont Papa est Maman »
+                # devenait « son »). Voir _remote_homophone_ok pour les tournures écartées.
                 issue.confident = _remote_homophone_ok(text, issue) and bool(trials._clean_fix(issue))
 
     def _recheck(self, name: str, language: str) -> Recheck:
@@ -496,11 +497,16 @@ def _homophones(original: str, replacement: str) -> bool:
     return key in _HOMOPHONE_PAIRS
 
 
-# « Patrick a l'air sombre », « une volonté a toutes les chances » : « a » verbe, que LanguageTool prend pour « à ».
-_A_VERB_NEXT_RE = re.compile(r"\s+(?:l['’]air\b|tou(?:t|te|s|tes)\b)", re.IGNORECASE)
+# « Patrick a l'air sombre », « une volonté a toutes les chances », « celui qui a peine à » : « a » verbe, que
+# LanguageTool prend pour « à ».
+_A_VERB_NEXT_RE = re.compile(r"\s+(?:l['’]air\b|tou(?:t|te|s|tes)\b|peine\s+à\b)", re.IGNORECASE)
 
 
 def _remote_homophone_ok(text: str, issue: Issue) -> bool:
+    """Tournures où LanguageTool se trompe trop souvent, mesurées sur corpus : « Quand à mon tour je réalise »
+    (QUAND_QUANT : 0 bonne sur 2), « a » verbe suivi de « l'air », « tout », « peine à »."""
+    if "QUAND_QUANT" in issue.rule_id:
+        return False
     if text[issue.start:issue.end].lower() == "a" and _A_VERB_NEXT_RE.match(text, issue.end):
         return False
     return True
