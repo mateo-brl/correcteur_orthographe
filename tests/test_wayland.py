@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -14,6 +15,9 @@ import pytest
 
 from correcteur.platform import bridge
 from correcteur.platform.bridge import Capture, SavedClipboard, WaylandBridge
+
+# Wayland n'existe que sous Linux : lecture des tubes de wl-paste par select(), faux outils en scripts shell.
+pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Wayland : Linux")
 
 TEXT_TYPES = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT"]
 RELEASES = ["29:0", "97:0", "56:0", "100:0", "42:0", "54:0", "125:0", "126:0"]
