@@ -679,6 +679,27 @@ def merge_issues(text: str, issues: Iterable[Issue]) -> list[Issue]:
     return merged
 
 
+_ENGLISH_NEIGHBOURS = frozenset("""the of and for with to in on at by from is are was were be an or not this that it its
+    you your we our they their my his her new great general""".split())
+
+
+def _capitalized_mid_sentence(text: str, start: int) -> bool:
+    """Majuscule au milieu d'une phrase (« les Trail Blazers », « Force ouvrière », « Monster Hunter
+    Generations ») : un nom propre ou un titre, qu'on ne corrige pas d'office."""
+    if start >= len(text) or not text[start].isupper():
+        return False
+    before = text[:start].rstrip()
+    return bool(before) and not re.search(r"[.!?…:;\n«“\"(\[—–-]$", before)
+
+
+def _foreign_neighbour(text: str, issue: Issue) -> bool:
+    """Un mot voisin est anglais (« Dawn of the Dead » : « the » n'est pas « thé »)."""
+    before = re.findall(r"[\w']+", text[max(0, issue.start - 30):issue.start])
+    after = re.findall(r"[\w']+", text[issue.end:issue.end + 30])
+    near = [w.lower() for w in before[-1:] + after[:1]]
+    return text[issue.start:issue.end].lower() in _ENGLISH_NEIGHBOURS or any(w in _ENGLISH_NEIGHBOURS for w in near)
+
+
 def _next_to_number(text: str, issue: Issue) -> bool:
     return bool(re.search(r"\d\W*$", text[max(0, issue.start - 12):issue.start])
                 or re.match(r"\W*\d", text[issue.end:issue.end + 12]))
@@ -706,6 +727,8 @@ def is_confident(text: str, issue: Issue) -> bool:
         return issue.replacements[0].lower() in ("s'", "s’")  # « si il » -> « s'il » : élision obligatoire, pas de style
     if not issue.replacements or issue.category is Category.STYLE or never_sure(issue):
         return False
+    if issue.rule_id == "corr_orthographe":
+        return True  # faute d'orthographe fréquente, à correction unique (engines/regles.py)
     original = text[issue.start:issue.end]
     first = issue.replacements[0]
     if issue.category is Category.SPELLING:
@@ -714,7 +737,8 @@ def is_confident(text: str, issue: Issue) -> bool:
         # "ecole" -> "école" est sûr ; "tache" -> "tâche"/"tachè" ne l'est pas.
         rivals = [r for r in issue.replacements[1:] if same_letters(original, r) and r.casefold() != first.casefold()]
         if same_letters(original, first) and not rivals:
-            return True
+            # Pas pour un nom propre ou un titre (« College », « Ramón »), ni au milieu d'anglais (« of the Dead »).
+            return not (_capitalized_mid_sentence(text, issue.start) or _foreign_neighbour(text, issue))
         # « Nous avont fini » -> « avons » : une faute de frappe, et la seule suggestion à la terminaison
         # qu'impose le sujet.
         ending = subject_ending(text, issue.start)
@@ -808,7 +832,8 @@ def rule_family(rule_id: str) -> str:
 def solo_rule(issue: Issue) -> bool:
     """Moteur seul : Grammalecte n'est cru que pour les familles mesurées ; LanguageTool seul (texte anglais,
     Grammalecte désactivé) garde la règle d'avant, une suggestion unique sans voisine."""
-    return issue.source != "grammalecte" or rule_family(issue.rule_id) in _SOLO_RULES
+    family = rule_family(issue.rule_id)
+    return issue.source != "grammalecte" or family in _SOLO_RULES or family.startswith("corr_")
 
 
 def never_sure(issue: Issue) -> bool:
@@ -831,6 +856,15 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
     `agreed` : les deux moteurs proposent cette correction (le genre choisi n'est alors plus un hasard)."""
     family = rule_family(issue.rule_id)
     before = _words_before(text, issue.start, 2)
+    if (family.startswith("gn_") or family == "conj_les_nom") and _capitalized_mid_sentence(text, issue.start):
+        return False  # « les Trail Blazers » -> « Trails », « les syndicats Force ouvrière » -> « Forcent »
+    if family.startswith(("conf_à_a", "conf_a_à")):
+        prev = re.search(r"([\w'’-]+)\W*$", text[max(0, issue.start - 40):issue.start])
+        if prev and _capitalized_mid_sentence(text, issue.start - (len(text[max(0, issue.start - 40):issue.start]) - prev.start(1))):
+            return False  # « La Gères a une station » : « Gères » est un nom de rivière, pas « tu gères »
+    if family == "gn_nombre_chiffres_1m" and re.search(r"\b(?:1[0-9]|20)\d\d(?:\s*[-–]\s*\d{2,4})?\s*$",
+                                                        text[max(0, issue.start - 12):issue.start]):
+        return False  # « 1943 débarquement de Salerne » : une année, pas une quantité
     word = text[issue.start:issue.end].lower()
     first = issue.replacements[0] if issue.replacements else ""
     if (word in _INDIRECT_PRONOMINAL and first.lower().startswith(word) and len(first) > len(word)
@@ -888,7 +922,7 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         if (not before or before[0] not in _GO_COME or not word.endswith("é") or first != word[:-1] + "er"
                 or not _OBJECT_START_RE.match(text, issue.end)):
             return False
-    if not agreed and len(issue.replacements) > 1 and first.endswith("s"):
+    if not agreed and len(issue.replacements) > 1 and first.endswith("s") and issue.replacements[1] == first[:-1] + "es":
         # Masculin pluriel proposé au hasard (« Ma mère et ma sœur sont partit » : « partis » ou « parties » ?) :
         # seulement quand le sujet le dit (« ils »).
         if "ils" not in _words_before(text, issue.start, 3):
@@ -904,6 +938,8 @@ def solo_candidate(issue: Issue, text: str | None = None) -> bool:
         return False
     if not solo_rule(issue):
         return False
+    if rule_family(issue.rule_id).startswith("corr_"):
+        return True  # règle du correcteur (engines/regles.py) : sa correction est en tête, le reste vient de Grammalecte
     first = issue.replacements[0]
     if text is not None and len(issue.replacements) > 1:
         pick = _solo_pick(text, issue)

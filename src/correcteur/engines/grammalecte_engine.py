@@ -16,6 +16,7 @@ from pathlib import Path
 from correcteur.config import Settings
 from correcteur.engines.base import Engine, EngineError
 from correcteur.models import Category, Issue
+from correcteur.engines import regles
 from correcteur.textutils import agree_with_subject, split_paragraphs
 
 # Options Grammalecte désactivées en mode typographique "standard" : ce sont
@@ -158,6 +159,7 @@ class GrammalecteEngine(Engine):
         self._options_cache: dict[bool, dict] = {}
         self._cache: OrderedDict[tuple[str, bool], list[tuple]] = OrderedDict()
         self._cache_size = cache_size
+        self._lexique: regles.Lexique | None = None
 
     def is_enabled(self) -> bool:
         return self.settings.grammalecte.enabled
@@ -241,10 +243,33 @@ class GrammalecteEngine(Engine):
                 err["nStart"], err["nEnd"], f"Mot inconnu du dictionnaire : « {word} ».",
                 suggestions, Category.SPELLING, rule, "",
             ))
+        found = self._apply_rules(masked, found)
         self._cache[key] = found
         if len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
         return found
+
+    def _apply_rules(self, paragraph: str, found: list[tuple]) -> list[tuple]:
+        """Règles du correcteur (engines/regles.py) : elles remplacent les remarques de Grammalecte sur la même
+        zone et écartent celles qu'elles savent fausses."""
+        if self._lexique is None:
+            self._lexique = regles.Lexique(self._ensure_loaded().getSpellChecker())
+        fautes = regles.check(paragraph, self._lexique)
+        if not fautes:
+            return found
+        dropped = {span for f in fautes for span in f.drop}
+        kept = [e for e in found if (e[0], e[1]) not in dropped
+                and not any(f.start <= e[0] and e[1] <= f.end for f in fautes)]
+        for f in fautes:
+            if f.replacement is None:
+                continue
+            # Grammalecte propose la même correction au même endroit : ses autres suggestions restent
+            # en second choix (« viennes », puis « vinsses » en typographie stricte).
+            same = next((e for e in found if (e[0], e[1]) == (f.start, f.end) and f.replacement in e[3]), None)
+            others = tuple(s for s in same[3] if s != f.replacement) if same else ()
+            kept.append((f.start, f.end, f.message, (f.replacement, *others), f.category, f.rule,
+                         same[6] if same else ""))
+        return kept
 
     def _proper_noun(self, word: str) -> bool:
         morphs = self._ensure_loaded().getSpellChecker().getMorph(word)
