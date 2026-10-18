@@ -745,3 +745,14 @@ def test_close_never_blocks_program_exit(tmp_path):
                PYTHONPATH=os.pathsep.join([str(root / "src"), str(root / "tests")]))
     proc = subprocess.run([sys.executable, "-c", code], env=env, timeout=15, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_slow_engine_waits_longer_for_a_long_text():
+    """Une page entière prend souvent plus de 8 s au serveur public de LanguageTool : elle retombait sur
+    Grammalecte seul."""
+    from correcteur.checker import _slow_timeout
+
+    assert _slow_timeout(8.0, "x" * 50) < 8.2
+    assert 15 < _slow_timeout(8.0, "x" * 3800) < 16
+    assert _slow_timeout(8.0, "x" * 100_000) == 32.0
+    assert _slow_timeout(None, "x" * 3800) is None

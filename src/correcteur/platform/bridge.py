@@ -940,7 +940,10 @@ class WaylandBridge(Bridge):
         usable, before, saved = self._clipboard_before()
         if not usable:
             return Capture("", started=started)
-        marker = _clipboard_marker().encode("utf-8")
+        # Vide : un gestionnaire d'historique (Clipboard Indicator) demande du texte quel que soit le format offert,
+        # et wl-copy lui répond avec ses données ; vides, elles ne sont pas enregistrées. La copie de l'application
+        # se voit à l'arrêt de ce wl-copy, pas au contenu.
+        marker = b""
         owner = self._keep_copy(marker, _MARKER_TYPE) if saved is not None else None
         if owner is None and before is _UNREAD:
             return Capture("", started=started)  # ni marqueur ni contenu d'avant pour comparer

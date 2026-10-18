@@ -63,6 +63,15 @@ Recheck = Callable[[str], list[Issue]]  # phrase -> remarques trouvées (moteur 
 EXPRESS_SLOW_TIMEOUT = 8.0
 
 
+def _slow_timeout(base: float | None, text: str) -> float | None:
+    """Attente du moteur lent, plus longue pour un long texte : une page (3 800 caractères) prend souvent plus de
+    8 s au serveur public de LanguageTool, et retombait sur Grammalecte seul. 2 s par millier de caractères, au
+    plus 4 fois l'attente de base."""
+    if base is None:
+        return None
+    return min(base * 4, base + 2.0 * len(text) / 1000)
+
+
 def _spawn(target, *args, name: str) -> threading.Thread:
     thread = threading.Thread(target=target, args=args, name=name, daemon=True)
     thread.start()
@@ -313,6 +322,12 @@ class Checker:
                 or solo_context_ok(text, issue, agreed=issue.agreed))
         if solo:
             mark_solo_confident(text, merged, recheck)
+        for issue in merged:
+            if issue.confident and rule_family(issue.rule_id).startswith("gn_") and any(
+                    o is not issue and o.end <= issue.start and not text[o.end:issue.start].strip() for o in merged):
+                # « Il ces levé » -> « levés » s'accorde avec « ces », que le même moteur déclare faux (« s'est ») :
+                # un accord sur un mot douteux n'est pas sûr.
+                issue.confident = False
         return merged
 
     def _clean(self, text: str, issue: Issue, strict: bool, ignored_rules: set[str]) -> Issue | None:
@@ -407,7 +422,7 @@ class Checker:
         current = text
         local = [e.name for e in self.active_engines(current, language) if e.name in _LOCAL_ENGINES]
         can_go_alone = any(e.available()[0] for e in self.engines if e.name in local)
-        result = self.check(current, language, timeout=slow_timeout if can_go_alone else None)
+        result = self.check(current, language, timeout=_slow_timeout(slow_timeout, current) if can_go_alone else None)
         first_statuses = result.statuses
         # Remarques de la 1re passe, recalées après chaque correction : qui proposait quoi, et où. Une
         # correction proposée par le seul moteur lent puis confirmée par le moteur local devient sûre ; une
@@ -719,7 +734,7 @@ _SOLO_RULES = frozenset({
     # participes passés (voir aussi solo_context_ok)
     "ppas_avoir", "ppas_être_confusion", "ppas_sujet_être_accord_pluriel", "ppas_ne_me_te_se_être",
     "ppas_3pl_mas_verbe_état", "ppas_3pl_fem_verbe_état", "ppas_3sg_fem_verbe_état", "ppas_nous_verbe_état",
-    "ppas_pronom_avoir", "ppas_pronom_sujet_verbe_état_verbe",
+    "ppas_pronom_avoir", "ppas_pronom_sujet_verbe_état_verbe", "ppas_n_m_t_l_avoir", "conf_sûr_sur",
 })
 # Jamais sûres, même avec l'accord des deux moteurs : le participe d'un verbe pronominal s'accorde selon
 # son complément (« nous nous sommes lavés », mais « nous nous sommes téléphoné »), ce qu'aucun ne sait voir.
@@ -806,6 +821,17 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
             return False
         m = re.search(r"\b[Ll]es\s+(\w)", text[max(0, issue.start - 80):issue.start])
         if m and m.group(1).isupper():
+            return False
+    if family == "ppas_n_m_t_l_avoir":
+        # « dont je t'ai parler » -> « parlé » ; mais « m'a poche » (pour « ma poche ») n'est pas « m'a poché » :
+        # seulement l'infinitif en -er mis pour le participe (25 bonnes sur 35 sans ce garde-fou, et les 10
+        # dégâts étaient tous de ce genre).
+        word = text[issue.start:issue.end]
+        if not (word.lower().endswith("er") and first.lower() == word.lower()[:-2] + "é"):
+            return False
+    if family == "conf_sûr_sur":
+        # « Je suis sur que tu vas réussir », « sur de moi » -> « sûr » ; jamais « sur le toit ».
+        if not re.match(r"\s+(?:que\b|qu['’]|de\b|d['’])", text[issue.end:issue.end + 6], re.IGNORECASE):
             return False
     if family == "conf_c_s_verbe":
         # « Il c'est trompé » -> « s'est » ; mais « c'étais eux » (pour « c'était ») n'est pas « s'étais ».

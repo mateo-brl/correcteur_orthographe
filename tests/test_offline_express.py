@@ -51,6 +51,9 @@ FIXED = [
     ("Je n'ai pas put venir.", "Je n'ai pas pu venir."),
     ("Il c'est trompé de route.", "Il s'est trompé de route."),
     ("Nous avont fini le travail.", "Nous avons fini le travail."),
+    # Rapport de test de la 0.1.8.
+    ("Je suis sur que tu vas réussir.", "Je suis sûr que tu vas réussir."),
+    ("C'est la maison dont je t'ai parler.", "C'est la maison dont je t'ai parlé."),
 ]
 
 UNTOUCHED = [
@@ -76,6 +79,9 @@ UNTOUCHED = [
     "Ils se sont téléphoné hier soir.",    # « se » complément indirect : pas d'accord (test de la 0.1.7)
     "Il faut que je fait mes courses.",    # « fasse », pas « fais »
     "Patrick a l'air sombre.",
+    "Il ces levé tôt ce matin.",           # « levés » s'accorderait avec « ces », lui-même faux (« s'est »)
+    "Je suis sur la route.",
+    "Il est sur le point de partir.",
     "Les Échos a publié un article.",
     "Rendez-vous place du 8 Mai 1945.",
     "Ma mère et ma sœur sont partit.",    # « parties » : le masculin par défaut serait faux
