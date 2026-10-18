@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from PySide6.QtCore import QLibraryInfo, QObject, Qt, QTimer, QTranslator, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QSystemTrayIcon
 
 from correcteur import APP_NAME, __version__
@@ -279,7 +279,7 @@ class Controller(QObject):
             self.tray = QSystemTrayIcon(self.icon, self)
             self.tray.setToolTip(f"{APP_NAME} {__version__}")
             self.tray.activated.connect(self._tray_activated)
-            self._build_tray_menu()
+            self._create_tray_menu()
             self.tray.show()
 
         self.ipc = IpcServer(lambda cmd, data: self.command.emit(cmd, data))
@@ -362,26 +362,34 @@ class Controller(QObject):
         """Libellé d'une entrée du menu, avec son raccourci seulement s'il fonctionne réellement."""
         return f"{label}\t{hotkey_display(combo)}" if self._hotkey_works(combo, gnome_id) else label
 
-    def _build_tray_menu(self) -> None:
-        g = self.settings.general
-        verify_id, express_id = autostart.GNOME_SHORTCUT_IDS
+    def _create_tray_menu(self) -> None:
+        """Menu de l'icône, créé une seule fois. Le remplacer (setContextMenu puis destruction de l'ancien)
+        pendant que le bureau le lit par D-Bus (icône AppIndicator de GNOME) faisait planter l'application au
+        démarrage, où il changeait deux fois en une seconde : on ne change plus que ses libellés."""
         menu = QMenu()
-        check = QAction(self._menu_label("Vérifier la sélection", g.hotkey_check, verify_id), menu)
-        check.triggered.connect(lambda: self.command.emit("verifier-selection", ""))
-        menu.addAction(check)
-        express = QAction(self._menu_label("Correction express", g.hotkey_autocorrect, express_id), menu)
-        express.triggered.connect(lambda: self.command.emit("correction-express", ""))
-        menu.addAction(express)
+        self._check_action = menu.addAction("Vérifier la sélection",
+                                            lambda: self.command.emit("verifier-selection", ""))
+        self._express_action = menu.addAction("Correction express",
+                                              lambda: self.command.emit("correction-express", ""))
         menu.addAction("Vérifier le presse-papiers", lambda: self.command.emit("presse-papiers", ""))
         menu.addAction("Ouvrir le correcteur", lambda: self.command.emit("ouvrir", ""))
         menu.addSeparator()
         menu.addAction("Paramètres…", self.open_settings)
         menu.addAction("Quitter", self.quit)
-        old = self.tray.contextMenu()
-        self.tray.setContextMenu(menu)
         self._tray_menu = menu
-        if old is not None:
-            old.deleteLater()
+        self._build_tray_menu()
+        self.tray.setContextMenu(menu)
+
+    def _build_tray_menu(self) -> None:
+        """Libellés des raccourcis dans le menu de l'icône (voir _menu_label)."""
+        g = self.settings.general
+        verify_id, express_id = autostart.GNOME_SHORTCUT_IDS
+        for action, label, combo, gnome_id in ((self._check_action, "Vérifier la sélection", g.hotkey_check, verify_id),
+                                               (self._express_action, "Correction express", g.hotkey_autocorrect,
+                                                express_id)):
+            text = self._menu_label(label, combo, gnome_id)
+            if action.text() != text:
+                action.setText(text)
 
     def _tray_activated(self, reason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):

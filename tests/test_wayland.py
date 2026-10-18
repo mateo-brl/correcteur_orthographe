@@ -121,8 +121,11 @@ class Desktop:
     def set_formats(self, formats: dict[str, bytes], owner=None) -> None:
         self._take(owner)
         self.formats = dict(formats)
-        if "text/plain;charset=utf-8" in formats:
-            self.history.append(formats["text/plain;charset=utf-8"].decode("utf-8"))
+        # Comme Clipboard Indicator 71 : il demande du texte, et wl-copy répond avec ses données quel que soit le
+        # format offert. Tout contenu non vide entre dans l'historique (le marqueur y entrait en 0.1.8).
+        data = formats.get("text/plain;charset=utf-8", next(iter(formats.values()), b""))
+        if data:
+            self.history.append(data.decode("utf-8", "replace"))
 
     def _take(self, owner) -> None:
         if self.owner is not None and self.owner is not owner:

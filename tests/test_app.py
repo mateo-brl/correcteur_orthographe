@@ -471,3 +471,26 @@ def test_application_logs_its_normal_end(tmp_path):
     journal = (tmp_path / "data" / "correcteur.log").read_text(encoding="utf-8")
     assert "démarré" in journal and journal.rstrip().endswith("arrêté normalement.")
     assert "démarré (processus" in (tmp_path / "data" / "plantages.log").read_text(encoding="utf-8")
+
+
+def test_tray_menu_is_created_once_and_relabelled(make_controller):
+    """Remplacer le menu de l'icône pendant que le bureau le lit (AppIndicator, par D-Bus) faisait planter
+    l'application au démarrage : il est créé une fois, seuls ses libellés changent."""
+    controller, _ = make_controller()
+
+    class Tray:
+        menus = []
+
+        def setContextMenu(self, menu):
+            self.menus.append(menu)
+
+    controller.tray = Tray()
+    controller._hotkeys_active, controller._hotkey_failures = True, []
+    controller._create_tray_menu()
+    menu = controller._tray_menu
+    assert controller._check_action.text() == "Vérifier la sélection\tCtrl+Alt+C"
+    controller._hotkey_failures = [controller.settings.general.hotkey_check]
+    controller._build_tray_menu()
+    controller._build_tray_menu()
+    assert controller._check_action.text() == "Vérifier la sélection"
+    assert Tray.menus == [menu] and controller._tray_menu is menu
