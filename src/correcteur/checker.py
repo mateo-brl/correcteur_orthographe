@@ -248,12 +248,18 @@ class Checker:
         offline = self.post_process(text, {local[0]: raw[local[0]]}, True, recheck)
         settled = {_corrected(text, o) for o in offline if o.confident and o.replacements}
         for issue in partial:
-            issue.confident = _corrected(text, issue) in settled
+            # La suggestion retenue hors ligne n'est pas toujours la première de la remarque fusionnée (« Il et
+            # sorti » : « ait, est, hait » pour Grammalecte, « est » pour LanguageTool) : elle passe en tête.
+            hit = next((r for r in issue.replacements if text[:issue.start] + r + text[issue.end:] in settled), None)
+            if hit is not None and hit != issue.replacements[0]:
+                issue.replacements = [hit] + [r for r in issue.replacements if r != hit]
+            issue.confident = hit is not None
         if not contradicted:
             return
         # La correction de Grammalecte l'emporte s'il en est sûr hors ligne et s'il resignale aussitôt celle de
         # LanguageTool appliquée (« Tu a raison » : « a » -> « as »). Si les deux passent sa contre-épreuve, ce
-        # sont deux lectures (« Les enfants on joué » : « on joue » ou « ont joué ») : l'utilisateur choisit.
+        # sont deux lectures et l'utilisateur choisit (« Les enfants on joué » : « on joue » pour Grammalecte,
+        # « ont joué » pour LanguageTool ; la règle du correcteur tranche maintenant pour « ont »).
         trials = _Trials(text, issues, recheck)
         for issue in contradicted:
             remote = [o for name, found in raw.items() if name != local[0] for o in found
@@ -266,10 +272,16 @@ class Checker:
                 if first is not None:
                     issue.replacements = [first] + [r for r in issue.replacements if r != first]
                 continue
-            if _corrected(text, issue) not in settled:
+            hit = next((r for r in issue.replacements if text[:issue.start] + r + text[issue.end:] in settled), None)
+            if hit is None:
                 continue
+            if hit != issue.replacements[0]:
+                issue.replacements = [hit] + [r for r in issue.replacements if r != hit]
+            # Sûre si LanguageTool propose la même (« Il et sorti » : « est », 2e suggestion de Grammalecte, qu'il
+            # retient hors ligne), ou si Grammalecte resignale aussitôt la sienne.
+            mine = _corrected(text, issue)
             issue.confident = bool(remote) and all(
-                _corrected(text, o) != _corrected(text, issue) and trials._clean_fix(o) is False for o in remote)
+                _corrected(text, o) == mine or trials._clean_fix(o) is False for o in remote)
 
     def _confirm_remote(self, text: str, raw: dict[str, list[Issue]], issues: list[Issue], language: str) -> None:
         """LanguageTool seul propose une correction, et Grammalecte signale juste à côté une faute qu'il corrige

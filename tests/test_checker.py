@@ -773,3 +773,17 @@ def test_rules_veto_also_drops_languagetool_remark(home):
     assert [text[i.start:i.end] for i in found] == ["grippe"]
     assert c.autocorrect(text)[0] in (text, "Je pense que le chat a la grippes.")
     c.close()
+
+
+def test_offline_choice_goes_first_when_languagetool_proposes_it(home):
+    """« Il et sorti » : Grammalecte propose « ait, est, hait », LanguageTool « est ». Hors ligne, Grammalecte retient
+    « est » (« et » mis pour « est » après un pronom) : en ligne, « est » passe en tête et s'applique."""
+    text = "Il et sorti d'affaire."
+    s = Settings()
+    g = lambda t: present([word_issue(t, "et", ["ait", "est", "hait"], "grammalecte", "g2__conf_il_non_verbe__b1_a3_1")])
+    lt = lambda t: present([word_issue(t, "et", ["est"], "languagetool", "CONFUSION_EST_ET")])
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "grammalecte", g), FakeEngine(s, "languagetool", lt)])
+    [issue] = c.check(text).issues
+    assert issue.replacements[0] == "est" and issue.confident
+    assert c.autocorrect(text)[0] == "Il est sorti d'affaire."
+    c.close()
