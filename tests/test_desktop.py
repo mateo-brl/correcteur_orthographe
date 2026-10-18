@@ -181,6 +181,39 @@ def test_capture_ignores_a_selection_made_in_another_window(qapp, home):
         other_application.stop()
 
 
+# Fenêtre qui fait comme un terminal : Ctrl+C n'y copie pas, il interrompt le programme (« ^C »).
+_TERMINAL = (
+    "import sys\nfrom PySide6.QtCore import Qt, QTimer\nfrom PySide6.QtWidgets import QApplication, QPlainTextEdit\n"
+    "class Terminal(QPlainTextEdit):\n"
+    "    def keyPressEvent(self, event):\n"
+    "        if event.key() == Qt.Key.Key_C and event.modifiers() & Qt.KeyboardModifier.ControlModifier:\n"
+    "            print('^C', flush=True)\n"
+    "            return\n"
+    "        super().keyPressEvent(event)\n"
+    "a = QApplication([])\nt = Terminal()\nt.setWindowTitle('Terminal')\nt.setPlainText(sys.argv[1])\nt.show()\n"
+    "t.selectAll()\nt.activateWindow()\nt.raise_()\nt.setFocus()\nprint('PRET', flush=True)\n"
+    "QTimer.singleShot(3000, a.quit)\na.exec()\n"
+)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Ctrl+Inser : Linux")
+def test_capture_never_interrupts_a_terminal(qapp, home):
+    """Dans GNOME Terminal, chaque Ctrl+Alt+X envoyait Ctrl+C au programme en cours : la copie est Ctrl+Inser."""
+    from correcteur.platform.bridge import create_bridge
+
+    terminal = subprocess.Popen([sys.executable, "-c", _TERMINAL, "ls -l"], stdout=subprocess.PIPE, text=True)
+    try:
+        assert terminal.stdout.readline().strip() == "PRET"
+        time.sleep(0.8)
+        bridge = create_bridge(lambda ms, fn: fn())
+        capture = bridge.capture()
+        bridge.release(capture)
+        assert capture.text == "ls -l" and capture.from_selection
+    finally:
+        out = terminal.communicate(timeout=10)[0]
+    assert "^C" not in out
+
+
 def test_replace_after_another_app_copied(qapp, home):
     """Cas réel : l'utilisateur a copié quelque chose dans une autre application,
     et le correcteur tourne depuis longtemps avec des fenêtres ouvertes."""

@@ -101,6 +101,19 @@ def test_dictionary_in_utf16_is_read_and_rewritten_in_utf8(home, encoding):
     assert PersonalDictionary().words() == ["café", "nouveau", "Zorglub", "œuvrette"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="droits POSIX")
+def test_dictionary_open_to_others_is_made_private_on_load(home):
+    """Un dictionnaire.txt créé en 664 par la 0.1.6 le restait tant qu'aucun mot n'était ajouté."""
+    path = config_dir() / "dictionnaire.txt"
+    path.write_text("Zorglub\n", encoding="utf-8")
+    os.chmod(path, 0o664)
+    assert "Zorglub" in PersonalDictionary()
+    assert (os.stat(path).st_mode & 0o777) == 0o600
+    os.chmod(path, 0o400)  # déjà fermé aux autres : pas touché
+    PersonalDictionary()
+    assert (os.stat(path).st_mode & 0o777) == 0o400
+
+
 def test_unreadable_dictionary_is_neither_fatal_nor_overwritten(home):
     (config_dir() / "dictionnaire.txt").mkdir()  # illisible comme fichier
     d = PersonalDictionary()
