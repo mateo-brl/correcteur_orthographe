@@ -115,3 +115,24 @@ def test_chunks_never_split_a_word():
     chunks = list(chunk_text(text, 1000))
     assert "".join(c for _, c in chunks) == text
     assert all(c.strip(" ").split(" ")[0] == "mot" and c.rstrip(" ").endswith("mot") for _, c in chunks)
+
+
+def test_subject_agreement_for_nous_and_vous():
+    from correcteur.textutils import agree_with_subject, one_edit, subject_ending
+
+    text = "Nous avont fini. Ils nous avont dit. Et vous avé raison."
+    assert subject_ending(text, text.index("avont")) == "ons"
+    assert subject_ending(text, text.index("avont dit")) is None  # « nous » complément de « Ils »
+    assert subject_ending(text, text.index("avé")) == "ez"
+    assert agree_with_subject(text, 5, ("amont", "avant", "avons")) == ("avons", "amont", "avant")
+    assert agree_with_subject(text, 5, ("avions", "avons")) == ("avions", "avons")  # deux candidats : on n'y touche pas
+    assert one_edit("avont", "avons") and one_edit("put", "pu") and one_edit("ecrie", "ecire")
+    assert not one_edit("avont", "amont ") and not one_edit("abc", "abc")
+
+
+def test_describe_changes_counts_spaces():
+    from correcteur.textutils import describe_changes
+
+    before, after = "Je vais a la plage , et ecole est fermée.", "Je vais à la plage, et école est fermée."
+    assert describe_changes(before, after) == "a → à, ecole → école, 1 espace corrigée"
+    assert describe_changes("le  mail", "le mail") == ""  # seules, les espaces n'ont rien à montrer

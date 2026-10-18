@@ -614,3 +614,42 @@ def test_garbage_is_collected_in_the_interface_thread(qapp):
     finally:
         gc.callbacks.remove(spy)
         gc.disable()  # stop() n'a pas été appelé : la fixture garde la main
+
+
+def test_hotkey_fields_let_tab_move_the_focus(qapp, home):
+    """Tab et Maj+Tab étaient enregistrés comme raccourci : impossible de sortir du champ au clavier."""
+    from PySide6.QtTest import QTest
+
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    dialog = SettingsDialog(settings, FakeController(settings, PersonalDictionary()))
+    dialog.show()
+    dialog.hk_express.setFocus()
+    before = dialog.hk_express.keySequence().toString()
+    QTest.keyClick(dialog.hk_express, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+    assert dialog.hk_express.keySequence().toString() == before
+    assert not dialog.hk_express.hasFocus()
+    dialog.close()
+
+
+def test_shift_f10_opens_the_menu_of_the_word(qapp, window, monkeypatch):
+    from PySide6.QtTest import QTest
+
+    open_and_wait(qapp, window)
+    opened = []
+    monkeypatch.setattr(type(window.editor), "contextMenuEvent", lambda self, event: opened.append(event.reason()))
+    QTest.keyClick(window.editor, Qt.Key.Key_F10, Qt.KeyboardModifier.ShiftModifier)
+    from PySide6.QtGui import QContextMenuEvent
+
+    assert opened == [QContextMenuEvent.Reason.Keyboard]
+
+
+def test_english_text_checked_in_french_explains_the_underlines(qapp, make_window):
+    english = "I have a cat and the cat is at the cafe with my friends."
+    from test_checker import present, word_issue
+
+    window = make_window(grammalecte=dict(found=lambda t: present([word_issue(t, "cafe", ["café"], "grammalecte")])))
+    window.open_with(english)
+    assert wait_until(qapp, lambda: window._ready)
+    assert "ne semble pas être en français" in window.auto_note.text() and window.auto_note.isVisible()
