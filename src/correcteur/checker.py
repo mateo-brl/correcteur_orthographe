@@ -529,6 +529,32 @@ def _remote_homophone_ok(text: str, issue: Issue) -> bool:
     return True
 
 
+_PARTICIPLE_AFTER_RE = re.compile(r"\s+\w+(?:é|ée|és|ées|i|ie|is|ies|it|u|ue|us|ues)\b", re.IGNORECASE)
+_DETERMINER_AFTER_RE = re.compile(r"\s+(?:[ld]['’]|(?:le|la|les|un|une|des|du|mon|ma|mes|ton|ta|tes|son|sa|ses|notre|nos|"
+                                  r"votre|vos|leur|leurs|ce|cet|cette|ces)\b)", re.IGNORECASE)
+# « Quelque soit le temps » : le déterminant qui suit dit le genre (« Quel que soit », « Quelle que soit la météo »).
+_QUEL_QUE_NEXT_RE = re.compile(r"\s*(?:soi(?:t|ent)\s+)?(\w+)\b", re.IGNORECASE)
+_MASCULINE_DETERMINERS = frozenset("le un ce cet mon ton son notre votre leur".split())
+_FEMININE_DETERMINERS = frozenset("la une cette ma ta sa".split())
+
+
+def _solo_pick(text: str, issue: Issue) -> str | None:
+    """Parmi plusieurs suggestions, celle que le contexte impose, quand il l'impose : l'auxiliaire devant un
+    participe (« Je vous est envoyé » -> « ai », pas « aie » ni « suis »), le genre du déterminant qui suit
+    (« Quelque soit le temps » -> « Quel que soit »)."""
+    family = rule_family(issue.rule_id)
+    first = issue.replacements[0]
+    if family in ("conj_je", "conj_tu") and first in ("ai", "as") and _PARTICIPLE_AFTER_RE.match(text, issue.end):
+        return first
+    if family == "conf_quel_que_soit":
+        m = _QUEL_QUE_NEXT_RE.match(text, issue.end)
+        det = m.group(1).lower() if m else ""
+        want = "quel que" if det in _MASCULINE_DETERMINERS else "quelle que" if det in _FEMININE_DETERMINERS else None
+        if want:
+            return next((r for r in issue.replacements if r.lower() == want or r.lower().startswith(want + " ")), None)
+    return None
+
+
 _NEXT_TO_RE = re.compile(r"[^\w.!?…\n]*(?:[\w'’-]+[^\w.!?…\n]+)?")
 
 
@@ -675,6 +701,9 @@ def is_confident(text: str, issue: Issue) -> bool:
     - les deux moteurs proposent le même mot et il y a très peu de candidats
       (sinon, "fesait" deviendrait "fessait" au lieu de "faisait") ;
     - c'est une correction de ponctuation/espaces à suggestion unique."""
+    if (issue.replacements and rule_family(issue.rule_id) == "eleu_élisions_manquantes"
+            and text[issue.start:issue.end].strip().lower() == "si" and re.match(r"ils?\b", text[issue.end:issue.end + 4], re.I)):
+        return issue.replacements[0].lower() in ("s'", "s’")  # « si il » -> « s'il » : élision obligatoire, pas de style
     if not issue.replacements or issue.category is Category.STYLE or never_sure(issue):
         return False
     original = text[issue.start:issue.end]
@@ -735,6 +764,7 @@ _SOLO_RULES = frozenset({
     "ppas_avoir", "ppas_être_confusion", "ppas_sujet_être_accord_pluriel", "ppas_ne_me_te_se_être",
     "ppas_3pl_mas_verbe_état", "ppas_3pl_fem_verbe_état", "ppas_3sg_fem_verbe_état", "ppas_nous_verbe_état",
     "ppas_pronom_avoir", "ppas_pronom_sujet_verbe_état_verbe", "ppas_n_m_t_l_avoir", "conf_sûr_sur",
+    "conf_ont_on", "ppas_nous_vous_avoir", "conf_quel_que_soit",
 })
 # Jamais sûres, même avec l'accord des deux moteurs : le participe d'un verbe pronominal s'accorde selon
 # son complément (« nous nous sommes lavés », mais « nous nous sommes téléphoné »), ce qu'aucun ne sait voir.
@@ -822,6 +852,15 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         m = re.search(r"\b[Ll]es\s+(\w)", text[max(0, issue.start - 80):issue.start])
         if m and m.group(1).isupper():
             return False
+    if family == "conf_ont_on" and not _PARTICIPLE_AFTER_RE.match(text, issue.end):
+        # « C'est eux qui on gagné » -> « ont » ; pas « à Paris on ce les procure » (« se » mal écrit).
+        return False
+    if family == "ppas_nous_vous_avoir":
+        # « Vous avez finis vos devoirs » -> « fini » : un complément d'objet suit, le participe est invariable.
+        # Sans lui, l'accord peut être juste (« la galette que nous avons mangée », « nous avons partie gagnée »).
+        word = text[issue.start:issue.end].lower()
+        if not (len(first) < len(word) and word.startswith(first.lower()) and _DETERMINER_AFTER_RE.match(text, issue.end)):
+            return False
     if family == "ppas_n_m_t_l_avoir":
         # « dont je t'ai parler » -> « parlé » ; mais « m'a poche » (pour « ma poche ») n'est pas « m'a poché » :
         # seulement l'infinitif en -er mis pour le participe (25 bonnes sur 35 sans ce garde-fou, et les 10
@@ -857,15 +896,21 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
     return True
 
 
-def solo_candidate(issue: Issue) -> bool:
-    """Correction de grammaire qu'un moteur seul peut appliquer : une seule suggestion, ou
-    la même au masculin et au féminin (« allé / allée » : la première, comme le ferait un
-    correcteur humain qui ne connaît pas l'auteur)."""
+def solo_candidate(issue: Issue, text: str | None = None) -> bool:
+    """Correction de grammaire qu'un moteur seul peut appliquer : une seule suggestion, la même au masculin
+    et au féminin (« allé / allée » : la première, comme le ferait un correcteur humain qui ne connaît pas
+    l'auteur), ou celle que le contexte impose (voir _solo_pick, qui la met en tête)."""
     if issue.confident or issue.category is not Category.GRAMMAR or not issue.replacements:
         return False
     if not solo_rule(issue):
         return False
     first = issue.replacements[0]
+    if text is not None and len(issue.replacements) > 1:
+        pick = _solo_pick(text, issue)
+        if pick is not None:
+            if pick != first:
+                issue.replacements = [pick] + [r for r in issue.replacements if r != pick]
+            return True
     feminine = first[:-1] + "es" if first.endswith("s") else first + "e"
     return all(r == feminine for r in issue.replacements[1:])
 
@@ -887,7 +932,7 @@ def mark_solo_confident(text: str, issues: list[Issue], recheck: Recheck | None 
     ce sont deux lectures possibles ("sont bon") : aucune n'est appliquée."""
     trials = _Trials(text, issues, recheck) if recheck is not None else None
     for issue in issues:
-        if not solo_candidate(issue) or not solo_context_ok(text, issue):
+        if not solo_candidate(issue, text) or not solo_context_ok(text, issue):
             continue
         neighbours = [
             other for other in issues
