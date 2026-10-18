@@ -204,7 +204,7 @@ moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
   « parmis ») ont leur correction dans le moteur du correcteur ; pour les autres, la bonne suggestion n'est pas
   toujours en tête.
 - Sans LanguageTool, certaines fautes restent signalées sans être corrigées d'office, faute d'indice pour choisir :
-  « Il vont » (« Il va » ou « Ils vont » ?), « Quels changement » (« Quel changement » ou « Quels changements » ?).
+  « Je les ai vu » (« vus » ou « vues » ?), « Quels changement » (« Quel changement » ou « Quels changements » ?).
 - Le mode LanguageTool en ligne est limité à environ 20 vérifications par minute.
 
 ## Moteurs et confidentialité

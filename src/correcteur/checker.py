@@ -549,6 +549,8 @@ def _solo_pick(text: str, issue: Issue) -> str | None:
     first = issue.replacements[0]
     if family in ("conj_je", "conj_tu") and first in ("ai", "as") and _PARTICIPLE_AFTER_RE.match(text, issue.end):
         return first
+    if family.endswith("_non_verbe") and text[issue.start:issue.end].lower() == "et" and "est" in issue.replacements:
+        return "est"  # « Il et sorti » : « est », pas « ait » ni « hait »
     if family.startswith("conj_") or family.endswith("_non_verbe"):
         # « Je fini » : « finis » ou « finissais » ? Celle qui se prononce comme ce qui est écrit.
         same = [r for r in issue.replacements if same_sound(text[issue.start:issue.end], r)]
@@ -727,6 +729,38 @@ def _accent_count(word: str) -> int:
     return sum(1 for ch in word if strip_accents(ch) != ch)
 
 
+# Graphies sans trait d'union aussi justes : « Pierre Louis » (un prénom s'écrit comme la personne l'écrit),
+# « château fort ».
+_LOOSE_HYPHENS = frozenset({"château fort", "châteaux forts"})
+
+
+def _letters_only(s: str) -> str:
+    return re.sub(r"[\s'’-]+", "", strip_accents(s)).casefold()
+
+
+# Consonnes doublées que l'on oublie (ou ajoute) souvent, à une place connue. Pas n'importe quel doublement :
+# « fesait » -> « fessait » (de « fesser ») en serait un, alors que la faute est « faisait ».
+_DOUBLINGS = (
+    # Pas devant un « e » final : « appele » est « appelle » ou « appelé », « questione » « questionne » ou
+    # « questionné ».
+    (re.compile(r"ion(?=(?:el|elle|els|elles|aire|aires|er|é|ée|és|ées|ant|ement|ons|ez|ais|ait)$)"), "ionn"),
+    (re.compile(r"(?<=[^aeiouyél])el(?=e(?:rai|ras|ra|rons|rez|ront|rais|rait|rions|riez|raient)$)"), "ell"),
+    (re.compile(r"(?<=[^aeiouyét])et(?=e(?:rai|ras|ra|rons|rez|ront|rais|rait|rions|riez|raient)$)"), "ett"),
+    (re.compile(r"addr"), "adr"),
+    (re.compile(r"rrir$"), "rir"),
+)
+
+
+def _known_doublings(word: str) -> set[str]:
+    """« professionel » -> « professionnel », « appelerai » -> « appellerai », « jeterai » -> « jetterai »,
+    « addresse » -> « adresse », « courrir » -> « courir »."""
+    found = set()
+    for pattern, repl in _DOUBLINGS:
+        for m in pattern.finditer(word):
+            found.add(word[:m.start()] + repl + word[m.end():])
+    return found
+
+
 def is_confident(text: str, issue: Issue) -> bool:
     """Une correction est "sûre" (appliquée par la correction express) si :
     - c'est une faute d'accent ou de majuscule avec une suggestion évidente ;
@@ -739,10 +773,19 @@ def is_confident(text: str, issue: Issue) -> bool:
         return issue.replacements[0].lower() in ("s'", "s’")  # « si il » -> « s'il » : élision obligatoire, pas de style
     if not issue.replacements or issue.category is Category.STYLE or never_sure(issue):
         return False
-    if issue.rule_id == "corr_orthographe":
-        return True  # faute d'orthographe fréquente, à correction unique (engines/regles.py)
+    if issue.rule_id.startswith("corr_") and issue.category is not Category.GRAMMAR:
+        return True  # règle du correcteur (engines/regles.py) : orthographe fréquente, « t » de liaison
     original = text[issue.start:issue.end]
     first = issue.replacements[0]
+    if (rule_family(issue.rule_id).startswith("tu_") and len(issue.replacements) == 1
+            and rule_family(issue.rule_id) != "tu_prénoms" and original.lower() not in _LOOSE_HYPHENS):
+        # Locution figée à trait d'union : « Est ce que » -> « Est-ce que », « la bas » -> « là-bas »,
+        # « au dessus » -> « au-dessus », « eux même » -> « eux-mêmes ». Seuls les espaces, les traits d'union
+        # et les accents changent (et le « s » de « mêmes » après un pluriel).
+        return _letters_only(original) == _letters_only(first) or (
+            original.lower().endswith("même") and _letters_only(first) == _letters_only(original) + "s")
+    if issue.category is Category.SPELLING and first in _known_doublings(original):
+        return not (_capitalized_mid_sentence(text, issue.start) or _foreign_neighbour(text, issue))
     if issue.category is Category.SPELLING:
         if first.casefold() == original.casefold() and _next_to_number(text, issue):
             return False  # « place du 8 Mai 1945 », « rue du 14 Juillet » : un nom propre, pas une date
@@ -816,6 +859,16 @@ _SOLO_RULES = frozenset({
     "conf_je_non_verbe", "conf_il_non_verbe", "conf_on_non_verbe", "conf_quelle_qu_elle", "conf_en_train_entrain",
     "conf_censé_sensé", "conf_quand_même", "conf_en_fait", "conf_davantage_d_avantages", "ppas_avoir_dû_vinfi",
     "conf_peut_peux_peu2", "conf_det_nom_où_pronom",
+    # Vérifiées sur leurs phrases voisines justes (« C'est difficile, voir impossible » oui, « Il faut le voir,
+    # voir le croire » non) : « Temps pis », « tout a fait », « voir » pour « voire », « Elle s'est faite
+    # avoir », « C'est moi qui a », « La plupart des gens pense », « un espèce », « Mes amis m'ont aidés ».
+    "conf_tant_temps_tan_1", "conf_tout_à_fait", "conf_voir_voire", "ppas_s_être_fait_infi", "conj_moi_qui",
+    "conj_toi_qui", "conj_d_aucuns_la_plupart", "gn_un_1m", "ppas_m_t_avoir", "conf_tout_à_coup", "conf_tout_à_l_heure",
+    # Mesurées sur les injections (ppas_3sg_mas_verbe_état : 28 sur 28) ou sans phrase voisine à risque : « Il si
+    # connaît », « Ils se sont rendus compte », « deux milles euros », « dés demain » (voir solo_context_ok).
+    "conf_s_y_si", "ppas_s_être_rendu_compte", "gn_mille", "ppas_3sg_mas_verbe_état", "conf_dès_des_dés",
+    # « d'y allé » -> « aller », « Est-se » -> « Est-ce » (voir solo_context_ok).
+    "infi_de_verbe", "inte_verbes_composés_interrogatifs",
 })
 # Jamais sûres, même avec l'accord des deux moteurs : le participe d'un verbe pronominal s'accorde selon
 # son complément (« nous nous sommes lavés », mais « nous nous sommes téléphoné »), ce qu'aucun ne sait voir.
@@ -826,6 +879,7 @@ _RULE_FAMILY_RE = re.compile(r"^gv?\d+__(.+?)(?:__b\d+_a\d+(?:_\d+)?)?$")
 # (« à manger »), « Son seul plaisir est manger », « Il a appris a nager ». Sauf juste après un sujet.
 _PARTICIPLE_FAMILIES = frozenset({"ppas_avoir", "ppas_être_confusion", "ppas_ne_me_te_se_être"})
 _CONFUSABLE_AUXILIARIES = frozenset({"a", "est"})
+_OBJECT_PRONOUNS = frozenset({"les", "le", "la", "lui", "leur", "nous", "vous", "en"})
 _SUBJECTS = frozenset({"il", "elle", "on", "ça", "cela", "qui", "lui", "tout", "rien", "personne"})
 _WORD_BEFORE_RE = re.compile(r"([\w'’-]+)\W*$")
 # Verbes pronominaux dont le pronom est complément indirect : leur participe ne s'accorde pas (« Ils se sont
@@ -843,7 +897,7 @@ _QUE_SUBJECT_RE = re.compile(
     re.IGNORECASE)
 # « Ils on l'air contents » : « on » est « ont », pas le sujet d'un verbe mal écrit (« aire »).
 _ON_NOT_SUBJECT_RE = re.compile(r"\b(?:ils|elles|eux|nous|vous|qui|(?:les|des|mes|tes|ses|nos|vos|leurs|ces)\s+[\w-]+)"
-                                r"\s+on\s+(?:[\w'’-]+\s+)?$", re.IGNORECASE)
+                                r"\s+on\s+(?:\S+\s+|\S*['’])?$", re.IGNORECASE)
 # « Je voudrais d'avantage de temps » -> « davantage » ; mais « pas d'avantage fiscal », « toutes sortes
 # d'avantages » : le nom « avantage ».
 _NOUN_AVANTAGE_BEFORE = frozenset("""pas point plus jamais guère aucun sans peu beaucoup trop assez autant moins tant
@@ -868,7 +922,12 @@ def solo_rule(issue: Issue) -> bool:
     """Moteur seul : Grammalecte n'est cru que pour les familles mesurées ; LanguageTool seul (texte anglais,
     Grammalecte désactivé) garde la règle d'avant, une suggestion unique sans voisine."""
     family = rule_family(issue.rule_id)
-    return issue.source != "grammalecte" or family in _SOLO_RULES or family.startswith("corr_")
+    # imp_union_* : trait d'union de l'impératif (« Dis moi » -> « Dis-moi », « Va y » -> « Vas-y ») ; Grammalecte
+    # ne le propose qu'en tête de phrase, jamais devant un article (« Prends la porte »).
+    # vmode_…_subjonctif : subjonctif après un déclencheur que Grammalecte reconnaît (« veiller à ce que », « bien
+    # que », « non que ») ; toutes à 100 % sur les injections, peu nombreuses chacune.
+    return (issue.source != "grammalecte" or family in _SOLO_RULES or family.startswith(("corr_", "imp_union_"))
+            or (family.startswith("vmode_") and family.endswith("_subjonctif")))
 
 
 def never_sure(issue: Issue) -> bool:
@@ -890,6 +949,8 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
     """Ce qui entoure la faute laisse-t-il une autre lecture, que Grammalecte seul ne peut pas exclure ?
     `agreed` : les deux moteurs proposent cette correction (le genre choisi n'est alors plus un hasard)."""
     family = rule_family(issue.rule_id)
+    if family.startswith("corr_"):
+        return True  # règles du correcteur : leurs garde-fous sont dans engines/regles.py
     before = _words_before(text, issue.start, 2)
     if (family.startswith("gn_") or family == "conj_les_nom") and _capitalized_mid_sentence(text, issue.start):
         return False  # « les Trail Blazers » -> « Trails », « les syndicats Force ouvrière » -> « Forcent »
@@ -911,9 +972,11 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         m = _QUE_SUBJECT_RE.search(text, max(0, issue.start - 80), issue.start)
         if m:
             prefix, before_que = (m.group(2) or "").lower(), (m.group(1) or "").lower()
-            if not (prefix in ("lors", "puis") or (not prefix and before_que in INDICATIVE_BEFORE_QUE)):
+            # « ce que tu en penses » : indicatif ; pas « à ce que » (« veiller à ce que tu viennes »).
+            what = before_que == "ce" and not re.search(r"\bà\s+ce\s+qu", text[max(0, m.start() - 4):issue.start], re.I)
+            if not (prefix in ("lors", "puis") or (not prefix and (before_que in INDICATIVE_BEFORE_QUE or what))):
                 return False
-    if family.endswith("_non_verbe") and not (same_sound(word, first) or word == "à"):
+    if family.endswith("_non_verbe") and not (same_sound(word, first) or word == "à" or (word, first) == ("et", "est")):
         # « Je m'appel » -> « appelle », « Tu à raison » -> « as » ; mais « je ni prendrai » n'est pas « je nie »
         # (« je n'y »).
         return False
@@ -924,7 +987,11 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
                 or (before and before[0] in _NOUN_AVANTAGE_BEFORE) or not _AFTER_DAVANTAGE_RE.match(text, issue.end)):
             return False
     if family in _PARTICIPLE_FAMILIES and before and before[0] in _CONFUSABLE_AUXILIARIES:
-        if len(before) < 2 or before[1] not in _SUBJECTS:
+        # Sauf juste après un sujet (« qu'il est partit ») ou un pronom complément (« Il les a prit ») ; pas
+        # « y » : « Il y a manger ».
+        prev = before[1].replace("’", "'").split("'")[-1] if len(before) > 1 else ""
+        if (prev not in _SUBJECTS and prev not in _OBJECT_PRONOUNS
+                and not (len(before) > 1 and before[1] in ("l'", "m'", "t'"))):
             return False
     if family == "ppas_ne_me_te_se_être":
         # « Se serait attaquer », « s'est être » : « se » mis pour « ce » en tête de phrase, sans sujet.
@@ -938,6 +1005,32 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         m = re.search(r"\b[Ll]es\s+(\w)", text[max(0, issue.start - 80):issue.start])
         if m and m.group(1).isupper():
             return False
+    if family == "infi_de_verbe" and (not word.endswith("é") or re.search(
+            r"\b(?:rien|ça|sa|cela|quoi|personne|chose|aucun|aucune|quelqu['’]un|autre|y\s+a-t-il|il\s+y\s+a)\s+"
+            r"(?:[\w'’-]+\s+){0,2}(?:de|d['’])\s*(?:\w+\s+)?$", text[max(0, issue.start - 40):issue.start], re.I)):
+        # « rien de changé », « qu'y a-t-il de changé ? », « je n'ai rien mangé de souillé » : « de » + participe,
+        # juste. Et seulement le participe en -é mis pour l'infinitif (pas « de m'a part » -> « avoir »).
+        return False
+    if family == "inte_verbes_composés_interrogatifs" and word != "se" and not same_sound(
+            re.sub(r"[-‐]t?$", "", word), re.sub(r"[-‐]t?$", "", first.lower())):
+        return False  # « Serai-il » : « Serait-il » plutôt que « Sera-t-il » ; seulement la forme qui sonne pareil
+    if family.startswith("imp_union_"):
+        after = text[issue.end:issue.end + 30]
+        if ((before and before[0] in ("je", "tu", "il", "elle", "on", "nous", "vous", "ils", "elles"))
+                or re.match(r"\s+\w+é\b", after) or (re.search(r"\b(?:le|la|les)$", word)
+                                                       and re.match(r"\s+(?:le|la|les|un|une|des|du|mon|ma|mes|ton|ta|tes|son"
+                                                                    r"|sa|ses|notre|nos|votre|vos|leur|leurs|ce|cet|cette|ces)\b", after))):
+            # « Nous convenons en », « Sachons nous conformé » (« conformer » : le pronom va avec l'infinitif),
+            # « Laisse la son nom » (« là »).
+            return False
+    if family == "gn_mille" and re.match(r"\s+(?:nautiques?|marins?|anglais|terrestres?|romains?)\b", text[issue.end:issue.end + 12]):
+        return False  # « dix milles nautiques » : le mille, unité de longueur, prend un « s »
+    if family == "conf_dès_des_dés" and not (word == "dés" or re.match(
+            r"\s+(?:demain|maintenant|aujourd['’]hui|lors|que\b|qu['’]|hier)", text[issue.end:issue.end + 14], re.I)):
+        return False  # « dès demain », « dès que » ; pas « des 20 heures » (une autre faute à côté, « aux lieu »)
+    if family == "conf_son_sont" and word == "sont" and re.search(r"\b(?:que|qu['’]|qui|dont)\s+(?:[\w'’-]+\s+){0,4}$",
+                                                                text[max(0, issue.start - 60):issue.start], re.IGNORECASE):
+        return False  # « Les livres que tu m'as prêtés sont super » : fin de la relative, « sont » est le verbe
     if family == "conf_ont_on" and not _PARTICIPLE_AFTER_RE.match(text, issue.end):
         # « C'est eux qui on gagné » -> « ont » ; pas « à Paris on ce les procure » (« se » mal écrit).
         return False
@@ -951,12 +1044,20 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         # « dont je t'ai parler » -> « parlé » ; mais « m'a poche » (pour « ma poche ») n'est pas « m'a poché » :
         # seulement l'infinitif en -er mis pour le participe (25 bonnes sur 35 sans ce garde-fou, et les 10
         # dégâts étaient tous de ce genre).
+        # Ou une autre forme qui se prononce comme le participe : « Je l'ai fais » -> « fait ».
         word = text[issue.start:issue.end]
-        if not (word.lower().endswith("er") and first.lower() == word.lower()[:-2] + "é"):
+        if not same_sound(word, first):
             return False
+    if family == "ppas_m_t_avoir" and (first.lower() != word[:-1] or re.search(
+            r"\bqu(?:e\s|['’])", text[max(0, issue.start - 30):issue.start], re.IGNORECASE)):
+        # « Mes amis m'ont aidés » -> « aidé » : seulement le pluriel retiré, le genre écrit reste. Pas après
+        # « que » : « Les livres que tu m'as prêtés » s'accorde avec « livres ».
+        return False
     if family == "conf_sûr_sur":
-        # « Je suis sur que tu vas réussir », « sur de moi » -> « sûr » ; jamais « sur le toit ».
-        if not re.match(r"\s+(?:que\b|qu['’]|de\b|d['’])", text[issue.end:issue.end + 6], re.IGNORECASE):
+        # « Je suis sur que tu vas réussir », « sur de moi », « Bien sur, je viens » -> « sûr » ; jamais « sur le
+        # toit », ni « posé bien sur la table ».
+        if not (re.match(r"\s+(?:que\b|qu['’]|de\b|d['’])", text[issue.end:issue.end + 6], re.IGNORECASE)
+                or (before and before[0] == "bien" and re.match(r"\s*(?:[,.!?;:…]|$)", text[issue.end:issue.end + 2]))):
             return False
     if family == "conf_c_s_verbe":
         # « Il c'est trompé » -> « s'est » ; mais « c'étais eux » (pour « c'était ») n'est pas « s'étais ».
