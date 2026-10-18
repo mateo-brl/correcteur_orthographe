@@ -73,6 +73,9 @@ UNTOUCHED = [
     "Ils nous avont dit.",                 # « nous » complément : « ont », pas « avons »
     "C'étais lui le plus jeune.",          # « C'était », pas « S'étais »
     "Elle n'a pas sont mot de passe.",     # « son », pas « été »
+    "Ils se sont téléphoné hier soir.",    # « se » complément indirect : pas d'accord (test de la 0.1.7)
+    "Il faut que je fait mes courses.",    # « fasse », pas « fais »
+    "Patrick a l'air sombre.",
     "Les Échos a publié un article.",
     "Rendez-vous place du 8 Mai 1945.",
     "Ma mère et ma sœur sont partit.",    # « parties » : le masculin par défaut serait faux

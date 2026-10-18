@@ -179,14 +179,10 @@ class CheckEditor(QPlainTextEdit):
         if issue is not None:
             self.issueClicked.emit(issue, event.globalPosition().toPoint())
 
-    def keyPressEvent(self, event) -> None:
-        if event.key() == Qt.Key.Key_F10 and event.modifiers() == Qt.KeyboardModifier.ShiftModifier:
-            # Maj+F10 ouvre le menu du mot sous le curseur, comme la touche Menu (que bien des claviers n'ont pas).
-            pos = self.cursorRect().center()
-            self.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Keyboard, pos,
-                                                    self.viewport().mapToGlobal(pos)))
-            return
-        super().keyPressEvent(event)
+    def open_menu_at_cursor(self) -> None:
+        """Menu du mot sous le curseur, comme la touche Menu (que bien des claviers n'ont pas)."""
+        pos = self.cursorRect().center()
+        self.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Keyboard, pos, self.viewport().mapToGlobal(pos)))
 
     def contextMenuEvent(self, event) -> None:
         menu = self.createStandardContextMenu()

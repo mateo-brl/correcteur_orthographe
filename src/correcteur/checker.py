@@ -242,10 +242,18 @@ class Checker:
         # sont deux lectures (« Les enfants on joué » : « on joue » ou « ont joué ») : l'utilisateur choisit.
         trials = _Trials(text, issues, recheck)
         for issue in contradicted:
-            if _corrected(text, issue) not in settled:
-                continue
             remote = [o for name, found in raw.items() if name != local[0] for o in found
                       if o.replacements and o.category is Category.GRAMMAR and o.overlaps(issue)]
+            if not solo_rule(issue):
+                # Règle de Grammalecte peu fiable (« Les filles son belles » : « sa », puis « sont ») : la suggestion
+                # de LanguageTool passe en tête, pour Alt+1. Rien n'est appliqué d'office.
+                theirs = {typo_normalize(o.replacements[0]) for o in remote}
+                first = next((r for r in issue.replacements if typo_normalize(r) in theirs), None)
+                if first is not None:
+                    issue.replacements = [first] + [r for r in issue.replacements if r != first]
+                continue
+            if _corrected(text, issue) not in settled:
+                continue
             issue.confident = bool(remote) and all(
                 _corrected(text, o) != _corrected(text, issue) and trials._clean_fix(o) is False for o in remote)
 
@@ -256,7 +264,7 @@ class Checker:
         de LanguageTool fait taire Grammalecte sans lui faire signaler autre chose (contre-épreuve), elle est
         sûre. Pas quand la remarque voisine vient d'une règle fiable de Grammalecte : ce sont alors deux lectures
         (« les enfant joue »), et l'utilisateur choisit."""
-        local = [name for name in raw if name in _LOCAL_ENGINES and raw[name]]
+        local = [name for name in raw if name in _LOCAL_ENGINES]  # même sans remarque : il a vérifié
         if len(local) != 1:
             return
         name = local[0]
@@ -267,11 +275,15 @@ class Checker:
                 continue
             weak = [o for o in issues if o.sources == (name,) and not o.confident and not o.overlaps(issue)
                     and not solo_rule(o) and _next_to(text, issue, o)]
-            if not weak:
-                continue
             trials = trials or _Trials(text, issues, self._recheck(name, language))
-            issue.confident = bool(trials._clean_fix(issue)) and all(
-                trials._still_there(issue, o) is False for o in weak)
+            if weak:
+                issue.confident = bool(trials._clean_fix(issue)) and all(
+                    trials._still_there(issue, o) is False for o in weak)
+            elif not any(name in o.sources and trials.same_sentence(o, issue) for o in issues):
+                # Grammalecte ne dit rien de la phrase (« Je me suis fait mal a la main ») : l'homophone de
+                # LanguageTool est sûr si Grammalecte ne signale rien une fois la correction appliquée. Mesuré
+                # sur corpus : 64 bonnes sur 66, les 2 dégâts écartés par _remote_homophone_ok.
+                issue.confident = _remote_homophone_ok(text, issue) and bool(trials._clean_fix(issue))
 
     def _recheck(self, name: str, language: str) -> Recheck:
         """Revérification instantanée par un moteur local, pour la contre-épreuve de la règle "solo"."""
@@ -482,6 +494,16 @@ _HOMOPHONE_PAIRS = frozenset(_HOMOPHONES) | frozenset((b, a) for a, b in _HOMOPH
 def _homophones(original: str, replacement: str) -> bool:
     key = (original.lower().replace("’", "'"), replacement.lower().replace("’", "'"))
     return key in _HOMOPHONE_PAIRS
+
+
+# « Patrick a l'air sombre », « une volonté a toutes les chances » : « a » verbe, que LanguageTool prend pour « à ».
+_A_VERB_NEXT_RE = re.compile(r"\s+(?:l['’]air\b|tou(?:t|te|s|tes)\b)", re.IGNORECASE)
+
+
+def _remote_homophone_ok(text: str, issue: Issue) -> bool:
+    if text[issue.start:issue.end].lower() == "a" and _A_VERB_NEXT_RE.match(text, issue.end):
+        return False
+    return True
 
 
 _NEXT_TO_RE = re.compile(r"[^\w.!?…\n]*(?:[\w'’-]+[^\w.!?…\n]+)?")
@@ -702,6 +724,19 @@ _PARTICIPLE_FAMILIES = frozenset({"ppas_avoir", "ppas_être_confusion", "ppas_ne
 _CONFUSABLE_AUXILIARIES = frozenset({"a", "est"})
 _SUBJECTS = frozenset({"il", "elle", "on", "ça", "cela", "qui", "lui", "tout", "rien", "personne"})
 _WORD_BEFORE_RE = re.compile(r"([\w'’-]+)\W*$")
+# Verbes pronominaux dont le pronom est complément indirect : leur participe ne s'accorde pas (« Ils se sont
+# téléphoné », « elles se sont plu », « ils se sont succédé »), ou il est suivi d'un infinitif (« elles se sont
+# fait avoir »). Les deux moteurs voudraient « téléphonés » : jamais d'office.
+_INDIRECT_PRONOMINAL = frozenset("""téléphoné parlé souri plu déplu complu succédé ressemblé menti nui suffi survécu
+    ri convenu écrit dit demandé donné promis permis rendu répondu voulu fait laissé""".split())
+_REFLEXIVE = ("se", "me", "te", "nous", "vous", "s'", "m'", "t'")
+# Après ces déclencheurs, « que » appelle le subjonctif : « Il faut que je fait » n'est pas « je fais » (les deux
+# moteurs le proposent) mais « je fasse ». Une correction de conjugaison n'y est jamais sûre.
+_SUBJUNCTIVE_QUE_RE = re.compile(
+    r"\b(?:faut|faudrait|faudra|fallait|veux|veut|voulons|voulez|veulent|voudrais|voudrait|souhaite|souhaites|"
+    r"aimerais|aimerait|pour|avant|afin|sans|bien|quoique|moins|importe|important|nécessaire|possible|dommage|"
+    r"exige|préfère|préférerais|attends|attend|doute|crains|craint|peur)\s+qu(?:e\s+|['’])(?:(?:je|tu|il|elle|on|"
+    r"nous|vous|ils|elles)\s+|j['’])$", re.IGNORECASE)
 # « Je vais acheté du pain » : après aller ou venir, un participe en -é est l'infinitif mal écrit seulement si un
 # complément suit (« Je vais fatigué au travail », « Ils vont pressés au marché » sont justes).
 _GO_COME = frozenset("""vais vas va allons allez vont allais allait allions alliez allaient irai iras ira irons irez
@@ -743,6 +778,13 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
     `agreed` : les deux moteurs proposent cette correction (le genre choisi n'est alors plus un hasard)."""
     family = rule_family(issue.rule_id)
     before = _words_before(text, issue.start, 2)
+    word = text[issue.start:issue.end].lower()
+    first = issue.replacements[0] if issue.replacements else ""
+    if (word in _INDIRECT_PRONOMINAL and first.lower().startswith(word) and len(first) > len(word)
+            and any(w in _REFLEXIVE or w.startswith(_REFLEXIVE[5:]) for w in _words_before(text, issue.start, 3))):
+        return False
+    if family.startswith("conj_") and _SUBJUNCTIVE_QUE_RE.search(text[max(0, issue.start - 60):issue.start]):
+        return False
     if family in _PARTICIPLE_FAMILIES and before and before[0] in _CONFUSABLE_AUXILIARIES:
         if len(before) < 2 or before[1] not in _SUBJECTS:
             return False
@@ -757,7 +799,6 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         m = re.search(r"\b[Ll]es\s+(\w)", text[max(0, issue.start - 80):issue.start])
         if m and m.group(1).isupper():
             return False
-    first = issue.replacements[0] if issue.replacements else ""
     if family == "conf_c_s_verbe":
         # « Il c'est trompé » -> « s'est » ; mais « c'étais eux » (pour « c'était ») n'est pas « s'étais ».
         m = re.search(r"\b(\w+)\s+$", text[max(0, issue.start - 20):issue.start])
