@@ -272,6 +272,7 @@ def cmd_diagnostic(args) -> int:
     print(f"Paramètres : {config_dir()}")
     print(f"Données : {data_dir()}")
     print(f"Journal : {log_path()}")
+    print(f"Plantages : {data_dir() / 'plantages.log'}")
     print(f"Instance en cours : {'oui' if send_command('ping', timeout=1) else 'non'}")
     print(f"Grammalecte : {'installé' if import_grammalecte() else 'non installé'} (activé : {settings.grammalecte.enabled})")
     print(f"LanguageTool : mode {settings.languagetool.mode} (activé : {settings.languagetool.enabled})")

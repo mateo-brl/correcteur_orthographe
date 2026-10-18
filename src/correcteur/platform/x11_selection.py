@@ -104,6 +104,30 @@ def selection_targets(selection: str = "CLIPBOARD", timeout: float = 1.0) -> lis
         d.close()
 
 
+def selection_owned_by_client_of(selection: str, window: int) -> bool:
+    """Vrai si la sélection appartient au client X qui a créé `window` : tous les identifiants de ressources
+    d'un client partagent la même base (identifiant & ~resource_id_mask, le masque étant celui de la connexion).
+    Faux en cas de doute."""
+    from Xlib import X, display
+
+    try:
+        d = display.Display()
+    except Exception as exc:
+        log.debug("Écran X11 inaccessible : %s", exc)
+        return False
+    try:
+        owner = d.get_selection_owner(d.intern_atom(selection))
+        if owner == X.NONE:
+            return False
+        mask = d.display.info.resource_id_mask
+        return (int(owner.id) & ~mask) == (int(window) & ~mask)
+    except Exception as exc:
+        log.debug("Propriétaire de la sélection %s inconnu : %s", selection, exc)
+        return False
+    finally:
+        d.close()
+
+
 def _read_incr(d, win, prop, timeout: float) -> bytes:
     from Xlib import X
 

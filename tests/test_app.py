@@ -3,6 +3,7 @@ traduction. Le pont avec le système est simulé ; la fenêtre de correction est
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -93,13 +94,14 @@ def make_controller(qapp, home, monkeypatch):
     settings.languagetool.enabled = False
     store.save(settings)
     notes: list[tuple[str, bool]] = []
-    monkeypatch.setattr(app_module.Controller, "notify", lambda self, text, error=False: notes.append((text, error)))
+    monkeypatch.setattr(app_module.Controller, "notify",
+                        lambda self, text, error=False: None if self._stopped else notes.append((text, error)))
     monkeypatch.setattr(app_module, "Checker", lambda s, d: Checker(s, d, engines=[QuietEngine(s)]))
     made = []
 
-    def make(bridge_factory=FakeBridge):
+    def make(bridge_factory=FakeBridge, startup=True):
         monkeypatch.setattr(app_module, "create_bridge", lambda defer: bridge_factory(defer))
-        controller = app_module.Controller(qapp, startup=True)
+        controller = app_module.Controller(qapp, startup=startup)
         made.append(controller)
         return controller, notes
 
@@ -278,14 +280,23 @@ def _open_ready(qapp, window, capture: Capture) -> None:
 def test_wayland_window_replace_sets_clipboard_before_hiding(qapp, make_controller, monkeypatch):
     """Sous GNOME Wayland, « Remplacer » ne collait rien : wl-paste et wl-copy, lancés après la fermeture de la
     fenêtre, prenaient le focus à l'application d'origine. Le presse-papiers est lu et posé par Qt pendant que la
-    fenêtre est visible, puis seul le Ctrl+V part, 400 ms plus tard ; jamais de wl-paste ni de wl-copy."""
+    fenêtre est visible, puis seul le Ctrl+V part, 400 ms plus tard ; l'ancien contenu est remis par wl-copy
+    1,5 s après le collage, une fois relu le texte collé, et la notification ne promet rien."""
     ran = []
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kwargs: ran.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+
+    def run(cmd, **kwargs):
+        ran.append((time.monotonic(), cmd, kwargs.get("input")))
+        out = "C'est un test." if os.path.basename(cmd[0]) == "wl-paste" else ""
+        return subprocess.CompletedProcess(cmd, 0, out, "")
+
+    monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(bridge_module, "which", lambda *names: next(
         (f"/usr/bin/{n}" for n in names if n in ("wl-copy", "wl-paste", "ydotool")), None))
     monkeypatch.setattr(bridge_module, "desktop_name", lambda: "gnome")
     controller, notes = make_controller(WaylandBridge)
     events = []
+    monkeypatch.setattr(bridge_module, "_qt_focused", lambda: controller.window.isVisible())
+    monkeypatch.setattr(bridge_module, "_qt_owns_clipboard", lambda: True)
     monkeypatch.setattr(bridge_module, "_qt_saved_text",
                         lambda: events.append(("lu", controller.window.isVisible())) or "ancien")
     monkeypatch.setattr(bridge_module, "_qt_set_clipboard",
@@ -297,11 +308,15 @@ def test_wayland_window_replace_sets_clipboard_before_hiding(qapp, make_controll
     assert not controller.window.isVisible() and ran == []
     hidden_at = time.monotonic()
     assert wait_until(qapp, lambda: ran, timeout=3)
-    assert time.monotonic() - hidden_at >= 0.3
-    assert [os.path.basename(cmd[0]) for cmd in ran] == ["ydotool"]
-    assert ran[0][-4:] == ["29:1", "47:1", "47:0", "29:0"] and "56:0" in ran[0]
+    pasted_at, ctrl_v, _ = ran[0]
+    assert pasted_at - hidden_at >= 0.3
+    assert os.path.basename(ctrl_v[0]) == "ydotool" and ctrl_v[-4:] == ["29:1", "47:1", "47:0", "29:0"] and "56:0" in ctrl_v
     assert capture.saved_clipboard == "ancien"
-    assert wait_until(qapp, lambda: any("prochaine ouverture" in text for text, _ in notes))
+    assert wait_until(qapp, lambda: any(os.path.basename(cmd[0]) == "wl-copy" for _, cmd, _ in ran), timeout=4)
+    names = [(os.path.basename(cmd[0]), data) for _, cmd, data in ran]
+    assert names == [("ydotool", None), ("wl-paste", None), ("wl-copy", "ancien")]
+    assert ran[-1][0] - pasted_at >= 1.5
+    assert not any("prochaine ouverture" in text for text, _ in notes)
 
 
 def test_x11_window_replace_waits_for_the_window_to_hide(qapp, make_controller):
@@ -372,3 +387,86 @@ def test_qt_dialogs_in_french(qapp):
         assert box.button(QMessageBox.StandardButton.No).text() == "&Non"
     finally:
         qapp.removeTranslator(translator)
+
+
+def test_no_empty_selection_message_right_after_an_express_correction(make_controller, monkeypatch):
+    """Double Ctrl+Alt+X rapide : une seule correction, puis « Aucun texte sélectionné » (la sélection venait
+    d'être remplacée). Plus de ce message dans les 3 s qui suivent une correction express collée."""
+    from correcteur.ui import app as app_module
+
+    controller, notes = make_controller()
+    controller.bridge.replace = lambda capture, text: (True, "")
+    result = CheckResult("Ces un test", [], {"grammalecte": EngineStatus("grammalecte", True)}, ())
+    controller._express_done(Capture("Ces un test", from_selection=True), ("C'est un test", [object()], [], result))
+    notes.clear()
+    controller._on_captured("correction-express", Capture(""))
+    assert notes == []
+    now = time.monotonic()
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: now + 3.5)
+    controller._on_captured("correction-express", Capture(""))
+    assert notes and notes[-1][0].startswith("Aucun texte sélectionné")
+
+
+def test_ready_message_names_the_gnome_shortcuts(qapp, make_controller, monkeypatch):
+    """Sous GNOME, « Correcteur prêt » nommait la commande « correcteur selection » même quand les raccourcis
+    GNOME du correcteur existaient : il attend leur lecture et nomme les vraies touches."""
+    from correcteur.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "session_type", lambda: "wayland")
+    monkeypatch.setattr(app_module, "desktop_name", lambda: "gnome")
+    monkeypatch.setattr(app_module.autostart, "gnome_shortcuts",
+                        lambda: {"correcteur-verifier": "<Control><Alt>c", "correcteur-express": "<Control><Alt>x"})
+    controller, notes = make_controller(_WaylandFakeBridge, startup=False)
+    assert wait_until(qapp, lambda: notes, timeout=4)
+    assert notes == [("Correcteur prêt : sélectionnez du texte puis Ctrl+Alt+C (fenêtre) ou Ctrl+Alt+X "
+                      "(correction express).", False)]
+    assert controller.bridge.desktop_shortcuts["correcteur-express"] == "<Control><Alt>x"
+    time.sleep(0.2)
+    qapp.processEvents()
+    assert len(notes) == 1
+
+    # Raccourcis absents : le message dit quoi faire, et le message de démarrage ne vient pas le recouvrir.
+    controller.quit()  # sinon la 2e instance verrait la 1re et s'arrêterait
+    monkeypatch.setattr(app_module.autostart, "gnome_shortcuts", lambda: {})
+    notes.clear()
+    make_controller(_WaylandFakeBridge, startup=False)
+    assert wait_until(qapp, lambda: notes, timeout=4)
+    assert notes == [(app_module._GNOME_MISSING, True)]
+
+
+def _run_python(code: str, home: Path, timeout: float = 90) -> subprocess.CompletedProcess:
+    env = dict(os.environ, CORRECTEUR_HOME=str(home), QT_QPA_PLATFORM="offscreen",
+               PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+    env.pop("WAYLAND_DISPLAY", None)
+    return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=timeout)
+
+
+def test_crash_log_keeps_fatal_errors(tmp_path):
+    """Un segfault dans un fil ne laissait aucune trace (journal vide) : faulthandler écrit dans plantages.log."""
+    out = _run_python("from correcteur.ui.app import crash_log_path, install_crash_log\n"
+                      "import faulthandler, threading\n"
+                      "assert install_crash_log() == crash_log_path()\n"
+                      "t = threading.Thread(target=faulthandler._sigsegv, name='verification')\n"
+                      "t.start(); t.join()\n", tmp_path)
+    assert out.returncode != 0
+    content = (tmp_path / "data" / "plantages.log").read_text(encoding="utf-8")
+    assert "démarré (processus" in content and "Segmentation fault" in content
+    assert "_sigsegv" in content or "File " in content
+
+
+def test_application_logs_its_normal_end(tmp_path):
+    """Arrêt normal noté au journal (aboutToQuit) : une fin sans cette ligne est un arrêt brutal."""
+    from correcteur.config import Settings
+
+    settings = Settings()
+    settings.general.first_run_done = True
+    settings.languagetool.enabled = False
+    settings.general.hotkeys_enabled = False
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "parametres.json").write_text(json.dumps(settings.to_dict()), encoding="utf-8")
+    out = _run_python("from correcteur.ui.app import run_app\n"
+                      "raise SystemExit(run_app('quitter', startup=True))\n", tmp_path)
+    assert out.returncode == 0, out.stderr
+    journal = (tmp_path / "data" / "correcteur.log").read_text(encoding="utf-8")
+    assert "démarré" in journal and journal.rstrip().endswith("arrêté normalement.")
+    assert "démarré (processus" in (tmp_path / "data" / "plantages.log").read_text(encoding="utf-8")

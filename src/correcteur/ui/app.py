@@ -3,9 +3,12 @@ globaux, fenêtre de correction et correction express."""
 
 from __future__ import annotations
 
+import faulthandler
 import logging
+import os
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -15,13 +18,13 @@ from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QSystemT
 
 from correcteur import APP_NAME, __version__
 from correcteur.checker import Checker
-from correcteur.config import PersonalDictionary, Settings, SettingsStore, log_path, resource_path
+from correcteur.config import PersonalDictionary, Settings, SettingsStore, data_dir, log_path, resource_path
 from correcteur.models import ENGINE_LABELS, EngineStatus
 from correcteur.platform import autostart, desktop_name, session_type
 from correcteur.platform.bridge import Capture, create_bridge
 from correcteur.platform.ipc import IpcServer
 from correcteur.platform.keys import display as hotkey_display
-from correcteur.textutils import diff_edits
+from correcteur.textutils import describe_changes
 from correcteur.ui.garbage import MainThreadGarbageCollector
 from correcteur.ui.popup import CorrectionWindow
 from correcteur.ui.theme import apply_theme, current_theme
@@ -31,6 +34,34 @@ log = logging.getLogger(__name__)
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(threadName)s %(name)s : %(message)s"
 _GNOME_MISSING = ("Raccourcis clavier inactifs : sous Wayland, ils passent par GNOME, et ceux du correcteur n'y "
                   "sont pas. Créez-les dans Paramètres > Général (« Créer les raccourcis GNOME automatiquement »).")
+# Après une correction express réussie, la sélection a été remplacée : une 2e frappe rapide du raccourci ne trouve
+# plus rien, et « Aucun texte sélectionné » ferait croire à un échec.
+_QUIET_AFTER_EXPRESS_S = 3.0
+_crash_file = None  # plantages.log, ouvert pour toute la vie du processus (voir install_crash_log)
+
+
+def crash_log_path() -> Path:
+    """Fichier des plantages (erreur fatale de Python, segfault), à côté du journal."""
+    return data_dir() / "plantages.log"
+
+
+def install_crash_log() -> Path | None:
+    """faulthandler écrit la pile de tous les fils dans plantages.log quand le processus plante (segfault d'une
+    bibliothèque, par exemple) : le journal n'en garderait aucune trace. Fichier à part, ouvert en ajout : le
+    journal tournant change de fichier sous le descripteur que faulthandler garde."""
+    global _crash_file
+    try:
+        path = crash_log_path()
+        if _crash_file is None or _crash_file.closed:
+            _crash_file = open(path, "a", encoding="utf-8")
+        _crash_file.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} : {APP_NAME} {__version__} démarré "
+                          f"(processus {os.getpid()})\n")
+        _crash_file.flush()
+        faulthandler.enable(file=_crash_file, all_threads=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        log.warning("Fichier des plantages impossible à ouvrir : %s", exc)
+        return None
+    return path
 
 
 def install_log(debug: bool = False) -> logging.Handler | None:
@@ -156,11 +187,10 @@ def express_message(before: str, after: str, applied: int, remaining: int,
         if failures:
             return "Vérification incomplète : " + failures[0], True
         return "Aucune faute trouvée ✓", False
-    changes = [(before[s:e].strip(), rep.strip()) for s, e, rep in diff_edits(before, after)]
-    changes = [f"{old} → {new}" for old, new in changes if old.split() != new.split()]
+    changes = describe_changes(before, after, limit=3)  # espaces corrigées comptées : la liste suit le nombre
     summary = _plural(applied, "correction appliquée")
     if changes:
-        summary += " : " + ", ".join(changes[:3]) + ("…" if len(changes) > 3 else ".")
+        summary += " : " + changes + ("" if changes.endswith("…") else ".")
     lines = [summary if changes else summary + ".", "Ctrl+Z dans l'application pour annuler."]
     if remaining:
         lines.append(f"{_plural(remaining, 'remarque')} à vérifier ({check_hotkey}).")
@@ -212,6 +242,7 @@ class Controller(QObject):
         self.icon = make_icon()
         app.setWindowIcon(self.icon)
         self._busy_express = False
+        self._stopped = False  # quit() appelé : plus de notification (messages différés encore en route)
         self._settings_dialog = None
         self._toast: Toast | None = None
 
@@ -234,8 +265,9 @@ class Controller(QObject):
         self.captured.connect(self._on_captured, Qt.ConnectionType.QueuedConnection)
         self.notifyRequested.connect(self.notify, Qt.ConnectionType.QueuedConnection)
         self.gnomeShortcutsRead.connect(self._gnome_shortcuts_read, Qt.ConnectionType.QueuedConnection)
-        app.applicationStateChanged.connect(self._application_state_changed)
         self._capturing = False
+        self._express_replaced_at = float("-inf")  # dernière correction express collée (time.monotonic())
+        self._ready_pending = False  # message « Correcteur prêt » en attente des raccourcis GNOME
         # Raccourcis qui fonctionnent réellement, pour le menu de l'icône (voir _menu_label).
         self._hotkeys_active = False
         self._hotkey_failures: list[str] = []
@@ -264,12 +296,19 @@ class Controller(QObject):
         if not self.settings.general.first_run_done:
             QTimer.singleShot(600, self._first_run)
         elif not startup:
-            QTimer.singleShot(300, lambda: self.notify(self._ready_message()))
+            if self._gnome_checked:
+                # Les raccourcis GNOME sont en cours de lecture : le message les nommera (3 s au plus).
+                self._ready_pending = True
+                QTimer.singleShot(3000, self._show_ready)
+            else:
+                QTimer.singleShot(300, lambda: self.notify(self._ready_message()))
 
     def _defer(self, ms: int, fn) -> None:
         QTimer.singleShot(ms, fn)
 
     def notify(self, text: str, error: bool = False) -> None:
+        if self._stopped:
+            return
         if self.tray is not None and self.tray.supportsMessages():
             icon = QSystemTrayIcon.MessageIcon.Warning if error else QSystemTrayIcon.MessageIcon.Information
             self.tray.showMessage(APP_NAME, text, icon, 3500)
@@ -296,22 +335,32 @@ class Controller(QObject):
             return False
 
     def _ready_message(self) -> str:
-        if session_type() == "wayland":
+        g = self.settings.general
+        verify_id, express_id = autostart.GNOME_SHORTCUT_IDS
+        works = self._hotkey_works(g.hotkey_check, verify_id) and self._hotkey_works(g.hotkey_autocorrect, express_id)
+        if session_type() == "wayland" and not works:
             return "Correcteur prêt. Utilisez votre raccourci du bureau (commande « correcteur selection »)."
-        return (f"Correcteur prêt : sélectionnez du texte puis {hotkey_display(self.settings.general.hotkey_check)} "
-                f"(fenêtre) ou {hotkey_display(self.settings.general.hotkey_autocorrect)} (correction express).")
+        return (f"Correcteur prêt : sélectionnez du texte puis {hotkey_display(g.hotkey_check)} "
+                f"(fenêtre) ou {hotkey_display(g.hotkey_autocorrect)} (correction express).")
+
+    def _show_ready(self) -> None:
+        if self._ready_pending:
+            self._ready_pending = False
+            self.notify(self._ready_message())
+
+    def _hotkey_works(self, combo: str, gnome_id: str) -> bool:
+        """Le raccourci fonctionne réellement : raccourcis globaux actifs, ou raccourci GNOME du correcteur
+        présent avec ces touches."""
+        if self._hotkeys_active:
+            return combo not in self._hotkey_failures
+        try:
+            return bool(self._gnome_bindings) and self._gnome_bindings.get(gnome_id) == autostart.gnome_binding(combo)
+        except ValueError:
+            return False
 
     def _menu_label(self, label: str, combo: str, gnome_id: str) -> str:
-        """Libellé d'une entrée du menu, avec son raccourci seulement s'il fonctionne réellement : raccourcis
-        globaux actifs, ou raccourci GNOME du correcteur présent avec ces touches."""
-        if self._hotkeys_active:
-            works = combo not in self._hotkey_failures
-        else:
-            try:
-                works = bool(self._gnome_bindings) and self._gnome_bindings.get(gnome_id) == autostart.gnome_binding(combo)
-            except ValueError:
-                works = False
-        return f"{label}\t{hotkey_display(combo)}" if works else label
+        """Libellé d'une entrée du menu, avec son raccourci seulement s'il fonctionne réellement."""
+        return f"{label}\t{hotkey_display(combo)}" if self._hotkey_works(combo, gnome_id) else label
 
     def _build_tray_menu(self) -> None:
         g = self.settings.general
@@ -366,7 +415,7 @@ class Controller(QObject):
         if session_type() == "wayland":
             if "gnome" in desktop_name() and not self._gnome_checked:
                 self._gnome_checked = True
-                QTimer.singleShot(2000, lambda: self._read_gnome_shortcuts(warn_missing=warn))
+                self._read_gnome_shortcuts(warn_missing=warn)
             return
         if warn and not self._hotkeys_explained:
             self._hotkeys_explained = True
@@ -395,15 +444,14 @@ class Controller(QObject):
 
     def _gnome_shortcuts_read(self, bindings: dict[str, str] | None, warn_missing: bool) -> None:
         self._gnome_bindings = bindings
+        self.bridge.desktop_shortcuts = bindings  # pour l'onglet Diagnostic
         if self.tray is not None:
             self._build_tray_menu()
         if warn_missing and bindings is not None and len(bindings) < len(autostart.GNOME_SHORTCUT_IDS):
+            self._ready_pending = False  # ce message-ci dit déjà quoi faire
             self.notify(_GNOME_MISSING, error=True)
-
-    def _application_state_changed(self, state) -> None:
-        if state == Qt.ApplicationState.ApplicationActive:
-            # Un peu plus tard : le bureau envoie le contenu du presse-papiers à la fenêtre qui reçoit le focus.
-            QTimer.singleShot(150, self.bridge.on_focus)
+        else:
+            self._show_ready()
 
     def _on_command(self, command: str, data: str) -> None:
         if self._capturing and command in ("verifier-selection", "correction-express", "presse-papiers"):
@@ -459,8 +507,11 @@ class Controller(QObject):
             self._capturing = False
             self.bridge.end_capture(capture)
         if not capture.text.strip():
-            # Pas de fenêtre vide sans explication : l'utilisateur sait tout de suite quoi faire.
             self.release_capture(capture)
+            if time.monotonic() - self._express_replaced_at < _QUIET_AFTER_EXPRESS_S:
+                log.info("Aucun texte sélectionné juste après une correction express : pas de message.")
+                return
+            # Pas de fenêtre vide sans explication : l'utilisateur sait tout de suite quoi faire.
             self.notify("Aucun texte sélectionné : sélectionnez un texte, puis recommencez.")
             return
         if command == "verifier-selection":
@@ -498,6 +549,7 @@ class Controller(QObject):
             return
         ok, message = self.bridge.replace(capture, new_text)
         if ok:
+            self._express_replaced_at = time.monotonic()
             self.notify(f"{text}\n{message}" if message else text)
         else:
             self.notify(message, error=True)
@@ -608,10 +660,9 @@ class Controller(QObject):
         self.notify(self._ready_message())
 
     def quit(self) -> None:
-        try:
-            self.app.applicationStateChanged.disconnect(self._application_state_changed)
-        except (RuntimeError, TypeError):
-            pass
+        if self._stopped:
+            return  # déjà arrêté (« quitter » reçu deux fois, par exemple)
+        self._stopped = True
         self.bridge.stop_hotkeys()
         self.ipc.stop()
         self.window.runner.shutdown()
@@ -624,6 +675,7 @@ def run_app(initial_command: str | None = None, startup: bool = False, debug: bo
     if debug is None:
         debug = logging.getLogger().isEnabledFor(logging.DEBUG)
     install_log(debug)
+    install_crash_log()
     log.info("%s %s démarré (Python %s, %s, session %s %s)", APP_NAME, __version__, sys.version.split()[0],
              sys.platform, session_type(), desktop_name())
     QApplication.setApplicationName(APP_NAME)
@@ -641,6 +693,8 @@ def run_app(initial_command: str | None = None, startup: bool = False, debug: bo
     load_qt_translation(app)
     controller = Controller(app, startup=startup)
     app.aboutToQuit.connect(controller.checker.close)
+    # Arrêt normal noté au journal : sans cette ligne, une fin brutale (plantage, session fermée) se repère.
+    app.aboutToQuit.connect(lambda: log.info("%s arrêté normalement.", APP_NAME))
     if initial_command:
         QTimer.singleShot(200, lambda: controller.command.emit(initial_command, ""))
     return app.exec()
