@@ -441,6 +441,7 @@ def _run_python(code: str, home: Path, timeout: float = 90) -> subprocess.Comple
     return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=timeout)
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="segfault simulé : message et signal de Linux")
 def test_crash_log_keeps_fatal_errors(tmp_path):
     """Un segfault dans un fil ne laissait aucune trace (journal vide) : faulthandler écrit dans plantages.log."""
     out = _run_python("from correcteur.ui.app import crash_log_path, install_crash_log\n"
