@@ -281,3 +281,39 @@ def test_partial_check_is_reported():
         "languagetool", False, "LanguageTool a mis plus de 8 s à répondre.")}
     assert "plus de 8 s" in _partial_warning(CheckResult("t", [], statuses, ()))
     assert _partial_warning(CheckResult("t", [], {"grammalecte": statuses["grammalecte"]}, ())) is None
+
+
+def test_pythonioencoding_is_applied_even_if_python_ignored_it(monkeypatch):
+    """L'exécutable empaqueté ignore PYTHONIOENCODING : sa sortie vers un fichier partait en Windows-1252 (« à »
+    devenait l'octet 0xE0), et le test de l'exécutable de la CI, qui relit en UTF-8, échouait."""
+    import io
+
+    from correcteur import cli
+
+    def stream():
+        return io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+
+    out, err = stream(), stream()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+    cli._utf8_io()
+    assert out.encoding == "utf-8" and err.encoding == "utf-8"
+    monkeypatch.setenv("PYTHONIOENCODING", "cp850:strict")
+    cli._utf8_io()
+    assert out.encoding == "cp850" and out.errors == "strict"
+    monkeypatch.delenv("PYTHONIOENCODING")
+    cli._utf8_io()
+    if sys.platform != "win32":
+        assert out.encoding == "utf-8" and out.errors == "replace"
+
+
+def test_stdin_follows_pythonioencoding(monkeypatch):
+    import io
+
+    from correcteur import cli
+
+    raw = io.BytesIO("Il ces levé tôt".encode("utf-8"))
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(raw, encoding="cp1252"))
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+    assert cli._read_stdin() == "Il ces levé tôt"
