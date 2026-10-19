@@ -464,15 +464,16 @@ def wait_modifiers_released(timeout: float = 1.2) -> None:
     """Attend que l'utilisateur relâche Ctrl/Alt/Maj/Win du raccourci ; sinon les
     relâche artificiellement (un Ctrl+C envoyé avec Alt enfoncé deviendrait Ctrl+Alt+C)."""
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not pressed_modifiers():
-            return
+    while True:
+        held = pressed_modifiers()
+        if not held:
+            break
+        if time.monotonic() >= deadline:
+            # Une touche neutre avant de relâcher Alt évite l'ouverture du menu de l'application.
+            _send([_key_input(VK_MASK, False), _key_input(VK_MASK, True)] + [_key_input(vk, True) for vk in held])
+            time.sleep(0.02)
+            break
         time.sleep(0.015)
-    held = pressed_modifiers()
-    if held:
-        # Une touche neutre avant de relâcher Alt évite l'ouverture du menu de l'application.
-        _send([_key_input(VK_MASK, False), _key_input(VK_MASK, True)] + [_key_input(vk, True) for vk in held])
-        time.sleep(0.02)
     _send_swallowed()
 
 
