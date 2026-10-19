@@ -61,7 +61,8 @@ class HotkeyEdit(QKeySequenceEdit):
 
     Une combinaison déjà réservée par une autre application n'arrive jamais jusqu'ici : Windows la lui donne. Le
     champ, vidé dès l'appui de Ctrl, restait vide, et « Enregistrer » gardait l'ancien raccourci sans rien dire.
-    Ctrl, Alt, Maj et Win relâchées sans autre touche : l'ancien raccourci revient et `noKey` le signale."""
+    Ctrl, Alt, Maj et Win relâchées sans autre touche : l'ancien raccourci revient. Si une touche a été relâchée
+    sans avoir été vue s'enfoncer (son appui a été pris ailleurs), `noKey` le signale."""
 
     noKey = Signal(str)  # modificateurs appuyés (« Ctrl+Alt »)
     _MODIFIER_KEYS = {Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta, Qt.Key.Key_AltGr}
@@ -99,7 +100,7 @@ class HotkeyEdit(QKeySequenceEdit):
                                                        (Qt.KeyboardModifier.AltModifier, "Alt"),
                                                        (Qt.KeyboardModifier.ShiftModifier, "Maj"),
                                                        (Qt.KeyboardModifier.MetaModifier, "Win")) if held & flag]
-                    if orphan or len(names) > 1:
+                    if orphan:  # sans relâchement orphelin, l'utilisateur a seulement hésité : rien à dire
                         self.noKey.emit("+".join(names))
             return handled
         if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):

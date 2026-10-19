@@ -144,7 +144,8 @@ def test_premium_without_credentials_unavailable(settings):
     assert not ok and "Premium" in why
 
 
-@pytest.mark.parametrize("status, fragment", [(429, "Limite"), (403, "refuse"), (500, "Erreur LanguageTool 500")])
+@pytest.mark.parametrize("status, fragment", [(429, "Limite"), (403, "refuse"), (500, "indisponible \\(erreur 500\\)"),
+                                              (400, "refusé la demande \\(erreur 400\\)")])
 def test_http_errors_are_readable(settings, status, fragment):
     engine = make_engine(settings, FakeServer(status=status))
     with pytest.raises(EngineError, match=fragment):
@@ -152,9 +153,11 @@ def test_http_errors_are_readable(settings, status, fragment):
 
 
 @pytest.mark.parametrize("response, fragment", [
-    (httpx.Response(503, text="  \n "), "Erreur LanguageTool 503"),  # corps vide : plantait (list index)
+    (httpx.Response(503, text="  \n "), "erreur 503"),  # corps vide : plantait (list index)
+    (httpx.Response(400, text="Error: 'zz' is not a language code known to LanguageTool. Supported language codes "
+                              "are: ar, ast-ES, ..."), "ne connaît pas la langue « fr »"),  # en français, sans la liste
     (httpx.Response(200, text="<html>proxy</html>"), "illisible"),     # pas du JSON : plantait avec une trace
-], ids=["503 vide", "200 pas JSON"])
+], ids=["503 vide", "200 pas JSON", "langue inconnue"])
 def test_odd_server_answers_are_readable(settings, response, fragment):
     engine = LanguageToolEngine(settings)
     engine._client = httpx.Client(transport=httpx.MockTransport(lambda request: response))

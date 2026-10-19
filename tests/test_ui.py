@@ -693,6 +693,14 @@ def test_hotkey_taken_by_another_app_is_explained(qapp, home):
     QTest.keyRelease(edit, Qt.Key.Key_Control, Qt.KeyboardModifier.NoModifier)
     assert edit.keySequence().toString() == before
     assert dialog.hk_express_error.isVisibleTo(dialog) and "Ctrl+Alt" in dialog.hk_express_error.text()
+    # Simple hésitation (Ctrl+Alt relâchées sans autre touche) : l'ancien raccourci revient, sans message.
+    dialog.hk_express_error.hide()
+    QTest.keyPress(edit, Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier)
+    QTest.keyPress(edit, Qt.Key.Key_Alt, ctrl_alt)
+    QTest.keyRelease(edit, Qt.Key.Key_Alt, Qt.KeyboardModifier.ControlModifier)
+    QTest.keyRelease(edit, Qt.Key.Key_Control, Qt.KeyboardModifier.NoModifier)
+    assert edit.keySequence().toString() == before
+    assert not dialog.hk_express_error.isVisibleTo(dialog)
     dialog.close()
 
 

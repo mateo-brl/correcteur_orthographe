@@ -191,8 +191,14 @@ class LanguageToolEngine(Engine):
         if resp.status_code in (401, 403):
             raise EngineError("LanguageTool refuse l'accès (identifiants Premium incorrects ?).")
         if resp.status_code >= 400:
+            # Réponse en anglais (une langue inconnue donne la liste des codes) : au journal, pas à l'utilisateur.
             detail = (resp.text.strip().splitlines() or [""])[0][:200]
-            raise EngineError(f"Erreur LanguageTool {resp.status_code}" + (f" : {detail}" if detail else "."))
+            log.info("LanguageTool, erreur %d : %s", resp.status_code, detail)
+            if resp.status_code >= 500:
+                raise EngineError(f"LanguageTool est indisponible (erreur {resp.status_code}), réessayez plus tard.")
+            if "language" in detail.lower():
+                raise EngineError(f"LanguageTool ne connaît pas la langue « {language} ».")
+            raise EngineError(f"LanguageTool a refusé la demande (erreur {resp.status_code}).")
         try:
             payload = resp.json()
         except ValueError as exc:  # page d'erreur d'un proxy, réponse tronquée…

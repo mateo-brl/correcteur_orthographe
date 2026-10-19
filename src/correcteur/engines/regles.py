@@ -1065,6 +1065,10 @@ LOCUTIONS = (
      "(neutre) devant « ce »."),
     (re.compile(r"(?i)\b(?P<f>et)-(?:ce|il|elle|on|ils|elles)\b"), lambda f: f[0] + "st", "Inversion : « est-ce », "
      "« est-il » (verbe être)."),
+    # « Cela lui a fait du tord » : après un article, seul le nom « tort » a sa place (« tord » vient de tordre).
+    # Les autres « avoir tord », « à tord », « donner tord » : règle de Grammalecte, sûre (voir checker._SOLO_RULES).
+    (re.compile(r"(?i)\b(?:du|des)\s+(?P<f>tords?)\b"), lambda f: f[:3] + "t" + f[4:], "Le nom « tort » (« faire du "
+     "tort ») ; « tord » vient du verbe tordre."),
 )
 
 
@@ -1457,7 +1461,29 @@ FREQUENT = {
     "aurevoir": "au revoir", "apétit": "appétit", "envoit": "envoie", "rapelle": "rappelle", "rapelles": "rappelles",
     "rapellent": "rappellent", "rapeler": "rappeler", "rapeller": "rappeler", "rappeller": "rappeler",
     "occurence": "occurrence", "occurences": "occurrences",
+    # « contant » existe (verbe conter), ses formes accordées non : c'est l'adjectif « content ».
+    "contante": "contente", "contantes": "contentes", "contants": "contents",
 }
+
+
+# Adverbes de degré : « très contant », « si contant » -> « content ».
+_DEGREE = frozenset("très si trop tellement assez aussi vraiment super plus moins fort bien".split())
+
+
+def regle_content(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Je suis contant de te voir » -> « content », « très contant » -> « content » : « contant » (du verbe conter)
+    existe, Grammalecte ne dit rien ; après « être » ou un adverbe de degré, seul l'adjectif a sa place. « En
+    contant une histoire » reste intact."""
+    for i, w in enumerate(words):
+        if w.low != "contant" or i == 0:
+            continue
+        j = i - 1
+        while j > 0 and words[j].low in BETWEEN | _DEGREE and _joined(text, words[j], words[j + 1]):
+            j -= 1
+        if (_joined(text, words[i - 1], w) and (words[i - 1].low in _DEGREE
+                                                or (words[j].low in ETRE and _joined(text, words[j], words[j + 1])))):
+            yield Faute(w.start, w.end, match_case(w.text, "content"), "Adjectif « content » ; « contant » vient du "
+                        "verbe conter.", "corr_content", Category.SPELLING)
 
 
 def regle_orthographe_frequente(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
@@ -1483,7 +1509,7 @@ RULES: tuple[Callable[[str, list[Mot], Lexique], Iterable[Faute]], ...] = (
     regle_la_demonstratif, regle_leurs, regle_locutions, regle_s_en, regle_t_euphonique, regle_il_faut, regle_m_a,
     regle_infinitif, regle_avoir_participe, regle_la_article, regle_c_est, regle_et, regle_pluriel_nom, regle_la_lieu,
     regle_c_est_a_dire, regle_ni_ny, regle_prie, regle_avoir_ete, regle_je_ai, regle_quel_genre, regle_sont_son,
-    regle_cod_que, regle_orthographe_frequente,
+    regle_cod_que, regle_content, regle_orthographe_frequente,
     # Vetos, en dernier : une zone déjà corrigée par une règle n'est pas déclarée juste
     veto_a_ete_adjectif, veto_a_verbe, veto_sujets_coordonnes,
 )
