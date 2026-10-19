@@ -253,6 +253,14 @@ FAUTES = [
     ("Le patron de l'entreprise à démissionné.", "Le patron de l'entreprise a démissionné."),
     ("Il ne nous reste qu'à démontré le contraire.", "Il ne nous reste qu'à démontrer le contraire."),
     ("Rien de particulié à signaler.", "Rien de particulier à signaler."),
+    # Campagne 0.1.13 (test Linux de la 0.1.12)
+    ("Il a eu tord de partir.", "Il a eu tort de partir."),
+    ("Vous avez bien tord.", "Vous avez bien tort."),
+    ("Il l'a accusé à tord.", "Il l'a accusé à tort."),
+    ("Cela lui a fait du tord.", "Cela lui a fait du tort."),
+    ("Je suis contant de te voir.", "Je suis content de te voir."),
+    ("Elle est contante de partir.", "Elle est contente de partir."),
+    ("Il est très contant.", "Il est très content."),
 ]
 
 # Phrases justes (ou sans correction certaine) : rien ne doit y être changé d'office.
@@ -442,4 +450,10 @@ PIEGES = [
     "Il est un peu fatigué.",
     "Il s'est un peu calmé.",
     "La tâche à effectuer, il s'en moquait.",
+    # Campagne 0.1.13 : « tord » (tordre) et « contant » (conter) sont des mots.
+    "Il tord le fer.",
+    "Elle se tord de rire.",
+    "Il se tord la cheville en tombant.",
+    "Il raconte en contant des histoires.",
+    "Le conteur, contant ses légendes, captive la salle.",
 ]

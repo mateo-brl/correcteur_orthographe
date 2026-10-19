@@ -861,6 +861,9 @@ _SOLO_RULES = frozenset({
     "conf_et_est2", "conf_m_a_ma", "conf_c_s_verbe", "conf_mai_mais_mes", "conf_où_ou", "conf_quand_quant_qu_en", "conf_quant_quand_qu_en",
     "conf_dans_dan_d_en", "conf_nôtre_notre", "conf_ça_çà_sa", "conf_déterminant_fem_sing_verbe", "conf_leurs_verbe",
     "conf_c_est_était", "conf_près_prêt_pré", "conf_peut_être", "conf_peut_être2",
+    # « avoir tord », « à tord », « donner tord » -> « tort » : une seule suggestion, aucune fausse alerte sur
+    # « Il tord le fer », « Elle se tord de rire » (25 phrases justes, 14 fautes sur 15 trouvées).
+    "conf_tort_tord_tore",
     # déterminant + nom
     "gn_les_1m", "gn_det_epi_plur_1m", "gn_ces_aux_pluriel_1m", "gn_quel_1m", "gn_quelle_1m", "gn_ce_1m", "gn_tout_det",
     "gn_toute_det", "gn_tous_det_nom", "gn_plusieurs_1m", "gn_quelque_1m", "gn_certains_1m", "gn_certaines_1m",

@@ -143,12 +143,16 @@ def personal_lt(home):
 
 
 def test_online_engine_failure_is_reported(personal_lt):
-    """En ligne avec -l xx, LanguageTool répond 400 : son message est affiché, avec un code d'erreur."""
+    """En ligne, LanguageTool répond 400 (langue qu'il ne connaît pas) : le message, en français, est affiché avec
+    un code d'erreur. Un code inconnu de toutes les langues (« xx ») est refusé avant tout envoi."""
     out = run_cli("verifier", "-l", "xx", "Bonjour tout le monde.")
+    assert out.returncode == 2 and "langue « xx » inconnue" in out.stderr and personal_lt == []
+    out = run_cli("verifier", "-l", "nb", "Bonjour tout le monde.")
     assert personal_lt == ["/v2/check"]
     assert out.returncode == EXIT_UNCHECKED, out.stderr
     assert "Aucune faute" not in out.stdout
-    assert "Aucun moteur n'a pu vérifier le texte" in out.stderr and "400" in out.stderr
+    assert "Aucun moteur n'a pu vérifier le texte" in out.stderr
+    assert "LanguageTool ne connaît pas la langue « nb »" in out.stderr and "known" not in out.stderr
 
 
 def test_offline_never_calls_a_personal_server(personal_lt):
@@ -237,11 +241,34 @@ def test_utf16_file_is_corrected(home, tmp_path, capsys):
 
 
 def test_json_errors_stay_json(home, tmp_path, capsys):
+    """Avec --json, toute erreur sort en JSON sur la sortie standard, en français : fichier absent ou dossier,
+    option inconnue, langue inconnue (refusée avant l'envoi à LanguageTool)."""
     import json
 
     assert main(["verifier", "--json", "-f", str(tmp_path / "absent.txt")]) == 2
-    out = capsys.readouterr().out
-    assert "introuvable" in json.loads(out)["erreur"]
+    assert "introuvable" in json.loads(capsys.readouterr().out)["erreur"]
+    assert main(["verifier", "--json", "-f", str(tmp_path)]) == 2
+    assert "est un dossier" in json.loads(capsys.readouterr().out)["erreur"]
+    with pytest.raises(SystemExit) as stop:
+        main(["verifier", "--json", "--inconnu", "Bonjour"])
+    assert stop.value.code == 2
+    assert json.loads(capsys.readouterr().out)["erreur"] == "arguments inconnus : --inconnu"
+    assert main(["verifier", "--json", "-l", "zz", "Bonjour"]) == 2
+    assert "langue « zz » inconnue" in json.loads(capsys.readouterr().out)["erreur"]
+
+
+def test_unreadable_file_cause_is_in_french(home, tmp_path, capsys, monkeypatch):
+    import builtins
+
+    def refused(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    path = tmp_path / "secret.txt"
+    path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(builtins, "open", refused)
+    assert main(["verifier", "-f", str(path)]) == 2
+    err = capsys.readouterr().err
+    assert "(accès refusé)" in err and "Permission" not in err
 
 
 def test_help_is_in_french_and_hides_gnome_on_windows(monkeypatch):

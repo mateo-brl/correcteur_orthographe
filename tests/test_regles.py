@@ -110,6 +110,12 @@ FIXES = [
     ("Le ministre de l'Intérieur à estimé que tout va bien.", "à", "a", "corr_a_verbe"),
     ("Nous avons à cherché des issues.", "cherché", "chercher", "corr_a_participe"),
     ("Il ne nous reste qu'à démontré le contraire.", "démontré", "démontrer", "corr_a_participe"),
+    ("Je suis contant de te voir.", "contant", "content", "corr_content"),
+    ("Je ne suis pas vraiment contant.", "contant", "content", "corr_content"),
+    ("Un enfant si contant.", "contant", "content", "corr_content"),
+    ("Elle est contante.", "contante", "contente", "corr_orthographe"),
+    ("Cela lui a fait du tord.", "tord", "tort", "corr_locution"),
+    ("Il a des tords envers elle.", "tords", "torts", "corr_locution"),
 ]
 
 
@@ -183,6 +189,9 @@ UNTOUCHED = [
     "Un moteur à cylindrée fixe.",
     "La tâche à effectuer, il s'en moquait.",
     "La maison à colombages.",
+    "Il raconte en contant des histoires.",
+    "Il est, contant fleurette, reparti.",
+    "Il tord le fer.",
 ]
 
 

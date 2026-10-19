@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import codecs
+import errno
 import json
 import locale
 import logging
@@ -32,6 +33,10 @@ EXIT_UNCHECKED = 3
 # Langue sur 2 lettres seule, ou sur 2-3 lettres suivie d'un pays sur 2 lettres (« en-US », « ast-ES »), puis
 # d'éventuelles variantes.
 _LANGUAGE_RE = re.compile(r"[a-z]{2}|[a-z]{2,3}-[a-z]{2}(?:-[a-z0-9]+)*", re.IGNORECASE)
+# Langues de LanguageTool (et le français de Grammalecte) : un code inconnu (« zz ») est refusé avant tout envoi,
+# au lieu de la réponse anglaise de LanguageTool et de sa longue liste de codes.
+_LANGUAGES = frozenset("""ar ast be br ca crh da de el en eo es fa fr ga gl is it ja km lt ml nb nl no pl pt ro ru sk
+    sl sv ta tl uk zh""".split())
 
 _GUI_COMMANDS = {
     "selection": "verifier-selection",
@@ -179,18 +184,26 @@ def _colors() -> bool:
 
 
 _ENCODING_NAMES = {"utf-16-le": "UTF-16", "utf-16-be": "UTF-16", "utf-32-le": "UTF-32", "utf-32-be": "UTF-32"}
+# Causes des erreurs de fichier en français (le système les donne en anglais : « Permission denied »).
+_OS_CAUSES = {errno.EACCES: "accès refusé", errno.EPERM: "accès refusé", errno.EISDIR: "c'est un dossier",
+              errno.ENOTDIR: "chemin invalide", errno.ENAMETOOLONG: "nom trop long", errno.EINVAL: "nom invalide",
+              errno.ELOOP: "liens symboliques en boucle", errno.EIO: "erreur de lecture du disque",
+              errno.EMFILE: "trop de fichiers ouverts", errno.EBUSY: "fichier occupé par un autre programme"}
 
 
 def _read_file(path: str) -> str:
     """Contenu exact du fichier (fins de ligne d'origine, sans BOM) : UTF-8, UTF-16 ou ANSI (Windows-1252),
     signalé sur la sortie d'erreur s'il n'est pas en UTF-8."""
+    if os.path.isdir(path):
+        raise ValueError(f"« {path} » est un dossier, pas un fichier.")
     try:
         with open(path, "rb") as fh:
             data = fh.read()
     except FileNotFoundError:
         raise ValueError(f"fichier « {path} » introuvable.") from None
     except OSError as exc:
-        raise ValueError(f"lecture du fichier « {path} » impossible ({exc.strerror or exc}).") from None
+        cause = _OS_CAUSES.get(exc.errno or 0, f"erreur système {exc.errno}" if exc.errno else "erreur système")
+        raise ValueError(f"lecture du fichier « {path} » impossible ({cause}).") from None
     text, encoding = decode_text(data)
     if encoding != "utf-8":
         name = _ENCODING_NAMES.get(encoding) or f"ANSI ({encoding})"
@@ -239,6 +252,8 @@ def _normalize_language(value: str | None) -> str | None:
         raise ValueError(f"langue « {value} » non reconnue : utilisez « auto », « fr » ou un code de la forme "
                          "« en », « en-US » ou « ca-ES-valencia ».")
     lang, *rest = value.split("-")
+    if lang.lower() not in _LANGUAGES:
+        raise ValueError(f"langue « {value} » inconnue. Langues gérées : " + ", ".join(sorted(_LANGUAGES)) + ".")
     return "-".join([lang.lower()] + [p.upper() if i == 0 and len(p) == 2 else p for i, p in enumerate(rest)])
 
 
@@ -465,9 +480,22 @@ def _french(message: str) -> str:
     return _ARGPARSE_FR.get(message, message)
 
 
+class _Parser(argparse.ArgumentParser):
+    """Avec --json, les erreurs de la ligne de commande (option inconnue, argument manquant) sortent aussi en JSON,
+    sur la sortie standard, comme les autres erreurs (voir main). Les sous-commandes héritent de cette classe."""
+
+    json_errors = False
+
+    def error(self, message: str):
+        if _Parser.json_errors:
+            print(json.dumps({"erreur": message}, ensure_ascii=_ascii_json()))
+            raise SystemExit(2)
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
     argparse._ = _french  # type: ignore[attr-defined]  (argparse traduit ses textes par cette fonction)
-    parser = argparse.ArgumentParser(prog="correcteur", description="Correcteur d'orthographe et de grammaire.")
+    parser = _Parser(prog="correcteur", description="Correcteur d'orthographe et de grammaire.")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     parser.add_argument("--demarrage", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug", action="store_true", help="journal détaillé")
@@ -515,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] not in ("--demarrage",) + tuple(_GUI_COMMANDS):
         _attach_console_windows()
     _utf8_io()
+    _Parser.json_errors = "--json" in argv
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")

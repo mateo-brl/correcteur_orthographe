@@ -191,7 +191,8 @@ correcteur diagnostic                                    # état de l'installati
 ```
 
 `--hors-ligne` n'utilise que les moteurs locaux (Grammalecte, et LanguageTool seulement en mode « serveur local »).
-`-l` accepte `auto`, `fr` ou un code comme `en` ou `en-US`. Codes de retour de `verifier` et `corriger` : 0 (aucune
+`-l` accepte `auto`, `fr` ou un code comme `en` ou `en-US` ; un code inconnu est refusé avant tout envoi. Avec
+`--json`, les erreurs sortent aussi en JSON (`{"erreur": "..."}`). Codes de retour de `verifier` et `corriger` : 0 (aucune
 faute, ou texte corrigé), 1 (fautes trouvées), 2 (erreur), 3 (aucun moteur n'a pu vérifier le texte : langue non gérée,
 moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
 
