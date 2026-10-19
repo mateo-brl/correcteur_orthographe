@@ -56,9 +56,10 @@ class FakeBridge(Bridge):
         self.calls.append("begin")
         super().begin_capture()
 
-    def capture(self) -> Capture:
+    def capture(self, express: bool = False, from_menu: bool = False) -> Capture:
         self.allow_capture.wait(5)
         self.calls.append("capture")
+        self.options = (express, from_menu)
         return self.next_capture
 
     def end_capture(self, capture) -> None:
@@ -162,11 +163,13 @@ def test_express_says_when_nothing_was_checked(make_controller):
     """« Aucune faute trouvée ✓ » s'affichait alors qu'aucun moteur n'avait vérifié le texte."""
     controller, notes = make_controller()
     capture = Capture("Hello world", from_selection=True)
-    controller._express_done(capture, ("Hello world", [], [], CheckResult("Hello world", [], {}, ())))
+    controller._express_done(capture, controller._express_outcome(
+        "Hello world", ("Hello world", [], [], CheckResult("Hello world", [], {}, ()))))
     text, error = notes[-1]
     assert error and text.startswith("Vérification impossible : aucun moteur activé ne gère")
     failed = {"grammalecte": EngineStatus("grammalecte", False, "non installé.")}
-    controller._express_done(capture, ("Hello world", [], [], CheckResult("Hello world", [], failed, ())))
+    controller._express_done(capture, controller._express_outcome(
+        "Hello world", ("Hello world", [], [], CheckResult("Hello world", [], failed, ()))))
     assert notes[-1] == ("Vérification impossible : Grammalecte : non installé.", True)
 
 
@@ -193,7 +196,8 @@ def test_express_notification_tells_about_the_clipboard(make_controller):
     controller.bridge.replace = lambda capture, text: (True, "Le presse-papiers contient le texte corrigé.")
     issue = SimpleNamespace()
     result = CheckResult("Ces un test", [], {"grammalecte": EngineStatus("grammalecte", True)}, ())
-    controller._express_done(Capture("Ces un test", from_selection=True), ("C'est un test", [issue], [], result))
+    controller._express_done(Capture("Ces un test", from_selection=True),
+                             controller._express_outcome("Ces un test", ("C'est un test", [issue], [], result)))
     text, error = notes[-1]
     assert not error and text.splitlines()[0].startswith("1 correction appliquée")
     assert text.splitlines()[-1] == "Le presse-papiers contient le texte corrigé."
@@ -218,9 +222,24 @@ def test_tray_menu_shows_only_working_hotkeys(make_controller):
 
 
 class _ImmediateTimer:
+    """QTimer dont les appels différés partent tout de suite ; les minuteurs créés par l'application (bilan
+    « Correction en cours… ») ne partent jamais."""
+
+    def __init__(self, parent=None) -> None:
+        self.timeout = SimpleNamespace(connect=lambda fn: None)
+
     @staticmethod
     def singleShot(ms, fn) -> None:
         fn()
+
+    def setSingleShot(self, single: bool) -> None:
+        pass
+
+    def start(self, ms: int = 0) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
 
 
 class _WaylandFakeBridge(FakeBridge):
@@ -397,7 +416,8 @@ def test_no_empty_selection_message_right_after_an_express_correction(make_contr
     controller, notes = make_controller()
     controller.bridge.replace = lambda capture, text: (True, "")
     result = CheckResult("Ces un test", [], {"grammalecte": EngineStatus("grammalecte", True)}, ())
-    controller._express_done(Capture("Ces un test", from_selection=True), ("C'est un test", [object()], [], result))
+    controller._express_done(Capture("Ces un test", from_selection=True),
+                             controller._express_outcome("Ces un test", ("C'est un test", [object()], [], result)))
     notes.clear()
     controller._on_captured("correction-express", Capture(""))
     assert notes == []
@@ -494,3 +514,68 @@ def test_tray_menu_is_created_once_and_relabelled(make_controller):
     controller._build_tray_menu()
     assert controller._check_action.text() == "Vérifier la sélection"
     assert Tray.menus == [menu] and controller._tray_menu is menu
+
+
+def test_capture_problem_is_shown_instead_of_no_selection(make_controller):
+    """M4 : fenêtre lancée en administrateur : le message l'explique, au lieu de « Aucun texte sélectionné »."""
+    controller, notes = make_controller()
+    controller._on_captured("correction-express", Capture("", problem="Windows empêche le correcteur d'agir."))
+    assert notes[-1] == ("Windows empêche le correcteur d'agir.", True)
+
+
+def test_tray_menu_commands_say_they_come_from_the_menu(qapp, make_controller, monkeypatch):
+    """G6 : depuis le menu de l'icône, le pont doit revenir à la fenêtre où l'on travaillait."""
+    from correcteur.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "_app_focused", lambda: False)
+    controller, _ = make_controller()
+    controller._on_command("correction-express", "menu")  # ce qu'émet l'entrée du menu
+    assert wait_until(qapp, lambda: controller.bridge.calls[-1:] == ["end"])
+    assert controller.bridge.options == (True, True)
+    controller._on_command("verifier-selection", "menu")
+    assert wait_until(qapp, lambda: controller.bridge.calls.count("end") == 2)
+    assert controller.bridge.options == (False, True)
+    controller._on_command("verifier-selection", "")  # raccourci clavier
+    assert wait_until(qapp, lambda: controller.bridge.calls.count("end") == 3)
+    assert controller.bridge.options == (False, False)
+
+
+def test_long_express_correction_says_it_is_running(qapp, make_controller):
+    """G5 : 300 lignes, aucune réponse pendant 40 s. Au-delà d'une seconde : « Correction en cours… »."""
+    controller, _ = make_controller()
+    controller._express(Capture("Ces un test", from_selection=True))
+    assert controller._express_progress.isActive()
+    assert wait_until(qapp, lambda: not controller._busy_express)
+    assert not controller._express_progress.isActive()
+
+
+def test_own_toast_is_used_on_windows(qapp, make_controller, monkeypatch):
+    """G9 : sous Windows, « Ne pas déranger » cache les notifications du système : la bulle du correcteur, elle,
+    se voit. Un clic la ferme."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from correcteur.ui import app as app_module
+    from correcteur.ui.theme import LIGHT
+
+    controller, _ = make_controller()
+    monkeypatch.setattr(app_module.sys, "platform", "win32")
+    assert controller._own_toast()
+    toast = app_module.Toast()
+    toast.show_message("Aucun texte sélectionné", app_module.toast_duration("Aucun texte sélectionné"), LIGHT, True,
+                       "Correcteur")
+    assert toast.isVisible() and toast.text() == "Correcteur\nAucun texte sélectionné"
+    QTest.mouseClick(toast, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
+    assert not toast.isVisible()
+    assert app_module.toast_duration("x") == 3500 and app_module.toast_duration("x" * 1000) == 10_000
+
+
+def test_autostart_setting_follows_the_real_state(make_controller, monkeypatch):
+    """M6 : après désinstallation puis réinstallation, la clé Run existait mais le paramètre disait « non »."""
+    from correcteur.config import SettingsStore
+    from correcteur.ui import app as app_module
+
+    monkeypatch.setattr(app_module.autostart, "autostart_enabled", lambda: True)
+    controller, _ = make_controller()
+    assert controller.settings.general.autostart is True
+    assert SettingsStore().load().general.autostart is True

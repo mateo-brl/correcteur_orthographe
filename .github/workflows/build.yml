@@ -119,6 +119,11 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
           & $iscc "/DMyAppVersion=$env:VERSION" packaging\correcteur.iss
+          # Version portable : ce fichier la fait ranger ses données à côté d'elle (dossier « Données »).
+          Set-Content -Encoding utf8 -Path dist\Correcteur\portable.txt -Value ("Version portable de Correcteur : " +
+            "paramètres, dictionnaire personnel, journaux et moteurs téléchargés sont rangés dans le dossier " +
+            "« Données », à côté de ce fichier. Supprimez ce fichier pour utiliser plutôt le dossier " +
+            "%LOCALAPPDATA%\Correcteur, celui de la version installée.")
           Compress-Archive -Path dist\Correcteur -DestinationPath "dist\Correcteur-$env:VERSION-windows-portable.zip"
 
       - uses: actions/upload-artifact@v4

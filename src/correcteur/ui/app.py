@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from PySide6.QtCore import QLibraryInfo, QObject, Qt, QTimer, QTranslator, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QCursor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QSystemTrayIcon
 
 from correcteur import APP_NAME, __version__
@@ -37,6 +37,8 @@ _GNOME_MISSING = ("Raccourcis clavier inactifs : sous Wayland, ils passent par G
 # Après une correction express réussie, la sélection a été remplacée : une 2e frappe rapide du raccourci ne trouve
 # plus rien, et « Aucun texte sélectionné » ferait croire à un échec.
 _QUIET_AFTER_EXPRESS_S = 3.0
+# Correction express plus longue que ça (long texte, LanguageTool lent) : « Correction en cours… ».
+_EXPRESS_PROGRESS_MS = 1000
 _crash_file = None  # plantages.log, ouvert pour toute la vie du processus (voir install_crash_log)
 
 
@@ -199,32 +201,51 @@ def express_message(before: str, after: str, applied: int, remaining: int,
 
 
 class Toast(QLabel):
-    """Petite notification quand la zone de notification n'existe pas (GNOME sans extension)."""
+    """Bulle du correcteur, en bas à droite de l'écran où se trouve le pointeur. Sous Windows, elle remplace les
+    notifications du système, que « Ne pas déranger » et les applications en plein écran rendent invisibles :
+    « Aucun texte sélectionné » doit se voir au moment où l'on appuie sur le raccourci. Ne prend jamais le
+    focus ; un clic la ferme."""
 
     def __init__(self) -> None:
-        super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWordWrap(True)
         self.setTextFormat(Qt.TextFormat.PlainText)  # le texte cite des extraits de l'utilisateur
         self.setMargin(12)
-        self.setMaximumWidth(420)
+        self.setMaximumWidth(440)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.hide)
 
-    def show_message(self, text: str, ms: int = 3500) -> None:
-        self.setText(text)
+    def show_message(self, text: str, ms: int = 3500, theme=None, error: bool = False, title: str = "") -> None:
+        if theme is not None:
+            border = theme.spelling if error else theme.outline
+            self.setStyleSheet(f"QLabel {{ background: {theme.surface}; color: {theme.text}; "
+                               f"border: 2px solid {border}; border-radius: 8px; }}")
+        self.setText(f"{title}\n{text}" if title else text)
+        self.setMinimumWidth(0)
         self.adjustSize()
-        screen = QApplication.primaryScreen()
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if screen is not None:
             area = screen.availableGeometry()
             self.move(area.right() - self.width() - 20, area.bottom() - self.height() - 20)
         self.show()
+        self.raise_()
         self._timer.start(ms)
+
+    def mousePressEvent(self, event) -> None:
+        self.hide()
+
+
+def toast_duration(text: str) -> int:
+    """Temps d'affichage : de quoi lire le message (3,5 s au moins, 10 s au plus)."""
+    return max(3500, min(10_000, 2000 + 45 * len(text)))
 
 
 class Controller(QObject):
     command = Signal(str, str)            # commandes venant des raccourcis ou de l'IPC (autres threads)
-    expressDone = Signal(object, object)  # (capture, (texte, appliquées, restantes, résultat) ou exception)
+    expressDone = Signal(object, object)  # (capture, (texte corrigé, nombre appliqué, bilan, erreur ?) ou exception)
     captured = Signal(str, object)        # (commande, capture) : sélection lue dans un fil de travail
     notifyRequested = Signal(str, bool)   # notification demandée depuis un fil de travail
     gnomeShortcutsRead = Signal(object, bool)  # (raccourcis GNOME du correcteur ou None, prévenir s'il en manque)
@@ -234,6 +255,7 @@ class Controller(QObject):
         self.app = app
         self.store = SettingsStore()
         self.settings: Settings = self.store.load()
+        self._sync_autostart()
         self.dictionary = PersonalDictionary()
         self.checker = Checker(self.settings, self.dictionary)
         self.bridge = create_bridge(self._defer)
@@ -245,6 +267,9 @@ class Controller(QObject):
         self._stopped = False  # quit() appelé : plus de notification (messages différés encore en route)
         self._settings_dialog = None
         self._toast: Toast | None = None
+        self._express_progress = QTimer(self)
+        self._express_progress.setSingleShot(True)
+        self._express_progress.timeout.connect(self._show_express_progress)
 
         self.window = CorrectionWindow(self.checker, self, self.theme)
         self.window.setWindowIcon(self.icon)
@@ -306,16 +331,40 @@ class Controller(QObject):
     def _defer(self, ms: int, fn) -> None:
         QTimer.singleShot(ms, fn)
 
+    def _sync_autostart(self) -> None:
+        """Paramètre « lancer à l'ouverture de session » aligné sur l'état réel : l'installateur crée la clé
+        Run de Windows, et une désinstallation l'avait noté désactivé."""
+        actual = self.autostart_enabled()
+        if self.settings.general.autostart != actual:
+            self.settings.general.autostart = actual
+            try:
+                self.store.save(self.settings)
+            except Exception:
+                log.exception("Paramètres non enregistrés")
+
+    def _own_toast(self) -> bool:
+        """Messages dans la bulle du correcteur : sous Windows (toujours visibles), ou sans zone de notification."""
+        return sys.platform == "win32" or self.tray is None or not self.tray.supportsMessages()
+
     def notify(self, text: str, error: bool = False) -> None:
         if self._stopped:
             return
-        if self.tray is not None and self.tray.supportsMessages():
+        # Au journal : les messages d'erreur ; les bilans (extraits du texte de l'utilisateur) seulement avec --debug.
+        log.log(logging.INFO if error else logging.DEBUG, "Message : %s", text.replace("\n", " / "))
+        self._express_progress.stop()
+        if not self._own_toast():
             icon = QSystemTrayIcon.MessageIcon.Warning if error else QSystemTrayIcon.MessageIcon.Information
             self.tray.showMessage(APP_NAME, text, icon, 3500)
             return
         if self._toast is None:
             self._toast = Toast()
-        self._toast.show_message(text)
+        self._toast.show_message(text, toast_duration(text), self.theme, error, APP_NAME)
+
+    def _show_express_progress(self) -> None:
+        if self._busy_express and self._own_toast() and not self._stopped:
+            if self._toast is None:
+                self._toast = Toast()
+            self._toast.show_message("Correction en cours…", 60_000, self.theme, False, APP_NAME)
 
     def copy_text(self, text: str) -> bool:
         """False si le texte n'a pas pu être mis dans le presse-papiers (la fenêtre le signale)."""
@@ -367,10 +416,11 @@ class Controller(QObject):
         pendant que le bureau le lit par D-Bus (icône AppIndicator de GNOME) faisait planter l'application au
         démarrage, où il changeait deux fois en une seconde : on ne change plus que ses libellés."""
         menu = QMenu()
+        # « menu » : la sélection est dans la fenêtre où l'on travaillait, que le clic a fait passer au second plan.
         self._check_action = menu.addAction("Vérifier la sélection",
-                                            lambda: self.command.emit("verifier-selection", ""))
+                                            lambda: self.command.emit("verifier-selection", "menu"))
         self._express_action = menu.addAction("Correction express",
-                                              lambda: self.command.emit("correction-express", ""))
+                                              lambda: self.command.emit("correction-express", "menu"))
         menu.addAction("Vérifier le presse-papiers", lambda: self.command.emit("presse-papiers", ""))
         menu.addAction("Ouvrir le correcteur", lambda: self.command.emit("ouvrir", ""))
         menu.addSeparator()
@@ -468,12 +518,12 @@ class Controller(QObject):
             self.notify("Lecture de la sélection en cours, un instant…")
             return
         if command == "verifier-selection":
-            self._capture_for(command)
+            self._capture_for(command, from_menu=data == "menu")
         elif command == "correction-express":
             if self._busy_express:
                 self.notify("Correction express déjà en cours, un instant…")
             else:
-                self._capture_for(command)
+                self._capture_for(command, from_menu=data == "menu")
         elif command == "presse-papiers":
             self.window.open_with(self.bridge.clipboard_text(), None)
         elif command == "ouvrir":
@@ -486,26 +536,27 @@ class Controller(QObject):
         elif command == "quitter":
             self.quit()
 
-    def _capture_for(self, command: str) -> None:
+    def _capture_for(self, command: str, from_menu: bool = False) -> None:
         """Lit la sélection hors du fil de l'interface quand c'est possible (plusieurs secondes sous Wayland
         quand rien n'est sélectionné), puis continue dans ce fil (_on_captured). Jusque-là, le pont reporte
         les restaurations du presse-papiers (Bridge.begin_capture)."""
-        if _app_focused():
+        if _app_focused() and not from_menu:
             capture = self.bridge.focused_capture()
             if capture is not None:
                 self._on_captured(command, capture)
                 return
         self._capturing = True
         self.bridge.begin_capture()
+        express = command == "correction-express"
         if not self.bridge.capture_in_thread:
-            self._on_captured(command, self._safe_capture())
+            self._on_captured(command, self._safe_capture(express, from_menu))
             return
-        threading.Thread(target=lambda: self.captured.emit(command, self._safe_capture()),
+        threading.Thread(target=lambda: self.captured.emit(command, self._safe_capture(express, from_menu)),
                          name="capture", daemon=True).start()
 
-    def _safe_capture(self) -> Capture:
+    def _safe_capture(self, express: bool = False, from_menu: bool = False) -> Capture:
         try:
-            return self.bridge.capture()
+            return self.bridge.capture(express=express, from_menu=from_menu)
         except Exception:
             log.exception("Lecture de la sélection impossible")
             return Capture("")
@@ -516,6 +567,9 @@ class Controller(QObject):
             self.bridge.end_capture(capture)
         if not capture.text.strip():
             self.release_capture(capture)
+            if capture.problem:
+                self.notify(capture.problem, error=True)
+                return
             if time.monotonic() - self._express_replaced_at < _QUIET_AFTER_EXPRESS_S:
                 log.info("Aucun texte sélectionné juste après une correction express : pas de message.")
                 return
@@ -532,25 +586,38 @@ class Controller(QObject):
             self.release_capture(capture)
             return
         self._busy_express = True
+        self._express_progress.start(_EXPRESS_PROGRESS_MS)
+        check_hotkey = hotkey_display(self.settings.general.hotkey_check)
 
         def work() -> None:
+            # Bilan calculé ici aussi : sur un long texte, la comparaison mot à mot prend du temps.
             try:
-                self.expressDone.emit(capture, self.checker.autocorrect(capture.text))
+                outcome = self._express_outcome(capture.text, self.checker.autocorrect(capture.text), check_hotkey)
+                self.expressDone.emit(capture, outcome)
             except Exception as exc:  # pragma: no cover
+                log.exception("Correction express impossible")
                 self.expressDone.emit(capture, exc)
 
         threading.Thread(target=work, name="express", daemon=True).start()
 
+    def _express_outcome(self, text: str, corrected, check_hotkey: str | None = None) -> tuple[str, int, str, bool]:
+        """(texte corrigé, nombre de corrections, bilan, erreur ?) d'après le résultat de Checker.autocorrect."""
+        new_text, applied, remaining, result = corrected
+        no_engine = "" if result.statuses else self._no_engine_reason(text)
+        if check_hotkey is None:
+            check_hotkey = hotkey_display(self.settings.general.hotkey_check)
+        message, error = express_message(text, new_text, len(applied), len(remaining), result.statuses,
+                                         check_hotkey, no_engine)
+        return new_text, len(applied), message, error
+
     def _express_done(self, capture: Capture, outcome) -> None:
         self._busy_express = False
+        self._express_progress.stop()
         if isinstance(outcome, Exception):
             self.release_capture(capture)
             self.notify(f"Correction impossible : {outcome}", error=True)
             return
-        new_text, applied, remaining, result = outcome
-        no_engine = "" if result.statuses else self._no_engine_reason(capture.text)
-        text, error = express_message(capture.text, new_text, len(applied), len(remaining), result.statuses,
-                                      hotkey_display(self.settings.general.hotkey_check), no_engine)
+        new_text, applied, text, error = outcome
         if not applied:
             self.release_capture(capture)
             self.notify(text, error=error)

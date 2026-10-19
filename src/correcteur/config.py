@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import dataclasses
+import functools
 import json
 import logging
 import os
@@ -19,14 +20,42 @@ from correcteur import APP_NAME
 log = logging.getLogger(__name__)
 
 
+PORTABLE_MARKER = "portable.txt"
+PORTABLE_DIR = "Données"
+
+
+@functools.lru_cache(maxsize=1)
+def portable_dir() -> Path | None:
+    """Version portable (fichier portable.txt à côté de l'exécutable) : dossier « Données » à côté de lui, s'il
+    est accessible en écriture. Sinon (zip décompressé dans Program Files, clé en lecture seule) : None."""
+    if not getattr(sys, "frozen", False):
+        return None
+    folder = Path(sys.executable).resolve().parent
+    if not (folder / PORTABLE_MARKER).is_file():
+        return None
+    target = folder / PORTABLE_DIR
+    try:
+        target.mkdir(exist_ok=True)
+        probe = target / ".ecriture"
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError:
+        return None
+    return target
+
+
 def _base_dirs() -> tuple[Path, Path]:
     """(dossier de configuration, dossier de données).
 
-    CORRECTEUR_HOME permet un mode portable (ou isolé pour les tests)."""
+    CORRECTEUR_HOME permet un mode isolé (tests, ou version portable choisie à la main) ; la version portable
+    range tout dans son propre dossier (voir portable_dir)."""
     home = os.environ.get("CORRECTEUR_HOME")
     if home:
         base = Path(home)
         return base / "config", base / "data"
+    portable = portable_dir()
+    if portable is not None:
+        return portable, portable
     from platformdirs import user_config_dir, user_data_dir
 
     return Path(user_config_dir(APP_NAME, appauthor=False)), Path(user_data_dir(APP_NAME, appauthor=False))

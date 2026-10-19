@@ -193,14 +193,70 @@ def test_corriger_file_keeps_crlf(home, tmp_path):
     assert out.stdout.decode("utf-8") == "Je vais à la plage.\r\nEt école est fermée.\r\nFin"
 
 
-def test_file_not_in_utf8_gives_a_french_message(home, tmp_path, capsys):
-    path = tmp_path / "latin1.txt"
-    path.write_bytes("Le café est très bon.".encode("latin-1"))
-    assert main(["verifier", "--hors-ligne", "-f", str(path)]) == 2
-    err = capsys.readouterr().err
-    assert "n'est pas en UTF-8" in err and "codec" not in err
+@needs_grammalecte
+def test_file_not_in_utf8_is_read_as_ansi_with_a_remark(home, tmp_path, capsys):
+    """Fichier ANSI (Windows-1252) : refusé avant, lu maintenant, avec une remarque sur la sortie d'erreur."""
+    path = tmp_path / "ansi.txt"
+    path.write_bytes("Le café est très bon.".encode("cp1252"))
+    assert main(["corriger", "--hors-ligne", "-f", str(path)]) == 0
+    out, err = capsys.readouterr()
+    assert out == "Le café est très bon." and "n'est pas en UTF-8" in err and "ANSI" in err
     assert main(["corriger", "-f", str(tmp_path / "absent.txt")]) == 2
     assert "introuvable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("data, expected", [
+    ("Élève à l'école".encode("utf-8"), ("Élève à l'école", "utf-8")),
+    (b"\xef\xbb\xbf" + "Élève".encode("utf-8"), ("Élève", "utf-8")),
+    (b"\xff\xfe" + "Élève\r\nou".encode("utf-16-le"), ("Élève\r\nou", "utf-16-le")),
+    (b"\xfe\xff" + "Élève".encode("utf-16-be"), ("Élève", "utf-16-be")),
+    ("Élève à l'école".encode("utf-16-le"), ("Élève à l'école", "utf-16-le")),  # Bloc-notes, PowerShell
+    ("Élève à l'école".encode("cp1252"), ("Élève à l'école", "cp1252")),
+], ids=["utf-8", "utf-8 BOM", "utf-16 LE BOM", "utf-16 BE BOM", "utf-16 sans BOM", "ansi"])
+def test_decode_text_recognizes_windows_encodings(data, expected):
+    from correcteur.cli import decode_text
+
+    assert decode_text(data) == expected
+
+
+def test_decode_text_uses_the_console_code_page_for_pipes():
+    """« echo levé| correcteur-cli » dans cmd : octets en page de code 850, lus en 1252 avant (« lev‚ »)."""
+    from correcteur.cli import decode_text
+
+    assert decode_text("Il ces levé tôt".encode("cp850"), "cp850") == ("Il ces levé tôt", "cp850")
+    assert decode_text("Il ces levé tôt".encode("utf-8"), "cp850")[0] == "Il ces levé tôt"  # PowerShell 7
+
+
+@needs_grammalecte
+def test_utf16_file_is_corrected(home, tmp_path, capsys):
+    path = tmp_path / "utf16.txt"
+    path.write_bytes(b"\xff\xfe" + "Je vais a la plage.".encode("utf-16-le"))
+    assert main(["corriger", "--hors-ligne", "-f", str(path)]) == 0
+    out, err = capsys.readouterr()
+    assert out == "Je vais à la plage." and "UTF-16" in err
+
+
+def test_json_errors_stay_json(home, tmp_path, capsys):
+    import json
+
+    assert main(["verifier", "--json", "-f", str(tmp_path / "absent.txt")]) == 2
+    out = capsys.readouterr().out
+    assert "introuvable" in json.loads(out)["erreur"]
+
+
+def test_help_is_in_french_and_hides_gnome_on_windows(monkeypatch):
+    from correcteur.cli import build_parser
+
+    text = build_parser().format_help()
+    assert "utilisation :" in text and "afficher cette aide" in text and "usage:" not in text
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert "raccourcis-gnome" not in build_parser().format_help()
+
+
+def test_unencodable_characters_get_plain_equivalents():
+    from correcteur import cli  # noqa: F401  (enregistre le gestionnaire « correcteur »)
+
+    assert "C’est l’œuvre… 10 €".encode("cp850", errors="correcteur") == b"C'est l'oeuvre... 10 EUR"
 
 
 def test_language_codes_accept_languagetool_variants():

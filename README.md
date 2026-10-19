@@ -80,7 +80,12 @@ insécables dans un message, et « stp » ou « rdv » passent. Un mode strict e
 > Cliquez sur *Informations complémentaires* puis *Exécuter quand même*.
 
 Il existe aussi une version portable, **`Correcteur-x.y.z-windows-portable.zip`** : décompressez-la et lancez
-`Correcteur.exe`.
+`Correcteur.exe`. Elle range ses paramètres, son dictionnaire et ses journaux dans un dossier `Données` à côté
+d'elle ; supprimez le fichier `portable.txt` pour qu'elle utilise ceux de la version installée.
+
+Pour désinstaller : *Paramètres › Applications*. Le désinstallateur demande s'il faut aussi supprimer vos
+paramètres, votre dictionnaire et les moteurs téléchargés (le mode LanguageTool « Sur ce PC » occupe près de
+400 Mo).
 
 ### Linux
 
@@ -160,8 +165,14 @@ Dans la fenêtre :
 Couleurs : 🔴 orthographe · 🔵 grammaire · 🟠 ponctuation · 🟣 style. Le texte reste modifiable et la vérification
 suit la frappe.
 
-Après une correction express, la notification indique les premières corrections faites (« aller → allé, a → à… »)
-et le nombre de remarques laissées à vérifier.
+Après une correction express, la notification indique les premières corrections faites (« aller → allé, a → à,
+c'est → s'est… ») et le nombre de remarques laissées à vérifier. Si vous tapez ou cliquez pendant qu'elle se fait
+(changement de fenêtre compris), rien n'est collé : la sélection a pu bouger, et le texte corrigé atterrirait
+ailleurs. Le correcteur le dit, et le presse-papiers reste intact. Sous Windows, ses messages s'affichent dans une
+bulle à lui, visible même en mode « Ne pas déranger ».
+
+Sous Windows, la mise en forme est gardée (gras, italique, liens, espaces insécables) quand l'application copie le
+texte avec elle : Word, Outlook, les navigateurs, LibreOffice.
 
 L'icône dans la zone de notification donne accès à « Vérifier le presse-papiers », à une fenêtre vide où taper
 ou coller un texte, et aux paramètres.
@@ -188,8 +199,8 @@ moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
 
 ## Limites connues
 
-- Dans un terminal, le remplacement automatique échoue. Le correcteur envoie <kbd>Ctrl</kbd> + <kbd>V</kbd>, alors
-  que les terminaux collent avec <kbd>Ctrl</kbd> + <kbd>Maj</kbd> + <kbd>V</kbd>. Sous Wayland, il ne peut pas savoir
+- Sous Linux, dans un terminal, le remplacement automatique échoue. Le correcteur envoie <kbd>Ctrl</kbd> +
+  <kbd>V</kbd>, alors que les terminaux collent avec <kbd>Ctrl</kbd> + <kbd>Maj</kbd> + <kbd>V</kbd>. Sous Wayland, il ne peut pas savoir
   que le collage a échoué : la notification annonce quand même les corrections. Dans un terminal, ouvrez plutôt
   la fenêtre de correction, copiez le texte corrigé, puis collez-le avec <kbd>Ctrl</kbd> + <kbd>Maj</kbd> +
   <kbd>V</kbd>. Les terminaux qui ne copient pas avec <kbd>Ctrl</kbd> + <kbd>Inser</kbd> (kitty, Alacritty,
@@ -197,9 +208,13 @@ moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
 - Sous Wayland, le remplacement automatique passe par `wtype` ou `ydotool` (sous GNOME, uniquement `ydotool`). Si
   l'outil manque, le texte corrigé est seulement copié dans le presse-papiers et il faut le coller soi-même avec
   <kbd>Ctrl</kbd> + <kbd>V</kbd>.
-- Sous Windows, la capture de la sélection et le remplacement n'ont pas encore été essayés sur un vrai bureau. La CI
-  GitHub n'a pas de bureau interactif : les tests unitaires Windows y passent, mais le parcours complet n'y est pas
-  exécuté.
+- Sous Windows, le correcteur ne peut pas lire une fenêtre lancée en administrateur (Windows bloque les frappes
+  simulées vers elle) : il le dit. Copiez le texte puis utilisez « Vérifier le presse-papiers », ou lancez aussi le
+  correcteur en administrateur.
+- Une image copiée par <kbd>Win</kbd> + <kbd>Maj</kbd> + <kbd>S</kbd> est remise dans le presse-papiers sans son
+  format « fichier » : elle se colle toujours comme image, plus comme fichier dans l'Explorateur.
+- PowerShell 5 remplace les accents par « ? » dans le texte qu'il envoie à un programme par un tube
+  (`"texte" | correcteur-cli corriger`) : passez le texte en argument, ou utilisez PowerShell 7.
 - Les suggestions d'orthographe peuvent manquer le bon mot. Les fautes les plus fréquentes (« fesait », « malgrès »,
   « parmis ») ont leur correction dans le moteur du correcteur ; pour les autres, la bonne suggestion n'est pas
   toujours en tête.
@@ -254,8 +269,12 @@ flowchart LR
    à la fenêtre active. Sinon, et toujours sous Wayland (la sélection primaire peut y venir d'une autre fenêtre),
    il simule <kbd>Ctrl</kbd> + <kbd>Inser</kbd>, la copie que comprennent aussi les terminaux :
    <kbd>Ctrl</kbd> + <kbd>C</kbd> y interromprait le programme en cours. Sous Windows, c'est
-   <kbd>Ctrl</kbd> + <kbd>C</kbd>. Il remet ensuite le presse-papiers d'origine, images et fichiers compris sous
-   Windows et sous Wayland ; sous Wayland, il attend pour cela une pause de frappe, peu après le collage.
+   <kbd>Ctrl</kbd> + <kbd>C</kbd>, et <kbd>Ctrl</kbd> + <kbd>Inser</kbd> dans les consoles. Il remet ensuite le
+   presse-papiers d'origine, images et fichiers compris sous Windows et sous Wayland ; sous Wayland, il attend pour
+   cela une pause de frappe, peu après le collage. Sous Windows, quand l'application a aussi copié le texte mis en
+   forme (HTML), les corrections y sont reportées mot à mot sans toucher aux balises, et les deux versions sont
+   collées. Pendant une correction express, le correcteur note les frappes et les clics (Raw Input, qui reçoit une
+   copie des évènements sans jamais les retarder) : s'il y en a eu, il ne colle rien.
    Un gestionnaire d'historique du presse-papiers (GPaste, Clipboard Indicator, Klipper) garde la trace du texte
    capturé et du texte corrigé, comme pour toute copie.
 3. Les deux moteurs tournent en parallèle. Les résultats de Grammalecte s'affichent tout de suite, ceux de
@@ -341,8 +360,10 @@ La CI lance plus de 950 tests sous Windows et Linux (Python 3.10 et 3.13) à cha
 - tests « vrai bureau » sous Linux, sur un écran X11 virtuel : une vraie application tourne dans un autre
   processus, et le test y sélectionne du texte, le capture, lance la correction express, vérifie le remplacement,
   la restauration du presse-papiers et le raccourci global ;
-- tests Windows : raccourcis `RegisterHotKey`, presse-papiers Unicode, sauvegarde et restauration, registre.
-  Le parcours complet sur un vrai bureau Windows n'est pas couvert (voir [Limites connues](#limites-connues)).
+- tests Windows : raccourcis `RegisterHotKey`, presse-papiers Unicode et HTML, sauvegarde et restauration,
+  surveillance des frappes, registre ; et, sous Linux, le pont Windows sur un Windows simulé (collage refusé après
+  une frappe, corrections en rafale, menu de l'icône, fenêtre lancée en administrateur). Le parcours complet sur
+  un vrai bureau Windows est essayé à la main : version 0.1.11 sur Windows 11, 22 champs d'applications.
 
 ```bash
 pip install -e ".[dev]"

@@ -146,6 +146,11 @@ class Capture:
     started: float = 0.0           # time.monotonic() au début de la capture, juste après la frappe du raccourci
     left: Any = None               # ce que le correcteur a laissé dans le presse-papiers (marqueur, copie, texte collé)
     owner: Any = None              # wl-copy --foreground qui possède ce qu'il a laissé (vivant : rien n'a changé)
+    generation: int = 0            # emprunt du presse-papiers auquel appartient sa restauration (voir Bridge._borrow)
+    problem: str = ""              # pourquoi rien n'a été lu, quand ce n'est pas l'absence de sélection
+    focus: Any = None              # contrôle qui avait le focus (Windows, correction express), à retrouver au collage
+    watch: Any = None              # surveillance des frappes et clics pendant une correction express (Windows)
+    html: bytes | None = None      # texte mis en forme copié avec la sélection (CF_HTML, Windows)
 
 
 class Bridge:
@@ -177,7 +182,9 @@ class Bridge:
     # vrai tant qu'elle n'utilise pas le presse-papiers de Qt, réservé à ce fil.
     capture_in_thread = False
 
-    def capture(self) -> Capture:
+    def capture(self, express: bool = False, from_menu: bool = False) -> Capture:
+        """Texte sélectionné dans l'application active. `express` : correction express, collée sans autre
+        action de l'utilisateur ; `from_menu` : demandée depuis le menu de l'icône."""
         return Capture("")
 
     def focused_capture(self) -> Capture | None:
@@ -214,20 +221,40 @@ class Bridge:
             capture.left = left
             self._borrowed = None if capture.saved_clipboard is None else (capture.saved_clipboard, left)
             self._generation += 1
+            capture.generation = self._generation
 
     def _give_back(self, capture: Capture) -> None:
         """Remet le presse-papiers d'origine de `capture`, ou le fera à la fin de la capture en cours. Rien si
         elle n'y a pas touché ou si sa sauvegarde a échoué (None) : écrire un presse-papiers vide perdrait ce
-        que l'utilisateur avait copié."""
+        que l'utilisateur avait copié. Rien non plus si un emprunt plus récent a eu lieu (c'est lui qui rendra le
+        contenu d'origine : en rafale, l'ancien remplacerait le texte de la correction suivante), ou si quelqu'un
+        a copié autre chose depuis (voir _clipboard_unchanged)."""
         if not capture.clipboard_touched or capture.saved_clipboard is None:
             return
         with self._lock:
             if self._capturing:
                 self._postponed.append(lambda: self._give_back(capture))
                 return
+            if capture.generation and capture.generation != self._generation:
+                capture.clipboard_touched = False
+                return
             self._borrowed = None
         capture.clipboard_touched = False  # remis une fois pour toutes
+        if not self._clipboard_unchanged(capture):
+            log.info("Presse-papiers d'origine non remis : un autre programme a copié quelque chose depuis.")
+            return
         self._write_saved(capture.saved_clipboard)
+
+    def _clipboard_unchanged(self, capture: Capture) -> bool:
+        """Le presse-papiers contient-il encore ce que le correcteur y a laissé ? Vrai si on ne sait pas."""
+        return True
+
+    def _forget_borrow(self) -> None:
+        """Le contenu laissé dans le presse-papiers revient à l'utilisateur (texte corrigé à coller lui-même) :
+        plus aucune restauration n'est due, celles en attente sont annulées."""
+        with self._lock:
+            self._borrowed = None
+            self._generation += 1
 
     def _write_saved(self, saved: Any) -> None:
         _qt_set_clipboard(saved)
@@ -295,8 +322,32 @@ class Bridge:
         widget.raise_()
         widget.activateWindow()
 
+    def anchor(self, capture: Capture | None) -> tuple[int, int] | None:
+        """Point de l'écran (pixels natifs) près duquel ouvrir la fenêtre de correction ; None : le pointeur."""
+        return None
+
+    def hotkey_free(self, combo: str) -> bool | None:
+        """Le raccourci est-il libre (pas pris par une autre application) ? None : impossible à savoir."""
+        return None
+
     def diagnostics(self) -> list[str]:
         return [f"Session : {session_type()}"]
+
+
+# Windows : la fenêtre d'origine est un programme lancé en administrateur (UIPI bloque les frappes simulées).
+_ELEVATED = ("Windows empêche le correcteur d'agir sur une fenêtre lancée en administrateur. Copiez le texte "
+             "(Ctrl+C) puis choisissez « Vérifier le presse-papiers » dans le menu de l'icône, ou lancez aussi le "
+             "correcteur en administrateur.")
+_NO_LAST_WINDOW = ("Fenêtre où vous travailliez introuvable : sélectionnez le texte, puis utilisez le raccourci "
+                   "clavier.")
+_MOVED_ON = ("Correction non collée : vous avez {what} pendant qu'elle se faisait, la sélection a pu changer. "
+             "Rien n'a été modifié et le presse-papiers est intact : resélectionnez le texte et recommencez.")
+_WINDOW_GONE = "Fenêtre d'origine introuvable : texte corrigé copié, collez-le avec Ctrl+V."
+# Navigateurs et applications Chromium (Electron) : fins de ligne \n seules au collage. Google Docs comptait
+# \r\n comme deux retours à la ligne (deux paragraphes vides à chaque correction).
+_LF_CLASSES = {"Chrome_WidgetWin_1", "MozillaWindowClass"}
+# Texte mis en forme jamais recollé : Excel colle un tableau HTML avec sa propre mise en forme.
+_NO_HTML_CLASSES = {"XLMAIN"}
 
 
 class WindowsBridge(Bridge):
@@ -309,6 +360,7 @@ class WindowsBridge(Bridge):
 
         self.w = win32
         self._listener = None
+        self._watch = None  # surveillance de la dernière correction express (une seule à la fois)
 
     def hotkeys_supported(self) -> tuple[bool, str]:
         return True, ""
@@ -323,40 +375,139 @@ class WindowsBridge(Bridge):
             self._listener.stop()
             self._listener = None
 
-    def capture(self) -> Capture:
+    def hotkey_free(self, combo: str) -> bool | None:
+        return self.w.hotkey_available(combo)
+
+    def _start_watch(self):
+        """Surveille frappes et clics jusqu'au collage. La précédente s'arrête : elle ne recevrait plus rien
+        (Raw Input : une seule par processus), et sa correction ne doit plus coller."""
+        previous, self._watch = self._watch, None
+        if previous is not None:
+            previous.acted = previous.acted or "frappe"
+            previous.stop()
+        watch = self.w.InputWatch()
+        if not watch.start():
+            watch.stop()
+            return None
+        self._watch = watch
+        return watch
+
+    def _stop_watch(self, capture: Capture):
+        watch, capture.watch = capture.watch, None
+        if watch is not None:
+            watch.stop()
+            if self._watch is watch:
+                self._watch = None
+        return watch
+
+    def capture(self, express: bool = False, from_menu: bool = False) -> Capture:
         w = self.w
         started = time.monotonic()
         hwnd = w.foreground_window()
+        if from_menu and (not hwnd or w.is_own_or_shell(hwnd)):
+            # Clic dans le menu de l'icône : la barre des tâches a pris le premier plan. On revient à la fenêtre
+            # où l'on travaillait, dont la sélection n'a pas bougé.
+            hwnd = w.last_app_window()
+            if not hwnd or not w.activate_window(hwnd):
+                log.info("Menu de l'icône : fenêtre de travail introuvable.")
+                return Capture("", started=started, problem=_NO_LAST_WINDOW)
+            time.sleep(0.15)
         w.wait_modifiers_released()
-        saved = w.snapshot_clipboard()
+        # Correction express : la fenêtre garde le premier plan jusqu'au collage, son contrôle actif ne doit pas
+        # changer. Depuis la fenêtre de correction, elle le reprend à son rythme : pas de comparaison.
+        focus = w.focused_control(hwnd) if express else None
+        watch = self._start_watch() if express else None
+        with self._lock:
+            borrowed = self._borrowed
+        if borrowed is not None and w.clipboard_sequence() == borrowed[1]:
+            # Restauration encore due (corrections en rafale) : le presse-papiers contient ce que le correcteur y a
+            # laissé, pas ce que l'utilisateur avait copié. C'est le contenu d'origine, déjà gardé, qu'il faudra remettre.
+            saved = borrowed[0]
+        else:
+            saved = w.snapshot_clipboard()
         seq = w.clipboard_sequence()
-        w.send_ctrl("c")
+        w.send_copy(hwnd)
         deadline = time.monotonic() + 0.8
         while time.monotonic() < deadline and w.clipboard_sequence() == seq:
             time.sleep(0.015)
         changed = w.clipboard_sequence() != seq
-        text = ""
+        text, html = "", None
         if changed:
             time.sleep(0.02)  # certaines applications écrivent en plusieurs fois
             text = w.get_clipboard_text() or ""
-        return Capture(text.replace("\r\n", "\n"), target=hwnd, from_selection=bool(text),
-                       saved_clipboard=saved, clipboard_touched=changed, started=started)
+            if text:
+                html = w.get_clipboard_bytes(w.html_format())
+        capture = Capture(text.replace("\r\n", "\n"), target=hwnd, from_selection=bool(text), saved_clipboard=saved,
+                          clipboard_touched=changed, started=started, left=w.clipboard_sequence(), focus=focus,
+                          watch=watch, html=html)
+        if not text:
+            self._stop_watch(capture)
+            name = w.window_class(hwnd) if hwnd else "aucune"
+            if hwnd and w.more_privileged(hwnd):
+                capture.problem = _ELEVATED
+                log.info("Aucun texte lu : fenêtre lancée en administrateur (%s).", name)
+            else:
+                log.info("Aucun texte copié par la fenêtre active (%s)%s.", name, "" if changed else ", presse-papiers inchangé")
+        return capture
 
     def _write_saved(self, saved: Any) -> None:
         self.w.set_clipboard_formats(saved)
 
+    def _clipboard_unchanged(self, capture: Capture) -> bool:
+        return capture.left is None or self.w.clipboard_sequence() == capture.left
+
+    def release(self, capture: Capture) -> None:
+        self._stop_watch(capture)
+        super().release(capture)
+
+    def _formats(self, capture: Capture, text: str) -> dict[int, bytes]:
+        """Texte corrigé (et sa version mise en forme quand l'application en avait copié une : gras, liens et
+        espaces insécables restent en place)."""
+        w = self.w
+        kind = w.window_class(capture.target)
+        formats = {w.CF_UNICODETEXT: w.text_bytes(text, crlf=kind not in _LF_CLASSES)}
+        if capture.html and kind not in _NO_HTML_CLASSES:
+            from correcteur.platform.cfhtml import correct_cf_html
+
+            try:
+                html = correct_cf_html(capture.html, capture.text, text)
+            except Exception:
+                log.exception("Mise en forme impossible à garder")
+                html = None
+            if html is not None:
+                formats[w.html_format()] = html
+            else:
+                log.info("Mise en forme non gardée : texte collé sans elle.")
+        return formats
+
     def replace(self, capture: Capture, text: str) -> tuple[bool, str]:
         w = self.w
+        watch = self._stop_watch(capture)
+        if watch is not None and watch.acted:
+            log.info("Collage annulé : %s de l'utilisateur pendant la correction.", watch.acted)
+            self._give_back(capture)
+            return False, _MOVED_ON.format(what="tapé au clavier" if watch.acted == "frappe" else "cliqué")
         if not capture.target or not w.activate_window(capture.target):
             if not w.set_clipboard_text(text):
                 return False, _COPY_FAILED
-            return False, "Fenêtre d'origine introuvable : texte corrigé copié, collez-le avec Ctrl+V."
+            self._forget_borrow()  # le texte corrigé reste dans le presse-papiers : à coller par l'utilisateur
+            log.info("Collage impossible : fenêtre d'origine introuvable.")
+            return False, _WINDOW_GONE
+        if capture.focus and w.focused_control(capture.target) != capture.focus:
+            log.info("Collage annulé : le focus a changé de contrôle dans la fenêtre d'origine.")
+            self._give_back(capture)
+            return False, _MOVED_ON.format(what="changé de zone de saisie")
+        if not self._clipboard_unchanged(capture):
+            # L'utilisateur a copié autre chose depuis la capture (fenêtre de correction restée ouverte) : c'est ce
+            # contenu-là qu'il faudra remettre.
+            capture.saved_clipboard = w.snapshot_clipboard()
         time.sleep(0.06)
-        if not w.set_clipboard_text(text):
+        if not w.set_clipboard_formats(self._formats(capture, text)):
             return False, _COPY_FAILED
+        capture.clipboard_touched = True
+        self._borrow(capture, w.clipboard_sequence())
         w.wait_modifiers_released(0.5)
         w.send_ctrl("v")
-        capture.clipboard_touched = True
         self._defer(_RESTORE_DELAY_MS, lambda: self._give_back(capture))
         return True, ""
 
@@ -366,6 +517,17 @@ class WindowsBridge(Bridge):
     def clipboard_text(self) -> str:
         return (self.w.get_clipboard_text() or "").replace("\r\n", "\n")
 
+    def anchor(self, capture: Capture | None) -> tuple[int, int] | None:
+        """Pointeur hors de la fenêtre d'origine (sur un autre écran, par exemple) : près du curseur de saisie de
+        cette fenêtre s'il est connu, sinon en haut de son centre."""
+        if capture is None or not capture.target:
+            return None
+        w = self.w
+        rect, cursor = w.window_rect(capture.target), w.cursor_pos()
+        if rect is None or (cursor and rect[0] <= cursor[0] < rect[2] and rect[1] <= cursor[1] < rect[3]):
+            return None
+        return w.caret_point(capture.target) or ((rect[0] + rect[2]) // 2, rect[1] + (rect[3] - rect[1]) // 3)
+
     def bring_to_front(self, widget) -> None:
         super().bring_to_front(widget)
         try:
@@ -374,7 +536,8 @@ class WindowsBridge(Bridge):
             pass
 
     def diagnostics(self) -> list[str]:
-        return ["Session : Windows", "Raccourcis : RegisterHotKey", "Sélection : Ctrl+C simulé (presse-papiers restauré)"]
+        return ["Session : Windows", "Raccourcis : RegisterHotKey",
+                "Sélection : Ctrl+C simulé, Ctrl+Inser dans les consoles (presse-papiers restauré)"]
 
 
 def xtest_key(letter: str):
@@ -570,7 +733,7 @@ class X11Bridge(Bridge):
             return False  # sans python-xlib, impossible de savoir : copie simulée
         return selection_owned_by_client_of("PRIMARY", window)
 
-    def capture(self) -> Capture:
+    def capture(self, express: bool = False, from_menu: bool = False) -> Capture:
         started = time.monotonic()
         target = self._active_window()
         if self._primary_from(target):
@@ -928,7 +1091,7 @@ class WaylandBridge(Bridge):
         while self._restoring and time.monotonic() < end:
             time.sleep(0.02)
 
-    def capture(self) -> Capture:
+    def capture(self, express: bool = False, from_menu: bool = False) -> Capture:
         started = time.monotonic()
         self._wait_restoring()
         # Jamais la sélection primaire : c'est celle de la dernière application où l'on a sélectionné, pas

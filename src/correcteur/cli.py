@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import codecs
 import json
+import locale
 import logging
 import os
 import re
@@ -55,12 +57,94 @@ def _attach_console_windows() -> None:
         pass
 
 
+# Caractères absents de la page de code d'une console (850 en France) : un équivalent plutôt qu'un « ? ».
+_PLAIN_EQUIVALENTS = {"’": "'", "‘": "'", "“": '"', "”": '"', "œ": "oe", "Œ": "OE", "…": "...", "\u2013": "-",
+                      "\u2014": "-", "€": "EUR", "\u202f": " ", "\u2009": " ", "→": "->", "✓": "v"}
+
+
+def _plain_equivalents(error: UnicodeError):
+    if not isinstance(error, UnicodeEncodeError):
+        raise error
+    part = error.object[error.start:error.end]
+    return "".join(_PLAIN_EQUIVALENTS.get(char, "?") for char in part), error.end
+
+
+codecs.register_error("correcteur", _plain_equivalents)
+
+
+def _windows_stream(number: int) -> str:
+    """Nature d'une entrée ou sortie standard sous Windows : "console", "tube", "fichier" ou ""."""
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetStdHandle.restype = ctypes.c_void_p
+        kernel32.GetFileType.argtypes = [ctypes.c_void_p]
+        kind = kernel32.GetFileType(kernel32.GetStdHandle(number))
+    except Exception:
+        return ""
+    return {1: "fichier", 2: "console", 3: "tube"}.get(kind, "")
+
+
+def _console_code_page(output: bool = True) -> str | None:
+    """Page de code de la console (« cp850 »), None sans console."""
+    try:
+        import ctypes
+
+        page = ctypes.windll.kernel32.GetConsoleOutputCP() if output else ctypes.windll.kernel32.GetConsoleCP()
+    except Exception:
+        return None
+    if not page:
+        return None
+    return "utf-8" if page == 65001 else f"cp{page}"
+
+
 def _utf8_io() -> None:
-    for stream in (sys.stdout, sys.stderr):
+    """Sorties en UTF-8, sauf sous Windows vers un tube : PowerShell, findstr ou more lisent alors dans la page de
+    code de la console (850), et « $r = correcteur-cli ... » donnait « lev├® » au lieu de « levé ». Un encodage
+    choisi par PYTHONIOENCODING est respecté."""
+    if os.environ.get("PYTHONIOENCODING"):
+        return
+    for number, stream in ((-11, sys.stdout), (-12, sys.stderr)):
+        encoding, errors = "utf-8", "replace"
+        if sys.platform == "win32" and _windows_stream(number) == "tube":
+            encoding = _console_code_page() or "utf-8"
+            errors = "correcteur"
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+            stream.reconfigure(encoding=encoding, errors=errors)  # type: ignore[union-attr]
         except Exception:
             pass
+
+
+def _ansi() -> str:
+    """Encodage des anciens fichiers Windows (« ANSI ») : celui du système sous Windows, Windows-1252 ailleurs."""
+    preferred = locale.getpreferredencoding(False) if sys.platform == "win32" else ""
+    return preferred if preferred and codecs.lookup(preferred).name not in ("utf-8", "ascii") else "cp1252"
+
+
+def decode_text(data: bytes, fallback: str | None = None) -> tuple[str, str]:
+    """(texte, encodage) d'un fichier ou de l'entrée standard : BOM UTF-8 ou UTF-16, UTF-8, UTF-16 sans BOM
+    (Bloc-notes, PowerShell), sinon `fallback` (par défaut : ANSI)."""
+    for bom, name in ((codecs.BOM_UTF8, "utf-8"), (codecs.BOM_UTF32_LE, "utf-32-le"), (codecs.BOM_UTF32_BE, "utf-32-be"),
+                      (codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be")):
+        if data.startswith(bom):
+            try:
+                return data[len(bom):].decode(name), name
+            except UnicodeDecodeError:
+                break
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    if len(data) >= 4 and len(data) % 2 == 0:
+        for name, zeros in (("utf-16-le", data[1::2]), ("utf-16-be", data[0::2])):
+            if zeros.count(0) * 2 > len(zeros):
+                try:
+                    return data.decode(name), name
+                except UnicodeDecodeError:
+                    pass
+    name = fallback or _ansi()
+    return data.decode(name, errors="replace"), name
 
 
 def _colors() -> bool:
@@ -82,18 +166,39 @@ def _colors() -> bool:
     return True
 
 
+_ENCODING_NAMES = {"utf-16-le": "UTF-16", "utf-16-be": "UTF-16", "utf-32-le": "UTF-32", "utf-32-be": "UTF-32"}
+
+
 def _read_file(path: str) -> str:
-    """Contenu exact du fichier (fins de ligne d'origine, sans l'éventuel BOM UTF-8)."""
+    """Contenu exact du fichier (fins de ligne d'origine, sans BOM) : UTF-8, UTF-16 ou ANSI (Windows-1252),
+    signalé sur la sortie d'erreur s'il n'est pas en UTF-8."""
     try:
-        with open(path, encoding="utf-8-sig", newline="") as fh:
-            return fh.read()
-    except UnicodeDecodeError:
-        raise ValueError(f"le fichier « {path} » n'est pas en UTF-8 : enregistrez-le en UTF-8 puis "
-                         "recommencez.") from None
+        with open(path, "rb") as fh:
+            data = fh.read()
     except FileNotFoundError:
         raise ValueError(f"fichier « {path} » introuvable.") from None
     except OSError as exc:
         raise ValueError(f"lecture du fichier « {path} » impossible ({exc.strerror or exc}).") from None
+    text, encoding = decode_text(data)
+    if encoding != "utf-8":
+        name = _ENCODING_NAMES.get(encoding) or f"ANSI ({encoding})"
+        print(f"Remarque : « {path} » n'est pas en UTF-8, il a été lu en {name}.", file=sys.stderr)
+    return text
+
+
+def _read_stdin() -> str:
+    """Entrée standard. Sous Windows, les octets d'un tube viennent d'un autre programme : « echo » de cmd écrit
+    dans la page de code de la console (850, « levé » devenait « lev‚ »), PowerShell 7 en UTF-8."""
+    if sys.stdin is None:
+        return ""
+    if sys.platform != "win32" or os.environ.get("PYTHONIOENCODING"):
+        return sys.stdin.read()
+    kind = _windows_stream(-10)
+    if kind not in ("tube", "fichier"):
+        return sys.stdin.read()
+    data = sys.stdin.buffer.read()
+    fallback = _console_code_page(output=False) if kind == "tube" else None
+    return decode_text(data, fallback)[0]
 
 
 def _read_text(args) -> str:
@@ -103,7 +208,7 @@ def _read_text(args) -> str:
         return " ".join(args.texte)
     if sys.stdin is None or sys.stdin.isatty():
         print("Tapez ou collez le texte, puis Ctrl+D (Linux) ou Ctrl+Z puis Entrée (Windows) :", file=sys.stderr)
-    return sys.stdin.read() if sys.stdin else ""
+    return _read_stdin()
 
 
 def _normalize_language(value: str | None) -> str | None:
@@ -168,6 +273,13 @@ def _partial_warning(result) -> str | None:
     return None
 
 
+def _ascii_json() -> bool:
+    """JSON en ASCII (« \\u00e9 ») quand la sortie ne sait pas tout écrire (page de code d'une console) : il reste
+    exact pour qui le lit, au lieu de perdre des caractères."""
+    encoding = (getattr(sys.stdout, "encoding", "") or "utf-8").lower().replace("_", "-")
+    return encoding not in ("utf-8", "utf8")
+
+
 def cmd_verifier(args) -> int:
     args.langue = _normalize_language(args.langue)
     text = _read_text(args)
@@ -183,7 +295,9 @@ def cmd_verifier(args) -> int:
             "fautes": [i.to_dict(text) for i in result.issues],
             "moteurs": {n: {"ok": s.ok, "detail": s.detail, "ms": round(s.duration_ms)} for n, s in result.statuses.items()},
         }
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if unchecked:
+            payload["non_verifie"] = unchecked
+        print(json.dumps(payload, ensure_ascii=_ascii_json(), indent=2))
         if unchecked:
             print(unchecked, file=sys.stderr)
             return EXIT_UNCHECKED
@@ -268,7 +382,7 @@ def cmd_diagnostic(args) -> int:
 
     settings = SettingsStore().load()
     print(f"{APP_NAME} {__version__} (Python {sys.version.split()[0]}, {sys.platform})")
-    print(f"Session : {session_type()} {desktop_name()}")
+    print("Session : " + " ".join(part for part in (session_type(), desktop_name()) if part))
     print(f"Paramètres : {config_dir()}")
     print(f"Données : {data_dir()}")
     print(f"Journal : {log_path()}")
@@ -310,12 +424,37 @@ def cmd_demarrage(args) -> int:
     return 0
 
 
+# Textes d'argparse (aide et erreurs) en français, comme le reste du correcteur.
+_ARGPARSE_FR = {
+    "usage: ": "utilisation : ",
+    "positional arguments": "arguments",
+    "optional arguments": "options",
+    "options": "options",
+    "show this help message and exit": "afficher cette aide",
+    "show program's version number and exit": "afficher la version",
+    "%(prog)s: error: %(message)s\n": "%(prog)s : erreur : %(message)s\n",
+    "the following arguments are required: %s": "il manque : %s",
+    "invalid choice: %(value)r (choose from %(choices)s)": "choix inconnu : %(value)r (possibles : %(choices)s)",
+    "unrecognized arguments: %s": "arguments inconnus : %s",
+    "expected one argument": "une valeur est attendue",
+    "ambiguous option: %(option)s could match %(matches)s": "option ambiguë : %(option)s (%(matches)s ?)",
+    "argument %(argument_name)s: %(message)s": "argument %(argument_name)s : %(message)s",
+    "invalid %(type)s value: %(value)r": "valeur invalide : %(value)r",
+    "not allowed with argument %s": "impossible avec l'argument %s",
+}
+
+
+def _french(message: str) -> str:
+    return _ARGPARSE_FR.get(message, message)
+
+
 def build_parser() -> argparse.ArgumentParser:
+    argparse._ = _french  # type: ignore[attr-defined]  (argparse traduit ses textes par cette fonction)
     parser = argparse.ArgumentParser(prog="correcteur", description="Correcteur d'orthographe et de grammaire.")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     parser.add_argument("--demarrage", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug", action="store_true", help="journal détaillé")
-    sub = parser.add_subparsers(dest="commande")
+    sub = parser.add_subparsers(dest="commande", title="commandes", metavar="COMMANDE")
 
     for name, help_text in (
         ("selection", "vérifier le texte sélectionné (fenêtre)"),
@@ -331,7 +470,7 @@ def build_parser() -> argparse.ArgumentParser:
                                   ("corriger", cmd_corriger, "afficher le texte corrigé")):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("texte", nargs="*", help="texte à vérifier (sinon : entrée standard)")
-        p.add_argument("-f", "--fichier", help="fichier texte (UTF-8)")
+        p.add_argument("-f", "--fichier", help="fichier texte (UTF-8, UTF-16 ou ANSI)")
         p.add_argument("-l", "--langue", help="auto, fr, ou un code comme en ou en-US")
         p.add_argument("--strict", action="store_true", help="typographie stricte")
         p.add_argument("--hors-ligne", action="store_true", help="n'utiliser que les moteurs locaux")
@@ -346,7 +485,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dossier", help="dossier d'installation de Grammalecte (par défaut : dossier des moteurs)")
     p.set_defaults(func=cmd_installer)
     sub.add_parser("diagnostic", help="état de l'installation").set_defaults(func=cmd_diagnostic)
-    sub.add_parser("raccourcis-gnome", help="créer les raccourcis clavier GNOME").set_defaults(func=cmd_gnome)
+    if sys.platform != "win32":
+        sub.add_parser("raccourcis-gnome", help="créer les raccourcis clavier GNOME").set_defaults(func=cmd_gnome)
     p = sub.add_parser("demarrage", help="lancement automatique à l'ouverture de session")
     p.add_argument("etat", choices=["oui", "non"])
     p.set_defaults(func=cmd_demarrage)
@@ -367,7 +507,10 @@ def main(argv: list[str] | None = None) -> int:
         except KeyboardInterrupt:
             return 130
         except Exception as exc:
-            print(f"Erreur : {exc}", file=sys.stderr)
+            if getattr(args, "json", False):
+                print(json.dumps({"erreur": str(exc)}, ensure_ascii=_ascii_json()))  # sortie toujours lisible en JSON
+            else:
+                print(f"Erreur : {exc}", file=sys.stderr)
             return 2
 
     from correcteur.platform.ipc import send_command

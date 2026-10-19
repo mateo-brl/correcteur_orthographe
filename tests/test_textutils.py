@@ -136,3 +136,50 @@ def test_describe_changes_counts_spaces():
     before, after = "Je vais a la plage , et ecole est fermée.", "Je vais à la plage, et école est fermée."
     assert describe_changes(before, after) == "a → à, ecole → école, 1 espace corrigée"
     assert describe_changes("le  mail", "le mail") == ""  # seules, les espaces n'ont rien à montrer
+
+
+@pytest.mark.parametrize("before, after, expected", [
+    ("Sa fait longtemps qu'on ne c'est pas vu !", "Ça fait longtemps qu'on ne s'est pas vu !", "Sa → Ça, c'est → s'est"),
+    ("Que fait t'il ?", "Que fait-il ?", "fait t'il → fait-il"),
+    ("Dit moi ce que tu en pense.", "Dis-moi ce que tu en penses.", "Dit moi → Dis-moi, pense → penses"),
+    ("c'est-a-dire", "c'est-à-dire", "c'est-a-dire → c'est-à-dire"),
+    ("Il est arrivé a l'heure", "Il est arrivé à l'heure", "a → à"),
+], ids=["apostrophe", "trait d'union", "impératif", "locution", "mot seul"])
+def test_describe_changes_shows_whole_words(before, after, expected):
+    """« c → s » et « t' → - » ne disaient rien : le bilan montre les mots entiers."""
+    from correcteur.textutils import describe_changes
+
+    assert describe_changes(before, after) == expected
+
+
+def test_diff_edits_on_a_long_repetitive_text_is_fast_and_exact():
+    """300 lignes du même message : 46 s de diff (interface figée pendant la correction express), 0,1 s au plus
+    maintenant. Les modifications refont exactement le texte corrigé, même si des lignes changent."""
+    import random
+    import time
+
+    from correcteur.textutils import apply_edits
+
+    message = ("Bonjour Marie,\nje t'écrit pour te dire que je serai la demain a 8 heures. Les enfants on hâte de te "
+               "voir, ils parle de toi tout les jours.\nBisous, Paul")
+    fixed = message.replace("je t'écrit", "Je t'écris").replace(" la demain a", " là demain à") \
+        .replace(" on hâte", " ont hâte").replace("ils parle", "ils parlent").replace("tout les", "tous les")
+    before, after = "\n".join([message] * 100), "\n".join([fixed] * 100)
+    start = time.monotonic()
+    edits = diff_edits(before, after)
+    assert time.monotonic() - start < 2
+    assert apply_edits(before, edits) == after and len(edits) == 700  # 7 mots corrigés par message
+    random.seed(3)
+    words = "le la les de un et à a est sont ces ses c'est s'est mais mes on ont Paul. Marie ! ?".split()
+    for _ in range(20):
+        lines = [" ".join(random.choice(words) for _ in range(random.randint(0, 30))) for _ in range(150)]
+        changed = list(lines)
+        for _ in range(10):
+            i = random.randrange(len(changed))
+            changed[i] = changed[i].replace(" a ", " à ", 1) + random.choice(["", " fin"])
+        if random.random() < 0.5:
+            changed.insert(random.randrange(len(changed)), "ligne ajoutée")
+        a, b = "\n".join(lines), "\n".join(changed)
+        if random.random() < 0.3:
+            a, b = a.replace("\n", " "), b.replace("\n", " ")  # un seul long paragraphe : découpé en phrases
+        assert apply_edits(a, diff_edits(a, b)) == b

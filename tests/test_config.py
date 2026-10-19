@@ -136,3 +136,25 @@ def test_dictionary_file_is_private(home):
     d = PersonalDictionary()
     d.add("Zorglub")
     assert stat.S_IMODE(d.path.stat().st_mode) == 0o600
+
+
+def test_portable_version_keeps_its_data_next_to_it(tmp_path, monkeypatch):
+    """M7 : la version portable lisait et écrivait %LOCALAPPDATA%\\Correcteur, comme la version installée."""
+    import sys
+
+    from correcteur import config
+
+    monkeypatch.delenv("CORRECTEUR_HOME", raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "Mes essais été" / "Correcteur.exe"))
+    (tmp_path / "Mes essais été").mkdir()
+    config.portable_dir.cache_clear()
+    try:
+        assert config.portable_dir() is None  # sans portable.txt : version installée
+        (tmp_path / "Mes essais été" / "portable.txt").write_text("portable", encoding="utf-8")
+        config.portable_dir.cache_clear()
+        data = tmp_path / "Mes essais été" / "Données"
+        assert config.portable_dir() == data
+        assert config.config_dir() == data and config.data_dir() == data and config.log_path().parent == data
+    finally:
+        config.portable_dir.cache_clear()

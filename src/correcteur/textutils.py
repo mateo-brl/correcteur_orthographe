@@ -83,6 +83,47 @@ def _is_word(s: str) -> bool:
     return bool(_WORD_RE.search(s))
 
 
+# Au-delà de cette taille, les deux versions sont d'abord appariées ligne à ligne, puis phrase à phrase : le
+# diff mot à mot d'un long texte répétitif (mêmes mots des milliers de fois) prenait 45 s pour 300 lignes.
+_DIFF_DIRECT_MAX = 4000
+_LINE_RE = re.compile(r"[^\n]*\n|[^\n]+")
+_SENTENCE_RE = re.compile(r".*?(?:[.!?…]+\s+|\Z)", re.DOTALL)
+
+
+def _pieces(text: str, pattern: re.Pattern) -> list[str]:
+    return [m.group() for m in pattern.finditer(text) if m.group()]
+
+
+def _paired(original: str, corrected: str, level: int = 0) -> Iterator[tuple[int, str, str]]:
+    """(début dans `original`, morceau d'origine, morceau corrigé) : des morceaux courts, dont les concaténations
+    redonnent les deux textes. Lignes (puis phrases) appariées une à une quand leur nombre est le même ; sinon
+    par un diff sur les morceaux entiers, rapide puisqu'ils sont peu nombreux."""
+    if len(original) + len(corrected) <= _DIFF_DIRECT_MAX or level > 1:
+        yield 0, original, corrected
+        return
+    pattern = _LINE_RE if level == 0 else _SENTENCE_RE
+    a, b = _pieces(original, pattern), _pieces(corrected, pattern)
+    if len(a) == len(b):
+        pairs = list(zip(a, b))
+    else:
+        pairs = []
+        matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                pairs += list(zip(a[i1:i2], b[j1:j2]))
+            else:
+                pairs.append(("".join(a[i1:i2]), "".join(b[j1:j2])))
+    if len(pairs) == 1:
+        yield from _paired(original, corrected, level + 1)
+        return
+    offset = 0
+    for old, new in pairs:
+        if old != new:
+            for start, sub_old, sub_new in _paired(old, new, level + 1):
+                yield offset + start, sub_old, sub_new
+        offset += len(old)
+
+
 def diff_edits(original: str, corrected: str) -> list[tuple[int, int, str]]:
     """Compare deux versions d'un texte mot à mot et renvoie les modifications
     sous forme (debut, fin, remplacement) dans les coordonnées de `original`.
@@ -90,6 +131,16 @@ def diff_edits(original: str, corrected: str) -> list[tuple[int, int, str]]:
     Une modification qui ne touche que de la ponctuation ou des espaces est
     rattachée au mot voisin pour être visible et compréhensible
     ("Bonjour Marie" -> "Bonjour, Marie" donne "Bonjour" -> "Bonjour,")."""
+    if original == corrected:
+        return []
+    edits: list[tuple[int, int, str]] = []
+    for offset, old, new in _paired(original, corrected):
+        if old != new:
+            edits += [(offset + s, offset + e, rep) for s, e, rep in _diff_words(old, new)]
+    return edits
+
+
+def _diff_words(original: str, corrected: str) -> list[tuple[int, int, str]]:
     a_tok = tokenize(original)
     b_tok = tokenize(corrected)
     a_str = [original[s:e] for s, e in a_tok]
@@ -307,13 +358,32 @@ def match_case(original: str, suggestion: str) -> str:
     return suggestion
 
 
+_JOINERS = "'’-"
+
+
+def _word_group(text: str, start: int, end: int, reach: int = 30) -> tuple[int, int]:
+    """Étend [start, end) aux mots entiers, apostrophes et traits d'union compris : « c'est → s'est » plutôt que
+    « c → s », « fait t'il → fait-il » plutôt que « t' → - »."""
+    def joined(i: int) -> bool:  # text[i] colle au mot qui le précède ou le suit
+        return text[i].isalnum() or (text[i] in _JOINERS and 0 < i < len(text) - 1
+                                     and text[i - 1].isalnum() and text[i + 1].isalnum())
+
+    s, e = start, end
+    while s > 0 and start - s < reach and joined(s - 1):
+        s -= 1
+    while e < len(text) and e - end < reach and joined(e):
+        e += 1
+    return s, e
+
+
 def describe_changes(before: str, after: str, limit: int = 4) -> str:
     """« aller → allé, a → à, obtenu → obtenus… » : ce qu'une correction a changé, mot à mot. Les espaces
     corrigées sont comptées à la fin (« a → à, 1 espace corrigée »), pour que la liste corresponde au nombre
     de corrections annoncé ; seules, elles n'ont rien de lisible à montrer : "" (le nombre suffit)."""
     words, spaces = [], 0
     for s, e, rep in diff_edits(before, after):
-        old, new = before[s:e].strip(), rep.strip()
+        s2, e2 = _word_group(before, s, e)
+        old, new = before[s2:e2].strip(), (before[s2:s] + rep + before[e:e2]).strip()
         if old.split() != new.split():
             words.append(f"{old} → {new}")
         else:
