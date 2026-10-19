@@ -23,6 +23,18 @@ def test_input_structure_size():
     assert ctypes.sizeof(win32.INPUT) == (40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
 
 
+def test_other_structure_sizes():
+    """Tailles des structures Windows (64 bits) : Raw Input, GetGUIThreadInfo et crochet clavier en dépendent."""
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        pytest.skip("tailles vérifiées en 64 bits")
+    assert ctypes.sizeof(win32.RAWINPUTHEADER) == 24
+    assert ctypes.sizeof(win32.RAWMOUSE) == 24 and ctypes.sizeof(win32.RAWKEYBOARD) == 16
+    assert ctypes.sizeof(win32.RAWINPUT) == 48
+    assert ctypes.sizeof(win32.GUITHREADINFO) == 72
+    assert ctypes.sizeof(win32.KBDLLHOOKSTRUCT) == 24
+    assert ctypes.sizeof(win32.RAWINPUTDEVICE) == 16
+
+
 @pytest.mark.parametrize("combo, mods, vk", [
     ("<ctrl>+<alt>+c", win32.MOD_CONTROL | win32.MOD_ALT, 0x43),
     ("<ctrl>+<shift>+<f8>", win32.MOD_CONTROL | win32.MOD_SHIFT, 0x77),
