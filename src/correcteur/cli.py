@@ -99,15 +99,27 @@ def _console_code_page(output: bool = True) -> str | None:
     return "utf-8" if page == 65001 else f"cp{page}"
 
 
+def _forced_encoding() -> tuple[str, str] | None:
+    """Encodage imposé par PYTHONIOENCODING (« utf-8 », « cp850:replace »), appliqué par le correcteur lui-même :
+    l'exécutable empaqueté (PyInstaller) ignore les variables PYTHON* et aurait écrit en Windows-1252."""
+    name, _, errors = os.environ.get("PYTHONIOENCODING", "").partition(":")
+    if not name:
+        return None
+    try:
+        codecs.lookup(name)
+    except LookupError:
+        return None
+    return name, errors or "replace"
+
+
 def _utf8_io() -> None:
     """Sorties en UTF-8, sauf sous Windows vers un tube : PowerShell, findstr ou more lisent alors dans la page de
     code de la console (850), et « $r = correcteur-cli ... » donnait « lev├® » au lieu de « levé ». Un encodage
-    choisi par PYTHONIOENCODING est respecté."""
-    if os.environ.get("PYTHONIOENCODING"):
-        return
+    imposé par PYTHONIOENCODING passe avant tout."""
+    forced = _forced_encoding()
     for number, stream in ((-11, sys.stdout), (-12, sys.stderr)):
-        encoding, errors = "utf-8", "replace"
-        if sys.platform == "win32" and _windows_stream(number) == "tube":
+        encoding, errors = forced or ("utf-8", "replace")
+        if not forced and sys.platform == "win32" and _windows_stream(number) == "tube":
             encoding = _console_code_page() or "utf-8"
             errors = "correcteur"
         try:
@@ -191,7 +203,12 @@ def _read_stdin() -> str:
     dans la page de code de la console (850, « levé » devenait « lev‚ »), PowerShell 7 en UTF-8."""
     if sys.stdin is None:
         return ""
-    if sys.platform != "win32" or os.environ.get("PYTHONIOENCODING"):
+    if not hasattr(sys.stdin, "buffer") or sys.stdin.isatty():
+        return sys.stdin.read()  # console : Python y lit déjà de l'Unicode
+    forced = _forced_encoding()
+    if forced:
+        return sys.stdin.buffer.read().decode(*forced)
+    if sys.platform != "win32":
         return sys.stdin.read()
     kind = _windows_stream(-10)
     if kind not in ("tube", "fichier"):
