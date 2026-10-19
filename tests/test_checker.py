@@ -406,7 +406,7 @@ def test_autocorrect_does_not_wait_forever_for_a_slow_engine(home):
     c.close()
     assert result.done and result.statuses["grammalecte"].ok
     assert not result.statuses["languagetool"].ok
-    assert "0.3 s" in result.statuses["languagetool"].detail
+    assert "0,3 s" in result.statuses["languagetool"].detail  # virgule française
 
 
 def test_partial_updates_are_streamed(home):

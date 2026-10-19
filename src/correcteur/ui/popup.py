@@ -43,6 +43,16 @@ _MAX_CARDS = 150
 _COPY_FAILED = "Copie impossible : le presse-papiers est inaccessible."
 
 
+def native_to_logical(x: int, y: int) -> QPoint | None:
+    """Point en pixels de l'écran (Windows) vers les coordonnées de Qt, qui divisent chaque écran par son facteur
+    d'échelle en gardant son coin haut gauche."""
+    for screen in QGuiApplication.screens():
+        geo, ratio = screen.geometry(), screen.devicePixelRatio() or 1.0
+        if geo.x() <= x < geo.x() + geo.width() * ratio and geo.y() <= y < geo.y() + geo.height() * ratio:
+            return QPoint(round(geo.x() + (x - geo.x()) / ratio), round(geo.y() + (y - geo.y()) / ratio))
+    return None
+
+
 def shift_issues(issues: list[Issue], old: str, new: str, applied: Collection[int] = ()) -> list[Issue]:
     """Recale les fautes après une modification du texte (sans revérifier).
 
@@ -546,7 +556,7 @@ class CorrectionWindow(QWidget):
         self._update_replace_button()
         self.hint.setText("Ctrl+Entrée : " + ("remplacer" if has_target else "copier") + " · Échap : fermer")
         self._rebuild_cards(force=True)
-        self._position_near_cursor()
+        self._position_near(capture)
         self.controller.bring_to_front(self)
         self.editor.setFocus()
         if text.strip():
@@ -554,8 +564,17 @@ class CorrectionWindow(QWidget):
         else:
             self._update_status()
 
-    def _position_near_cursor(self) -> None:
-        pos = QCursor.pos()
+    def _position_near(self, capture: "Capture | None" = None) -> None:
+        """Près du pointeur ; près de la fenêtre d'origine quand le pointeur est ailleurs (sur un autre écran)."""
+        pos = None
+        try:
+            anchor = self.controller.bridge.anchor(capture)
+        except Exception:
+            anchor = None
+        if anchor is not None:
+            pos = native_to_logical(*anchor)
+        if pos is None:
+            pos = QCursor.pos()
         screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
         if screen is None:
             return

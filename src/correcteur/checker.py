@@ -50,6 +50,11 @@ COMMON_ABBREVIATIONS = frozenset(
 _SKIP_SPELLING_RE = re.compile(r"(://|@|^#|^www\.|\.(com|fr|org|net|io)$|^\d)", re.IGNORECASE)
 
 
+def _seconds(value: float) -> str:
+    """« 8 s », « 8,1 s » : une décimale au plus, virgule française."""
+    return f"{round(value, 1):g}".replace(".", ",") + " s"
+
+
 def guess_language(text: str) -> str:
     """Détection minimale français / autre, pour ne pas lancer Grammalecte sur un
     texte anglais en mode "auto"."""
@@ -202,8 +207,8 @@ class Checker:
                     if name not in statuses:
                         label = ENGINE_LABELS.get(name, name)
                         raw[name] = []
-                        statuses[name] = EngineStatus(name, False, f"{label} a mis plus de {timeout:g} s à répondre.",
-                                                      timeout * 1000)
+                        statuses[name] = EngineStatus(name, False, f"{label} a mis plus de {_seconds(timeout)} à "
+                                                      "répondre.", timeout * 1000)
             else:
                 raw[engine.name] = issues
                 statuses[engine.name] = status

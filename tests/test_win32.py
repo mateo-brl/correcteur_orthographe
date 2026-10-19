@@ -109,3 +109,65 @@ def test_autostart_registry(monkeypatch):
     finally:
         autostart.set_autostart(False)
     assert not autostart.autostart_enabled()
+
+
+def test_text_bytes_line_endings():
+    assert win32.text_bytes("a\nb") == "a\r\nb".encode("utf-16-le") + b"\0\0"
+    assert win32.text_bytes("a\r\nb", crlf=False) == "a\nb".encode("utf-16-le") + b"\0\0"
+
+
+def test_html_clipboard_roundtrip():
+    """Format CF_HTML enregistré, écrit puis relu tel quel (la mémoire allouée peut être plus grande)."""
+    _clipboard_or_skip()
+    data = b"Version:0.9\r\nStartFragment:0000000040\r\nEndFragment:0000000044\r\n<b>x</b>\0"
+    assert win32.html_format() >= 0xC000
+    assert win32.set_clipboard_formats({win32.CF_UNICODETEXT: win32.text_bytes("x"), win32.html_format(): data})
+    read = win32.get_clipboard_bytes(win32.html_format())
+    assert read is not None and read.split(b"\0", 1)[0] == data[:-1]
+    assert win32.get_clipboard_text() == "x"
+
+
+def test_hotkey_availability():
+    combo = "<ctrl>+<alt>+<shift>+<f12>"
+    if not win32.hotkey_available(combo):
+        pytest.skip("raccourci déjà pris sur cette machine")
+    listener = win32.HotkeyListener({combo: lambda: None})
+    try:
+        assert listener.start() == []
+        assert win32.hotkey_available(combo) is False  # pris (ici, par le correcteur lui-même)
+    finally:
+        listener.stop()
+    assert win32.hotkey_available(combo) is True
+    assert win32.hotkey_available("ctrl+nimportequoi") is None
+
+
+def test_input_watch_ignores_simulated_keys():
+    """Surveillance Raw Input : en place puis retirée ; les frappes simulées (celles du correcteur) ne comptent pas."""
+    watch = win32.InputWatch()
+    if not watch.start():
+        watch.stop()
+        pytest.skip("Raw Input indisponible (session sans bureau)")
+    try:
+        win32._send([win32._key_input(0x41, False), win32._key_input(0x41, True)])  # A, simulée
+        time.sleep(0.3)
+        assert watch.acted == ""
+    finally:
+        watch.stop()
+    assert not watch._thread.is_alive()
+    again = win32.InputWatch()  # une seule surveillance à la fois : la précédente est bien retirée
+    try:
+        assert again.start()
+    finally:
+        again.stop()
+
+
+def test_window_helpers_never_fail():
+    hwnd = win32.foreground_window()
+    assert isinstance(win32.focused_control(hwnd), int)
+    assert win32.window_rect(0) is None
+    assert win32.caret_point(0) is None
+    assert isinstance(win32.last_app_window(), int)
+    assert win32.more_privileged(hwnd) is False or win32.more_privileged(hwnd) is True
+    if hwnd:
+        assert isinstance(win32.is_own_or_shell(hwnd), bool)
+        assert win32.window_rect(hwnd) is None or len(win32.window_rect(hwnd)) == 4

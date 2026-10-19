@@ -6,7 +6,7 @@ import sys
 import threading
 
 from PySide6.QtCore import QEvent, QObject, Qt, Signal
-from PySide6.QtGui import QKeySequence
+from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -57,17 +57,52 @@ LT_MODES = [
 
 class HotkeyEdit(QKeySequenceEdit):
     """Champ de raccourci où Tab et Maj+Tab passent au champ voisin au lieu d'être enregistrés : sans cela, on
-    ne pouvait plus en sortir au clavier (un raccourci global sans Ctrl, Alt ou Win est de toute façon refusé)."""
+    ne pouvait plus en sortir au clavier (un raccourci global sans Ctrl, Alt ou Win est de toute façon refusé).
+
+    Une combinaison déjà réservée par une autre application n'arrive jamais jusqu'ici : Windows la lui donne. Le
+    champ, vidé dès l'appui de Ctrl, restait vide, et « Enregistrer » gardait l'ancien raccourci sans rien dire.
+    Ctrl, Alt, Maj et Win relâchées sans autre touche : l'ancien raccourci revient et `noKey` le signale."""
+
+    noKey = Signal(str)  # modificateurs appuyés (« Ctrl+Alt »)
+    _MODIFIER_KEYS = {Qt.Key.Key_Control, Qt.Key.Key_Alt, Qt.Key.Key_Shift, Qt.Key.Key_Meta, Qt.Key.Key_AltGr}
 
     def __init__(self, sequence: QKeySequence) -> None:
         super().__init__(sequence)
         self.setMaximumSequenceLength(1)
         self._kept = sequence
+        self._reset()
+
+    def _reset(self) -> None:
+        self._held = Qt.KeyboardModifier.NoModifier  # modificateurs vus pendant la saisie
+        self._pressed: set[int] = set()              # autres touches vues s'enfoncer
+        self._orphan = False                         # touche relâchée sans avoir été vue s'enfoncer
 
     def event(self, event) -> bool:
-        if event.type() == QEvent.Type.FocusIn:
+        kind = event.type()
+        if kind == QEvent.Type.FocusIn:
             self._kept = self.keySequence()
-        elif event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self._reset()
+        elif kind == QEvent.Type.KeyPress and event.key() not in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+            self._held |= event.modifiers()
+            if event.key() not in self._MODIFIER_KEYS:
+                self._pressed.add(event.key())
+        elif kind == QEvent.Type.KeyRelease:
+            if event.key() not in self._MODIFIER_KEYS and event.key() not in self._pressed:
+                self._orphan = True  # son appui a été pris par le raccourci d'une autre application
+            handled = super().event(event)
+            if not QGuiApplication.queryKeyboardModifiers():
+                held, orphan = self._held, self._orphan
+                self._reset()
+                if self.keySequence().isEmpty() and held:
+                    self.setKeySequence(self._kept)
+                    names = [label for flag, label in ((Qt.KeyboardModifier.ControlModifier, "Ctrl"),
+                                                       (Qt.KeyboardModifier.AltModifier, "Alt"),
+                                                       (Qt.KeyboardModifier.ShiftModifier, "Maj"),
+                                                       (Qt.KeyboardModifier.MetaModifier, "Win")) if held & flag]
+                    if orphan or len(names) > 1:
+                        self.noKey.emit("+".join(names))
+            return handled
+        if event.type() == QEvent.Type.KeyPress and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
             free = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier
             if not event.modifiers() & free:
                 if self.keySequence().isEmpty():
@@ -77,6 +112,7 @@ class HotkeyEdit(QKeySequenceEdit):
                                         and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
                 return True
         return super().event(event)
+
 
 class _Signals(QObject):
     progress = Signal(int, int)
@@ -215,9 +251,16 @@ class SettingsDialog(QDialog):
         self.hotkeys_enabled.setChecked(g.hotkeys_enabled)
         box_form.addRow(self.hotkeys_enabled)
         self.hk_check = HotkeyEdit(QKeySequence(hotkeys.to_qt(g.hotkey_check)))
-        box_form.addRow("Vérifier la sélection :", self.hk_check)
+        self.hk_check_error = self._error_label()
+        box_form.addRow("Vérifier la sélection :", self._with_error(self.hk_check, self.hk_check_error))
         self.hk_express = HotkeyEdit(QKeySequence(hotkeys.to_qt(g.hotkey_autocorrect)))
-        box_form.addRow("Correction express :", self.hk_express)
+        self.hk_express_error = self._error_label()
+        box_form.addRow("Correction express :", self._with_error(self.hk_express, self.hk_express_error))
+        for edit, label in ((self.hk_check, self.hk_check_error), (self.hk_express, self.hk_express_error)):
+            edit.noKey.connect(lambda mods, label=label: self._show_error(
+                label, f"Aucune touche reçue après {mods} : cette combinaison est sans doute déjà prise par une "
+                       "autre application. Essayez-en une autre."))
+            edit.keySequenceChanged.connect(lambda _seq, label=label: label.hide())
         explain = QLabel(
             "<b>Vérifier la sélection</b> ouvre la fenêtre du correcteur sur le texte sélectionné.<br>"
             "<b>Correction express</b> corrige directement le texte sélectionné (seulement les corrections sûres)."
@@ -239,6 +282,29 @@ class SettingsDialog(QDialog):
                 box_form.addRow(gnome)
         form.addRow(box)
         return page
+
+    def _error_label(self) -> QLabel:
+        label = QLabel("")
+        label.setWordWrap(True)
+        theme = getattr(self.controller, "theme", None)
+        if theme is not None:
+            label.setStyleSheet(f"color: {theme.spelling};")
+        label.hide()
+        return label
+
+    @staticmethod
+    def _with_error(edit: QWidget, label: QLabel) -> QWidget:
+        box = QWidget()
+        column = QVBoxLayout(box)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(edit)
+        column.addWidget(label)
+        return box
+
+    @staticmethod
+    def _show_error(label: QLabel, text: str) -> None:
+        label.setText(text)
+        label.show()
 
     def _engines_tab(self) -> QWidget:
         page = QWidget()
@@ -411,6 +477,22 @@ class SettingsDialog(QDialog):
             return fallback
         return hotkeys.from_qt(seq)
 
+    def _hotkeys_free(self, wanted) -> bool:
+        """Les nouveaux raccourcis sont-ils libres ? Sinon, l'erreur s'affiche sous le champ et la fenêtre reste
+        ouverte (avant, seule une bulle le disait, après la fermeture). Ceux que le correcteur tient déjà passent."""
+        current = self.controller.settings.general
+        mine = {current.hotkey_check, current.hotkey_autocorrect}
+        free = getattr(getattr(self.controller, "bridge", None), "hotkey_free", None)
+        for combo, edit, label in wanted:
+            if combo in mine or free is None:
+                continue
+            if free(combo) is False:
+                self._show_error(label, f"{hotkeys.display(combo)} est déjà pris par une autre application : "
+                                        "choisissez-en un autre.")
+                edit.setFocus()
+                return False
+        return True
+
     def _accept(self) -> None:
         s = self.settings
         g = s.general
@@ -422,6 +504,9 @@ class SettingsDialog(QDialog):
             return
         if check == express:
             QMessageBox.warning(self, "Raccourcis", "Les deux raccourcis doivent être différents.")
+            return
+        if self.hotkeys_enabled.isChecked() and not self._hotkeys_free(((check, self.hk_check, self.hk_check_error),
+                                                                        (express, self.hk_express, self.hk_express_error))):
             return
         g.language = self.language.currentData()
         g.typography = "stricte" if self.typo_strict.isChecked() else "standard"

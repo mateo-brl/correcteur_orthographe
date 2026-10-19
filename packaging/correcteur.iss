@@ -39,8 +39,9 @@ Name: "bureau"; Description: "Créer un raccourci sur le Bureau"; Flags: uncheck
 Source: "..\dist\Correcteur\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{userprograms}\Correcteur"; Filename: "{app}\Correcteur.exe"
-Name: "{userdesktop}\Correcteur"; Filename: "{app}\Correcteur.exe"; Tasks: bureau
+; Même identifiant que l'application (SetCurrentProcessExplicitAppUserModelID) : Windows l'associe au raccourci.
+Name: "{userprograms}\Correcteur"; Filename: "{app}\Correcteur.exe"; AppUserModelID: "Correcteur.App"
+Name: "{userdesktop}\Correcteur"; Filename: "{app}\Correcteur.exe"; AppUserModelID: "Correcteur.App"; Tasks: bureau
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Correcteur"; \
@@ -52,3 +53,24 @@ Filename: "{app}\Correcteur.exe"; Description: "Lancer le correcteur maintenant"
 [UninstallRun]
 Filename: "{app}\correcteur-cli.exe"; Parameters: "quitter"; Flags: runhidden; RunOnceId: "QuitterCorrecteur"
 Filename: "{app}\correcteur-cli.exe"; Parameters: "demarrage non"; Flags: runhidden; RunOnceId: "SansDemarrage"
+
+[Code]
+// Désinstallation : les paramètres, le dictionnaire personnel, les journaux et les moteurs téléchargés
+// (LanguageTool : près de 400 Mo) sont dans %LOCALAPPDATA%\Correcteur. On demande avant de les supprimer ;
+// sans réponse possible (désinstallation silencieuse), on les garde.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Data: String;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    exit;
+  Data := ExpandConstant('{localappdata}\Correcteur');
+  if UninstallSilent or not DirExists(Data) then
+    exit;
+  if MsgBox('Supprimer aussi vos paramètres, votre dictionnaire personnel et les moteurs téléchargés ?' + #13#10#13#10 +
+            'Dossier : ' + Data + #13#10 +
+            'Le moteur LanguageTool téléchargé pour le mode « Sur ce PC » peut occuper près de 400 Mo.' + #13#10#13#10 +
+            'Choisissez Non pour les garder en vue d''une réinstallation.',
+            mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+    DelTree(Data, True, True, True);
+end;

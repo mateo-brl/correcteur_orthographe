@@ -670,3 +670,48 @@ def test_redo_brings_back_the_highlight_and_the_note(qapp, make_window):
     window.editor.redo()
     assert window.editor.plain_text() == FIXED
     assert window.editor.marked_ranges() == marked and window.auto_note.isVisible()
+
+
+def test_hotkey_taken_by_another_app_is_explained(qapp, home):
+    """G7 : Ctrl+Alt+K réservé par une autre application n'arrive jamais au champ (seul son relâchement arrive).
+    Le champ restait vide et « Enregistrer » gardait l'ancien raccourci sans rien dire."""
+    from PySide6.QtTest import QTest
+
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    dialog = SettingsDialog(settings, FakeController(settings, PersonalDictionary()))
+    dialog.show()
+    edit = dialog.hk_express
+    edit.setFocus()
+    before = edit.keySequence().toString()
+    ctrl_alt = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+    QTest.keyPress(edit, Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier)
+    QTest.keyPress(edit, Qt.Key.Key_Alt, ctrl_alt)
+    QTest.keyRelease(edit, Qt.Key.Key_K, ctrl_alt)  # appui pris par l'autre application
+    QTest.keyRelease(edit, Qt.Key.Key_Alt, Qt.KeyboardModifier.ControlModifier)
+    QTest.keyRelease(edit, Qt.Key.Key_Control, Qt.KeyboardModifier.NoModifier)
+    assert edit.keySequence().toString() == before
+    assert dialog.hk_express_error.isVisibleTo(dialog) and "Ctrl+Alt" in dialog.hk_express_error.text()
+    dialog.close()
+
+
+def test_saving_a_taken_hotkey_keeps_the_dialog_open(qapp, home):
+    """Raccourci pris après la saisie : l'erreur s'affiche sous le champ, rien n'est enregistré."""
+    from PySide6.QtGui import QKeySequence
+
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    controller = FakeController(settings, PersonalDictionary())
+    controller.bridge.hotkey_free = lambda combo: combo != "<ctrl>+<alt>+k"
+    dialog = SettingsDialog(settings, controller)
+    dialog.hk_express.setKeySequence(QKeySequence("Ctrl+Alt+K"))
+    dialog.typo_strict.setChecked(True)
+    dialog._accept()
+    assert controller.settings.general.typography == "standard"  # rien d'enregistré
+    assert "déjà pris" in dialog.hk_express_error.text() and dialog.hk_express_error.isVisibleTo(dialog)
+    dialog.hk_express.setKeySequence(QKeySequence("Ctrl+Alt+J"))
+    assert not dialog.hk_express_error.isVisibleTo(dialog)
+    dialog._accept()
+    assert controller.settings.general.hotkey_autocorrect == "<ctrl>+<alt>+j"
