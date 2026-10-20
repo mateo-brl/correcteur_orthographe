@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import threading
 
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -302,10 +303,22 @@ class SettingsDialog(QDialog):
         column.addWidget(label)
         return box
 
-    @staticmethod
-    def _show_error(label: QLabel, text: str) -> None:
+    def _show_error(self, label: QLabel, text: str) -> None:
         label.setText(text)
         label.show()
+        # Message sur deux lignes : la fenêtre grandit pour l'afficher en entier (sa 2e ligne était coupée).
+        QTimer.singleShot(0, lambda: self._fit_label(label))
+
+    def _fit_label(self, label: QLabel) -> None:
+        if not label.isVisible():
+            return
+        need = label.heightForWidth(label.width())
+        if need > label.height():
+            label.setMinimumHeight(need)
+            self.layout().activate()
+            height = self.sizeHint().height()
+            if height > self.height():
+                self.resize(self.width(), height)
 
     def _engines_tab(self) -> QWidget:
         page = QWidget()
@@ -398,7 +411,12 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(QLabel("Règles désactivées :"))
         self.rules = QListWidget()
-        self.rules.addItems(self.settings.ignored_rules)
+        for rule in self.settings.ignored_rules:
+            # La description si elle est connue (règle coupée depuis la 0.1.14), l'identifiant en infobulle.
+            item = QListWidgetItem(self.settings.rule_labels.get(rule) or rule)
+            item.setData(Qt.ItemDataRole.UserRole, rule)
+            item.setToolTip(rule)
+            self.rules.addItem(item)
         layout.addWidget(self.rules, 1)
         restore = QPushButton("Réactiver la règle sélectionnée")
         restore.clicked.connect(lambda: [self.rules.takeItem(self.rules.row(i)) for i in self.rules.selectedItems()])
@@ -530,8 +548,10 @@ class SettingsDialog(QDialog):
         lt.picky = self.lt_picky.isChecked()
         # Règles coupées et mots ajoutés depuis la fenêtre de correction pendant que celle-ci était ouverte :
         # gardés. Seuls disparaissent ceux que l'utilisateur a retirés ici.
-        s.ignored_rules = _merged(self.settings.ignored_rules, self._items(self.rules),
-                                  self.controller.settings.ignored_rules)
+        rules = [self.rules.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.rules.count())]
+        s.ignored_rules = _merged(self.settings.ignored_rules, rules, self.controller.settings.ignored_rules)
+        labels = {**self.settings.rule_labels, **self.controller.settings.rule_labels}
+        s.rule_labels = {r: labels[r] for r in s.ignored_rules if r in labels}
         dictionary = self.controller.dictionary
         words = _merged(self._opened_words, self._items(self.words), dictionary.words() if dictionary else [])
         self.controller.apply_settings(s, words)

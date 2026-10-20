@@ -183,3 +183,17 @@ def test_diff_edits_on_a_long_repetitive_text_is_fast_and_exact():
         if random.random() < 0.3:
             a, b = a.replace("\n", " "), b.replace("\n", " ")  # un seul long paragraphe : découpé en phrases
         assert apply_edits(a, diff_edits(a, b)) == b
+
+
+@pytest.mark.parametrize("before, after, expected", [
+    # W-10 : la virgule déplacée faisait « heures → heures,, ,Zorglubinette → Zorglubinette ».
+    ("Ni lui ni elle ne viendront à 8 heures ,Zorglubinette aussi.",
+     "Ni lui ni elle ne viendront à 8 heures, Zorglubinette aussi.", "heures ,Zorglubinette → heures, Zorglubinette"),
+    # L-14 : espace seule corrigée, la notification ne disait que « 1 correction appliquée. ».
+    ("Je vais à la plage .", "Je vais à la plage.", "plage . → plage."),
+    ("Les enfant mange.", "Les enfants mangent.", "enfant → enfants, mange → mangent"),
+], ids=["virgule déplacée", "espace seule", "mots voisins"])
+def test_describe_changes_punctuation(before, after, expected):
+    from correcteur.textutils import describe_changes
+
+    assert describe_changes(before, after) == expected

@@ -290,6 +290,49 @@ def test_settings_change_updates_gnome_shortcuts(qapp, make_controller, monkeypa
     assert ("Raccourcis GNOME non mis à jour : gsettings introuvable", True) in notes
 
 
+def test_disabling_hotkeys_removes_the_gnome_shortcuts(qapp, make_controller, monkeypatch):
+    """L-05 : « Activer les raccourcis globaux » décoché restait sans effet sous GNOME ; recoché, ils reviennent."""
+    from correcteur.ui import app as app_module
+
+    controller, notes = make_controller()
+    monkeypatch.setattr(app_module, "session_type", lambda: "wayland")
+    monkeypatch.setattr(app_module, "desktop_name", lambda: "gnome")
+    calls = []
+    monkeypatch.setattr(app_module.autostart, "install_gnome_shortcuts", lambda *keys: calls.append(("créés", keys)))
+    monkeypatch.setattr(app_module.autostart, "remove_gnome_shortcuts",
+                        lambda: calls.append(("retirés",)) or "Raccourcis GNOME du correcteur retirés.")
+    monkeypatch.setattr(app_module.autostart, "gnome_shortcuts", lambda: {})
+    off = controller.settings.copy()
+    off.general.hotkeys_enabled = False
+    controller.apply_settings(off)
+    assert wait_until(qapp, lambda: ("Raccourcis GNOME du correcteur retirés.", False) in notes)
+    on = controller.settings.copy()
+    on.general.hotkeys_enabled = True
+    controller.apply_settings(on)
+    assert wait_until(qapp, lambda: len(calls) == 2)
+    assert calls == [("retirés",), ("créés", ("<ctrl>+<alt>+c", "<ctrl>+<alt>+x"))]
+
+
+def test_remove_gnome_shortcuts_keeps_the_others(monkeypatch):
+    from correcteur.platform import autostart
+
+    base = autostart._GNOME_BASE
+    listed = [f"{base}custom0/", f"{base}correcteur-verifier/", f"{base}correcteur-express/"]
+    calls = []
+
+    def gsettings(*args):
+        calls.append(args)
+        if args[0] == "set" and args[2] == "custom-keybindings":
+            listed[:] = __import__("ast").literal_eval(args[3])
+        return ""
+
+    monkeypatch.setattr(autostart, "_gsettings", gsettings)
+    monkeypatch.setattr(autostart, "_keybinding_list", lambda: list(listed))
+    assert autostart.remove_gnome_shortcuts() == "Raccourcis GNOME du correcteur retirés."
+    assert listed == [f"{base}custom0/"]
+    assert sum(1 for c in calls if c[0] == "reset") == 6
+
+
 def _open_ready(qapp, window, capture: Capture) -> None:
     window.open_with(capture.text, capture)
     assert wait_until(qapp, lambda: not window._running and len(window._statuses) == 1)
@@ -579,3 +622,42 @@ def test_autostart_setting_follows_the_real_state(make_controller, monkeypatch):
     controller, _ = make_controller()
     assert controller.settings.general.autostart is True
     assert SettingsStore().load().general.autostart is True
+
+
+def test_crash_log_drops_harmless_windows_exceptions(tmp_path):
+    """W-08 : « Windows fatal exception: code 0x8001010d » à chaque lancement (exception rattrapée de
+    l'accessibilité), sans aucun arrêt. Retirée du fichier ; un vrai plantage reste."""
+    from correcteur.ui.app import clean_crash_log
+
+    path = tmp_path / "plantages.log"
+    path.write_text("--- 2026-10-20 20:00:00 : Correcteur 0.1.13 démarré (processus 1)\n"
+                    "Windows fatal exception: code 0x8001010d\n\n"
+                    "Thread 0x00001234 (most recent call first):\n  File \"app.py\", line 3 in run\n\n"
+                    "--- 2026-10-20 21:00:00 : Correcteur 0.1.13 démarré (processus 2)\n"
+                    "Windows fatal exception: access violation\n\n"
+                    "Current thread 0x00000042 (most recent call first):\n  File \"x.py\", line 1 in f\n",
+                    encoding="utf-8")
+    clean_crash_log(path)
+    content = path.read_text(encoding="utf-8")
+    assert "0x8001010d" not in content and "Thread 0x00001234" not in content
+    assert "access violation" in content and "processus 1" in content and "processus 2" in content
+
+
+def test_taken_hotkeys_are_never_announced_as_ready(qapp, make_controller, monkeypatch):
+    """W-19 : portable et installée lancées ensemble : « Raccourci déjà utilisé… » puis « Correcteur prêt : …
+    Ctrl+Alt+X », alors qu'aucun raccourci ne marchait. Le message nomme l'autre Correcteur possible, et « prêt »
+    dit qu'il n'y a pas de raccourci."""
+    from correcteur.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "session_type", lambda: "windows")
+
+    class TakenBridge(FakeBridge):
+        def start_hotkeys(self, bindings):
+            return list(bindings)
+
+    controller, notes = make_controller(TakenBridge, startup=False)
+    assert wait_until(qapp, lambda: any("prêt" in text for text, _ in notes))
+    taken = next(text for text, error in notes if "déjà utilisé" in text)
+    assert "un autre Correcteur" in taken
+    ready = next(text for text, _ in notes if "prêt" in text)
+    assert "sans ses raccourcis" in ready and "Ctrl+Alt+X" not in ready

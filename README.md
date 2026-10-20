@@ -158,7 +158,8 @@ Dans la fenêtre :
 | Clic sur un mot souligné | Suggestions, *Ignorer*, *Ajouter au dictionnaire* |
 | Bouton *Corrections sûres* | Applique d'un coup tout ce qui est confirmé (un seul <kbd>Ctrl</kbd> + <kbd>Z</kbd> pour annuler) |
 | <kbd>Ctrl</kbd> + <kbd>Entrée</kbd> ou *Remplacer* | Remplace le texte dans l'application d'origine. Avant la fin des vérifications, le bouton affiche *Vérification…* et le texte est figé : le correcteur attend les moteurs, applique les corrections sûres puis remplace. Tant que rien n'est corrigé, le bouton s'appelle *Corriger et remplacer*. Un texte inchangé n'est jamais recollé |
-| <kbd>F8</kbd> / <kbd>Maj</kbd> + <kbd>F8</kbd> | Faute suivante / précédente |
+| <kbd>F8</kbd> / <kbd>Maj</kbd> + <kbd>F8</kbd> | Faute suivante / précédente, à partir du curseur |
+| <kbd>F5</kbd> | Revérifie le texte (utile si la revérification pendant la frappe est coupée dans les paramètres) |
 | <kbd>Alt</kbd> + <kbd>1</kbd> … <kbd>5</kbd> | Applique la suggestion n° 1 à 5 de la faute sélectionnée (ou sous le curseur) et passe à la suivante |
 | <kbd>Échap</kbd> | Ferme la fenêtre et rend le presse-papiers d'origine |
 
@@ -166,13 +167,15 @@ Couleurs : 🔴 orthographe · 🔵 grammaire · 🟠 ponctuation · 🟣 style.
 suit la frappe.
 
 Après une correction express, la notification indique les premières corrections faites (« aller → allé, a → à,
-c'est → s'est… ») et le nombre de remarques laissées à vérifier. Si vous tapez ou cliquez pendant qu'elle se fait
-(changement de fenêtre compris), rien n'est collé : la sélection a pu bouger, et le texte corrigé atterrirait
-ailleurs. Le correcteur le dit, et le presse-papiers reste intact. Sous Windows, ses messages s'affichent dans une
-bulle à lui, visible même en mode « Ne pas déranger ».
+c'est → s'est… ») et le nombre de remarques laissées à vérifier. Si vous tapez, cliquez ou changez de fenêtre
+pendant qu'elle se fait, rien n'est collé : la sélection a pu bouger, et le texte corrigé atterrirait ailleurs. Le
+correcteur le dit, et vous rend votre presse-papiers. Sous Linux, au moindre mouvement de souris, il relit la
+sélection avant de coller, et colle si elle n'a pas changé. Sous Windows, ses messages s'affichent dans une bulle à
+lui, visible même en mode « Ne pas déranger ».
 
 Sous Windows, la mise en forme est gardée (gras, italique, liens, espaces insécables) quand l'application copie le
-texte avec elle : Word, Outlook, les navigateurs, LibreOffice.
+texte avec elle : Word, Outlook, les navigateurs, LibreOffice. Google Docs reçoit le texte seul : il recollait
+sinon sa propre copie, sans les corrections.
 
 L'icône dans la zone de notification donne accès à « Vérifier le presse-papiers », à une fenêtre vide où taper
 ou coller un texte, et aux paramètres.
@@ -193,8 +196,10 @@ correcteur diagnostic                                    # état de l'installati
 `--hors-ligne` n'utilise que les moteurs locaux (Grammalecte, et LanguageTool seulement en mode « serveur local »).
 `-l` accepte `auto`, `fr` ou un code comme `en` ou `en-US` ; un code inconnu est refusé avant tout envoi. Avec
 `--json`, les erreurs sortent aussi en JSON (`{"erreur": "..."}`). Codes de retour de `verifier` et `corriger` : 0 (aucune
-faute, ou texte corrigé), 1 (fautes trouvées), 2 (erreur), 3 (aucun moteur n'a pu vérifier le texte : langue non gérée,
-moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
+faute, ou texte corrigé), 1 (fautes trouvées), 2 (erreur, fichier binaire compris), 3 (aucun moteur n'a pu vérifier le
+texte : langue non gérée, moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe` ; dans un tube,
+sa sortie suit la page de code de la console (que lisent cmd, PowerShell 5, `findstr` et `more`), où « œ », « ’ » et
+« … » deviennent « oe », « ' » et « ... ». L'option `--utf8` garde l'UTF-8, sans perte, pour un programme qui le lit.
 
 </details>
 
@@ -214,13 +219,26 @@ moteur injoignable). Sous Windows, la commande s'appelle `correcteur-cli.exe`.
   correcteur en administrateur.
 - Une image copiée par <kbd>Win</kbd> + <kbd>Maj</kbd> + <kbd>S</kbd> est remise dans le presse-papiers sans son
   format « fichier » : elle se colle toujours comme image, plus comme fichier dans l'Explorateur.
+- Sous Wayland, le presse-papiers d'origine revient dans un seul format (l'outil `wl-copy` n'en sert qu'un) :
+  l'image, ou les fichiers copiés pour le gestionnaire de fichiers, sinon le texte brut. Un texte mis en forme
+  copié dans Writer revient sans sa mise en forme ; des fichiers copiés dans Fichiers se recollent dans Fichiers,
+  plus dans un navigateur.
+- Sous Wayland, tant que le renommage d'un fichier (<kbd>F2</kbd> dans Fichiers) ou la recherche de la vue d'ensemble
+  de GNOME est ouvert, le presse-papiers ne répond pas : le correcteur le dit. Copiez le texte, puis utilisez
+  « Vérifier le presse-papiers ».
+- Dans une cellule de LibreOffice Calc en cours d'édition (<kbd>F2</kbd>), la copie simulée met Calc dans un état où
+  <kbd>Entrée</kbd> colle le presse-papiers rendu au lieu de valider la cellule corrigée. Sélectionnez la cellule
+  sans l'éditer avant la correction : c'est alors son contenu entier qui est corrigé.
+- Dans Word et Outlook, corriger un paragraphe sélectionné avec sa marque de fin (tout le document, par exemple)
+  peut laisser un paragraphe vide après lui.
 - PowerShell 5 remplace les accents par « ? » dans le texte qu'il envoie à un programme par un tube
   (`"texte" | correcteur-cli corriger`) : passez le texte en argument, ou utilisez PowerShell 7.
 - Les suggestions d'orthographe peuvent manquer le bon mot. Les fautes les plus fréquentes (« fesait », « malgrès »,
   « parmis ») ont leur correction dans le moteur du correcteur ; pour les autres, la bonne suggestion n'est pas
   toujours en tête.
 - Sans LanguageTool, certaines fautes restent signalées sans être corrigées d'office, faute d'indice pour choisir :
-  « Je les ai vu » (« vus » ou « vues » ?), « Quels changement » (« Quel changement » ou « Quels changements » ?).
+  « Quels changement » (« Quel changement » ou « Quels changements » ?). D'autres ne sont pas signalées du tout hors
+  ligne : « Je les ai vu » (« vus » ou « vues » ?).
 - Le mode LanguageTool en ligne est limité à environ 20 vérifications par minute.
 
 ## Moteurs et confidentialité
@@ -269,13 +287,19 @@ flowchart LR
 2. Le correcteur lit le texte sélectionné. Sous X11, il prend la sélection primaire seulement si elle appartient
    à la fenêtre active. Sinon, et toujours sous Wayland (la sélection primaire peut y venir d'une autre fenêtre),
    il simule <kbd>Ctrl</kbd> + <kbd>Inser</kbd>, la copie que comprennent aussi les terminaux :
-   <kbd>Ctrl</kbd> + <kbd>C</kbd> y interromprait le programme en cours. Sous Windows, c'est
-   <kbd>Ctrl</kbd> + <kbd>C</kbd>, et <kbd>Ctrl</kbd> + <kbd>Inser</kbd> dans les consoles. Il remet ensuite le
-   presse-papiers d'origine, images et fichiers compris sous Windows et sous Wayland ; sous Wayland, il attend pour
-   cela une pause de frappe, peu après le collage. Sous Windows, quand l'application a aussi copié le texte mis en
-   forme (HTML), les corrections y sont reportées mot à mot sans toucher aux balises, et les deux versions sont
-   collées. Pendant une correction express, le correcteur note les frappes et les clics (Raw Input, qui reçoit une
-   copie des évènements sans jamais les retarder) : s'il y en a eu, il ne colle rien.
+   <kbd>Ctrl</kbd> + <kbd>C</kbd> y interromprait le programme en cours. Sous Windows aussi, d'abord
+   <kbd>Ctrl</kbd> + <kbd>Inser</kbd> (que Reverso et son double <kbd>Ctrl</kbd> + <kbd>C</kbd> ignorent), puis
+   <kbd>Ctrl</kbd> + <kbd>C</kbd> si l'application ne le connaît pas, jamais dans un terminal (Windows Terminal,
+   consoles, VS Code). Il remet ensuite le presse-papiers d'origine, images et fichiers compris sous Windows et sous
+   Wayland, si personne n'a copié autre chose entre-temps (l'Explorateur, qui réécrit le même texte après un
+   collage, ne compte pas). Sous Wayland, il attend pour cela une pause de frappe, jusqu'à une minute ; sans pause,
+   la correction suivante reprend le contenu d'origine. Sous Windows, quand l'application a aussi copié le texte mis
+   en forme (HTML), les corrections y sont reportées mot à mot sans toucher aux balises, et les deux versions sont
+   collées. Pendant une correction express, le correcteur note les frappes et les clics sous Windows (Raw Input,
+   qui reçoit une copie des évènements sans jamais les retarder) : s'il y en a eu, il ne colle rien. Sous Linux, il
+   lit le compteur d'inactivité du bureau (GNOME, X11) juste avant de coller : si vous avez tapé, cliqué ou bougé
+   la souris depuis la copie, ou s'il ne peut pas le savoir, il recopie la sélection et ne colle que si elle n'a pas
+   changé.
    Un gestionnaire d'historique du presse-papiers (GPaste, Clipboard Indicator, Klipper) garde la trace du texte
    capturé et du texte corrigé, comme pour toute copie.
 3. Les deux moteurs tournent en parallèle. Les résultats de Grammalecte s'affichent tout de suite, ceux de

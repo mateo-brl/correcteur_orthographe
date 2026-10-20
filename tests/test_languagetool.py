@@ -182,6 +182,10 @@ def test_network_error(settings):
     engine._client = httpx.Client(transport=httpx.MockTransport(boom))
     with pytest.raises(EngineError, match="injoignable"):
         engine.check("Texte.", "fr")
+    # L-13 : serveur personnel à une adresse fausse, Internet marche : l'adresse est nommée.
+    settings.languagetool.mode, settings.languagetool.url = "perso", "http://serveurinexistant"
+    with pytest.raises(EngineError, match="personnel injoignable à l'adresse http://serveurinexistant"):
+        engine.check("Texte.", "fr")
 
 
 def test_auto_language(settings):

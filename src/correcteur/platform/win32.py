@@ -63,8 +63,17 @@ VK_MASK = 0xE8
 # Touches dont l'appui ne déplace pas la sélection : modificateurs et verrouillages (Raw Input donne VK_SHIFT,
 # VK_CONTROL et VK_MENU sans côté ; 0xFF : touche « fantôme » de certains claviers).
 _NEUTRAL_VKS = {VK_SHIFT, VK_CONTROL, VK_MENU, 0x14, 0x90, 0x91, 0xFF, VK_MASK, *_MODIFIER_VKS}
-# Fenêtres de console : Ctrl+C y interrompt le programme en cours quand rien n'est sélectionné.
+# Terminaux (fenêtres de console, ou programmes qui en contiennent un, comme VS Code) : Ctrl+C y interrompt le
+# programme en cours quand rien n'est sélectionné. La copie simulée n'y envoie jamais que Ctrl+Inser.
 _CONSOLE_CLASSES = {"ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS", "mintty", "PuTTY", "VirtualConsoleClass"}
+_TERMINAL_PROCESSES = {"windowsterminal.exe", "openconsole.exe", "conhost.exe", "cmd.exe", "powershell.exe",
+                       "pwsh.exe", "code.exe", "code - insiders.exe", "vscodium.exe", "cursor.exe", "windsurf.exe",
+                       "mintty.exe", "putty.exe", "kitty.exe", "conemu.exe", "conemu64.exe", "alacritty.exe",
+                       "wezterm-gui.exe", "hyper.exe", "tabby.exe", "wsl.exe", "wslhost.exe", "bash.exe"}
+# Touches étendues (préfixe E0) : sans ce drapeau, Inser devient celle du pavé numérique.
+_EXTENDED_VKS = {0x2D, 0x5B, 0x5C, 0xA3, 0xA5}  # Inser, Windows gauche et droite, Ctrl et Alt droites
+# Barre de menus active (touche Alt, F10) ou menu ouvert : la copie simulée y tombe et ne copie rien.
+GUI_INMENUMODE, GUI_SYSTEMMENUMODE, GUI_POPUPMENUMODE = 0x4, 0x8, 0x10
 # Barre des tâches, bureau, menus : jamais la fenêtre où l'on travaillait.
 _SHELL_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW", "NotifyIconOverflowWindow",
                   "TopLevelWindowForOverflowXamlIsland", "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow",
@@ -265,6 +274,11 @@ kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.CloseHandle.restype = wintypes.BOOL
+kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                ctypes.POINTER(wintypes.DWORD)]
+kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+user32.MapVirtualKeyW.restype = wintypes.UINT
 advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
 advapi32.OpenProcessToken.restype = wintypes.BOOL
 advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
@@ -444,10 +458,13 @@ _swallowed: set[int] = set()  # relâchements avalés par le crochet, à renvoye
 
 
 def _key_input(vk: int, up: bool, extended: bool = False) -> INPUT:
+    """Frappe simulée avec le code de touche (scan code) du clavier réel : sans lui, Windows Terminal ignorait le
+    Ctrl+Inser de la copie simulée."""
     inp = INPUT()
     inp.type = INPUT_KEYBOARD
+    extended = extended or vk in _EXTENDED_VKS
     flags = (KEYEVENTF_KEYUP if up else 0) | (KEYEVENTF_EXTENDEDKEY if extended else 0)
-    inp.ki = KEYBDINPUT(vk, 0, flags, 0, 0)
+    inp.ki = KEYBDINPUT(vk, user32.MapVirtualKeyW(vk, 0) & 0xFF, flags, 0, 0)  # 0 : MAPVK_VK_TO_VSC
     return inp
 
 
@@ -492,18 +509,45 @@ def send_ctrl(letter: str) -> None:
     _send([_key_input(VK_CONTROL, False), _key_input(vk, False), _key_input(vk, True), _key_input(VK_CONTROL, True)])
 
 
-def send_copy(hwnd: int) -> None:
-    """Copie simulée : Ctrl+Inser dans une console (Ctrl+C y interromprait le programme en cours quand rien
-    n'est sélectionné), Ctrl+C ailleurs."""
-    if window_class(hwnd) in _CONSOLE_CLASSES:
-        _send([_key_input(VK_CONTROL, False), _key_input(VK_INSERT, False, extended=True),
-               _key_input(VK_INSERT, True, extended=True), _key_input(VK_CONTROL, True)])
+def send_copy(keys: str = "insert") -> None:
+    """Copie simulée : Ctrl+Inser (« insert ») ou Ctrl+C (« c »)."""
+    if keys == "insert":
+        _send([_key_input(VK_CONTROL, False), _key_input(VK_INSERT, False), _key_input(VK_INSERT, True),
+               _key_input(VK_CONTROL, True)])
     else:
-        send_ctrl("c")
+        send_ctrl(keys)
 
 
-def is_console(hwnd: int) -> bool:
-    return window_class(hwnd) in _CONSOLE_CLASSES
+def process_name(hwnd: int) -> str:
+    """Nom du programme de la fenêtre, en minuscules (« code.exe ») ; "" s'il est illisible."""
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, _window_pid(hwnd)) if hwnd else None
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        return buf.value.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def is_terminal(hwnd: int) -> bool:
+    """Fenêtre de terminal, ou programme qui en contient un (VS Code) : jamais de Ctrl+C simulé."""
+    return window_class(hwnd) in _CONSOLE_CLASSES or process_name(hwnd) in _TERMINAL_PROCESSES
+
+
+def keyboard_in_menu(hwnd: int) -> bool:
+    """Le clavier est dans un menu de la fenêtre plutôt que dans son texte : barre de menus activée par Alt (menus
+    classiques, ou barre XAML du Bloc-notes de Windows 11, qui garde alors le focus), menu ouvert."""
+    info = _thread_info(hwnd)
+    if info is None:
+        return False
+    if info.flags & (GUI_INMENUMODE | GUI_SYSTEMMENUMODE | GUI_POPUPMENUMODE):
+        return True
+    return (window_class(hwnd) == "Notepad" and bool(info.hwndFocus)
+            and window_class(int(info.hwndFocus)) == "InputSiteWindowClass")
 
 
 def foreground_window() -> int:

@@ -40,12 +40,24 @@ _CLIPBOARD_LOST = ("L'ancien contenu du presse-papiers (trop gros ou illisible) 
                    "maintenant le texte corrigé.")
 # Wayland : contenu sauvé avant une copie simulée (une image peut peser lourd), et restauration après le collage :
 # délai pour que l'application lise le collage (et sous GNOME, que le focus soit revenu), pause de saisie à
-# attendre, abandon passé ce délai après l'heure prévue.
+# attendre. Sans pause passé ce délai après l'heure prévue, la restauration est remise à la capture suivante, qui
+# reprend le contenu d'origine (voir Bridge._borrow) : jamais de restauration en pleine frappe, jamais de contenu
+# d'origine oublié pour autant (il se perdait en rafale).
 _MAX_SAVED = 50_000_000
 _RESTORE_AFTER_PASTE_GNOME_S = 1.5
 _RESTORE_AFTER_PASTE_S = 0.5
 _IDLE_BEFORE_RESTORE_MS = 400
-_RESTORE_GIVE_UP_S = 5.0
+_RESTORE_GIVE_UP_S = 60.0
+# Correction express sous Linux : une frappe, un clic ou un mouvement de souris venu après la copie simulée (avec
+# cette marge) a pu changer la sélection ; elle est alors recopiée et comparée au texte capturé avant le collage.
+_INPUT_SLACK_S = 0.05
+_SELECTION_MOVED = ("Correction non collée : la sélection a changé pendant qu'elle se faisait. Rien n'a été "
+                    "modifié : resélectionnez le texte et recommencez.")
+# Wayland : wl-paste ou wl-copy bloqués tant que certaines fenêtres sont ouvertes (renommage dans Fichiers,
+# recherche de la vue d'ensemble de GNOME).
+_UNREADABLE = ("Lecture de la sélection impossible : le presse-papiers ne répond pas dans cette fenêtre (renommage "
+               "de fichier, recherche de GNOME…). Copiez le texte (Ctrl+C), puis choisissez « Vérifier le "
+               "presse-papiers » dans le menu de l'icône.")
 # Le raccourci du bureau part à l'appui des touches : quand la commande arrive, l'utilisateur tient peut-être
 # encore Ctrl+Alt, et une copie simulée deviendrait Ctrl+Alt+Inser. Sous Wayland, impossible de savoir quand il les
 # relâche (un relâchement envoyé par ydotool n'agit pas sur les touches du vrai clavier) : on attend.
@@ -151,6 +163,17 @@ class Capture:
     focus: Any = None              # contrôle qui avait le focus (Windows, correction express), à retrouver au collage
     watch: Any = None              # surveillance des frappes et clics pendant une correction express (Windows)
     html: bytes | None = None      # texte mis en forme copié avec la sélection (CF_HTML, Windows)
+    express: bool = False          # correction express : collée sans autre action de l'utilisateur
+    docs: bool = False             # sélection copiée dans Google Docs (voir pasted_text)
+    keys_at: float = 0.0           # time.monotonic() juste après la dernière copie simulée (Linux)
+
+
+def pasted_text(capture: Capture, text: str) -> str:
+    """Texte à coller pour `capture`. Google Docs ajoute deux retours à la ligne à la copie d'un document entier
+    (Ctrl+A) : recollés, ils ajoutaient deux paragraphes vides à chaque correction."""
+    if capture.docs and capture.text.endswith("\n\n"):
+        return text.rstrip("\n")
+    return text
 
 
 class Bridge:
@@ -292,6 +315,20 @@ class Bridge:
         """Fenêtre fermée sans remplacement : on rend le presse-papiers d'origine."""
         self._give_back(capture)
 
+    # activité de l'utilisateur (Linux) : compteur d'inactivité du bureau
+    def _idle_ms(self) -> int | None:
+        """Temps depuis la dernière frappe ou le dernier mouvement de souris, None si inconnu."""
+        return None
+
+    def _acted_since(self, moment: float) -> bool | None:
+        """L'utilisateur a-t-il tapé, cliqué ou bougé la souris depuis `moment` (time.monotonic()) ? None si on ne
+        sait pas. Le compteur d'inactivité compte aussi les frappes simulées (ydotool, XTEST) : `moment` vient
+        juste après la dernière."""
+        idle = self._idle_ms()
+        if idle is None:
+            return None
+        return time.monotonic() - idle / 1000 > moment + _INPUT_SLACK_S
+
     # Remplacement depuis la fenêtre de correction : stage_replace est appelé pendant qu'elle est encore
     # visible et a le focus, paste_staged `staged_paste_delay_ms` plus tard. None (par défaut) : replace(),
     # une fois la fenêtre cachée.
@@ -311,7 +348,14 @@ class Bridge:
         return False, "Texte corrigé copié : collez-le avec Ctrl+V."
 
     def copy(self, text: str) -> bool:
-        """Met `text` dans le presse-papiers. False si c'est impossible."""
+        """Met `text` dans le presse-papiers pour l'utilisateur (bouton Copier, texte corrigé à coller lui-même) :
+        il le garde, aucune restauration n'est plus due. False si c'est impossible."""
+        if not self._copy_text(text):
+            return False
+        self._forget_borrow()
+        return True
+
+    def _copy_text(self, text: str) -> bool:
         return _qt_set_clipboard(text)
 
     def clipboard_text(self) -> str:
@@ -343,11 +387,17 @@ _NO_LAST_WINDOW = ("Fenêtre où vous travailliez introuvable : sélectionnez le
 _MOVED_ON = ("Correction non collée : vous avez {what} pendant qu'elle se faisait, la sélection a pu changer. "
              "Rien n'a été modifié et le presse-papiers est intact : resélectionnez le texte et recommencez.")
 _WINDOW_GONE = "Fenêtre d'origine introuvable : texte corrigé copié, collez-le avec Ctrl+V."
+# Copie simulée sans résultat : le clavier n'était pas dans le texte.
+_IN_MENU = ("Aucun texte copié : le clavier est dans le menu de la fenêtre (touche Alt). Appuyez sur Échap, puis "
+            "recommencez.")
+_OTHER_WINDOW = ("Aucun texte copié : une autre fenêtre (« {title} ») a pris le clavier. Fermez-la ou appuyez sur "
+                 "Échap, puis recommencez.")
 # Navigateurs et applications Chromium (Electron) : fins de ligne \n seules au collage. Google Docs comptait
 # \r\n comme deux retours à la ligne (deux paragraphes vides à chaque correction).
 _LF_CLASSES = {"Chrome_WidgetWin_1", "MozillaWindowClass"}
 # Texte mis en forme jamais recollé : Excel colle un tableau HTML avec sa propre mise en forme.
 _NO_HTML_CLASSES = {"XLMAIN"}
+_GOOGLE_DOCS = b"docs-internal-guid"
 
 
 class WindowsBridge(Bridge):
@@ -419,42 +469,84 @@ class WindowsBridge(Bridge):
         watch = self._start_watch() if express else None
         with self._lock:
             borrowed = self._borrowed
-        if borrowed is not None and w.clipboard_sequence() == borrowed[1]:
+        if borrowed is not None and self._still_ours(borrowed[1]):
             # Restauration encore due (corrections en rafale) : le presse-papiers contient ce que le correcteur y a
             # laissé, pas ce que l'utilisateur avait copié. C'est le contenu d'origine, déjà gardé, qu'il faudra remettre.
             saved = borrowed[0]
         else:
             saved = w.snapshot_clipboard()
         seq = w.clipboard_sequence()
-        w.send_copy(hwnd)
-        deadline = time.monotonic() + 0.8
-        while time.monotonic() < deadline and w.clipboard_sequence() == seq:
-            time.sleep(0.015)
-        changed = w.clipboard_sequence() != seq
+        changed = self._copy_selection(hwnd, seq)
         text, html = "", None
         if changed:
             time.sleep(0.02)  # certaines applications écrivent en plusieurs fois
             text = w.get_clipboard_text() or ""
             if text:
                 html = w.get_clipboard_bytes(w.html_format())
-        capture = Capture(text.replace("\r\n", "\n"), target=hwnd, from_selection=bool(text), saved_clipboard=saved,
-                          clipboard_touched=changed, started=started, left=w.clipboard_sequence(), focus=focus,
-                          watch=watch, html=html)
+        text = text.replace("\r\n", "\n")
+        capture = Capture(text, target=hwnd, from_selection=bool(text), saved_clipboard=saved, clipboard_touched=changed,
+                          started=started, left=(w.clipboard_sequence(), text or None), focus=focus, watch=watch,
+                          html=html, express=express, docs=bool(html and _GOOGLE_DOCS in html))
         if not text:
             self._stop_watch(capture)
-            name = w.window_class(hwnd) if hwnd else "aucune"
-            if hwnd and w.more_privileged(hwnd):
-                capture.problem = _ELEVATED
-                log.info("Aucun texte lu : fenêtre lancée en administrateur (%s).", name)
-            else:
-                log.info("Aucun texte copié par la fenêtre active (%s)%s.", name, "" if changed else ", presse-papiers inchangé")
+            self._explain_nothing_copied(capture, hwnd, changed)
         return capture
+
+    def _copy_selection(self, hwnd: int, seq: int) -> bool:
+        """Copie simulée : Ctrl+Inser, que les applications Windows connaissent presque toutes et que les outils
+        à l'écoute de Ctrl+C (Reverso et son double Ctrl+C) ignorent ; puis Ctrl+C si rien n'est venu, sauf dans
+        les terminaux, où Ctrl+C interromprait le programme en cours. Vrai si le presse-papiers a changé."""
+        w = self.w
+        terminal = w.is_terminal(hwnd)
+        for keys, wait in (("insert", 0.8 if terminal else 0.45), ("c", 0.6)):
+            if keys == "c":
+                if terminal:
+                    break
+                log.info("Ctrl+Inser n'a rien copié (%s) : Ctrl+C.", w.window_class(hwnd))
+            w.send_copy(keys)
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                if w.clipboard_sequence() != seq:
+                    return True
+                time.sleep(0.015)
+        return w.clipboard_sequence() != seq
+
+    def _explain_nothing_copied(self, capture: Capture, hwnd: int, changed: bool) -> None:
+        """Pourquoi la copie simulée n'a rien donné, quand ce n'est pas l'absence de sélection."""
+        w = self.w
+        name = w.window_class(hwnd) if hwnd else "aucune"
+        if hwnd and w.more_privileged(hwnd):
+            capture.problem = _ELEVATED
+            log.info("Aucun texte lu : fenêtre lancée en administrateur (%s).", name)
+            return
+        log.info("Aucun texte copié par la fenêtre active (%s)%s.", name, "" if changed else ", presse-papiers inchangé")
+        if not hwnd:
+            return
+        if w.keyboard_in_menu(hwnd):
+            capture.problem = _IN_MENU
+            log.info("Le clavier est dans le menu de la fenêtre.")
+            return
+        front = w.foreground_window()
+        if front and front != hwnd and not w.is_own_or_shell(front):
+            title = w.window_title(front).strip() or w.window_class(front)
+            capture.problem = _OTHER_WINDOW.format(title=title[:60])
+            log.info("Une autre fenêtre a pris le premier plan pendant la copie (%s).", w.window_class(front))
+
+    def _still_ours(self, left: Any) -> bool:
+        """Le presse-papiers contient-il encore ce que le correcteur y a laissé, `left` = (numéro de séquence,
+        texte) ? Même numéro, ou même texte : l'Explorateur réécrit le presse-papiers après un collage, Windows y
+        ajoute parfois un format (EnterpriseDataProtectionId), sans rien y changer pour l'utilisateur."""
+        seq, text = left
+        if self.w.clipboard_sequence() == seq:
+            return True
+        current = self.w.get_clipboard_text() if text is not None else None
+        return current is not None and current.replace("\r\n", "\n") == text
 
     def _write_saved(self, saved: Any) -> None:
         self.w.set_clipboard_formats(saved)
 
     def _clipboard_unchanged(self, capture: Capture) -> bool:
-        return capture.left is None or self.w.clipboard_sequence() == capture.left
+        return capture.left is None or self._still_ours(capture.left)
 
     def release(self, capture: Capture) -> None:
         self._stop_watch(capture)
@@ -466,7 +558,11 @@ class WindowsBridge(Bridge):
         w = self.w
         kind = w.window_class(capture.target)
         formats = {w.CF_UNICODETEXT: w.text_bytes(text, crlf=kind not in _LF_CLASSES)}
-        if capture.html and kind not in _NO_HTML_CLASSES:
+        if capture.docs:
+            # Google Docs reconnaît sa propre copie à cet identifiant et recolle son contenu d'origine, sans les
+            # corrections : texte seul.
+            log.info("Google Docs : texte collé sans mise en forme.")
+        elif capture.html and kind not in _NO_HTML_CLASSES:
             from correcteur.platform.cfhtml import correct_cf_html
 
             try:
@@ -502,16 +598,17 @@ class WindowsBridge(Bridge):
             # contenu-là qu'il faudra remettre.
             capture.saved_clipboard = w.snapshot_clipboard()
         time.sleep(0.06)
+        text = pasted_text(capture, text)
         if not w.set_clipboard_formats(self._formats(capture, text)):
             return False, _COPY_FAILED
         capture.clipboard_touched = True
-        self._borrow(capture, w.clipboard_sequence())
+        self._borrow(capture, (w.clipboard_sequence(), text.replace("\r\n", "\n")))
         w.wait_modifiers_released(0.5)
         w.send_ctrl("v")
         self._defer(_RESTORE_DELAY_MS, lambda: self._give_back(capture))
         return True, ""
 
-    def copy(self, text: str) -> bool:
+    def _copy_text(self, text: str) -> bool:
         return self.w.set_clipboard_text(text)
 
     def clipboard_text(self) -> str:
@@ -537,7 +634,7 @@ class WindowsBridge(Bridge):
 
     def diagnostics(self) -> list[str]:
         return ["Session : Windows", "Raccourcis : RegisterHotKey",
-                "Sélection : Ctrl+C simulé, Ctrl+Inser dans les consoles (presse-papiers restauré)"]
+                "Sélection : Ctrl+Inser simulé, puis Ctrl+C hors des terminaux (presse-papiers restauré)"]
 
 
 def xtest_key(letter: str):
@@ -734,12 +831,18 @@ class X11Bridge(Bridge):
         return selection_owned_by_client_of("PRIMARY", window)
 
     def capture(self, express: bool = False, from_menu: bool = False) -> Capture:
-        started = time.monotonic()
+        capture = self._capture(time.monotonic())
+        capture.express = express
+        return capture
+
+    def _capture(self, started: float) -> Capture:
         target = self._active_window()
         if self._primary_from(target):
             text = self._read("PRIMARY") or ""
             if text.strip():
-                return Capture(text, target=target, from_selection=True, started=started)
+                # Aucune frappe simulée : l'activité compte à partir du relâchement des touches du raccourci.
+                return Capture(text, target=target, from_selection=True, started=started,
+                               keys_at=started + _KEYS_RELEASE_S)
         # Pas de sélection primaire de l'application active : copie simulée (Ctrl+Inser). Le presse-papiers n'est
         # marqué (voir _clipboard_marker) que s'il ne contient que du texte qu'on a pu lire ; sinon, on compare avec
         # son contenu d'avant.
@@ -761,7 +864,8 @@ class X11Bridge(Bridge):
         except Exception:
             return Capture("", target=target, saved_clipboard=saved, clipboard_touched=marked, started=started,
                            left=marker if marked else None)
-        deadline = time.monotonic() + 0.8
+        keys_at = time.monotonic()
+        deadline = keys_at + 0.8
         text = before
         while time.monotonic() < deadline:
             time.sleep(0.04)
@@ -771,7 +875,64 @@ class X11Bridge(Bridge):
         changed = bool(text) and text != before
         return Capture(text if changed else "", target=target, from_selection=changed,
                        saved_clipboard=saved, clipboard_touched=changed or marked, started=started,
-                       left=text if changed else (marker if marked else None))
+                       left=text if changed else (marker if marked else None), keys_at=keys_at)
+
+    def _idle_ms(self) -> int | None:
+        """Temps depuis la dernière frappe ou le dernier mouvement de souris (extension MIT-SCREEN-SAVER), None si
+        inconnu. Les frappes simulées par XTEST comptent aussi."""
+        try:
+            from Xlib import display
+
+            d = display.Display()
+            try:
+                if not d.has_extension("MIT-SCREEN-SAVER"):
+                    return None
+                return int(d.screen().root.screensaver_query_info().idle)
+            finally:
+                d.close()
+        except Exception:
+            return None
+
+    def _recopy(self, capture: Capture) -> str | None:
+        """Nouvelle copie simulée de la sélection, juste avant un collage express : son texte ("" : rien de
+        sélectionné), None si on ne sait pas. Le presse-papiers garde cette copie, contenu d'origine à rendre."""
+        marker = _clipboard_marker()
+        if not self._write_marker(marker):
+            return None
+        capture.clipboard_touched = True
+        self._borrow(capture, marker)
+        time.sleep(0.05)
+        try:
+            self._send_keys("copy")
+        except Exception:
+            return None
+        capture.keys_at = time.monotonic()
+        deadline = capture.keys_at + 0.8
+        while time.monotonic() < deadline:
+            time.sleep(0.04)
+            text = self._read("CLIPBOARD")  # le marqueur n'offre aucun texte : tout texte lu vient de la copie
+            if text:
+                self._borrow(capture, text)
+                return text
+        return ""
+
+    def _selection_moved(self, capture: Capture) -> bool:
+        """Correction express, juste avant le collage : l'utilisateur a-t-il changé de fenêtre, ou changé la
+        sélection (frappe, clic) ? Sans activité depuis la copie, non ; sinon la sélection est relue (nouvelle copie
+        simulée, ou sélection primaire quand le presse-papiers contient ce qu'on ne saurait pas remettre)."""
+        if capture.target and self._active_window() != capture.target:
+            log.info("Collage annulé : la fenêtre active a changé pendant la correction express.")
+            return True
+        if self._acted_since(capture.keys_at) is False:
+            return False
+        log.info("Activité pendant la correction express : sélection relue avant le collage.")
+        if capture.saved_clipboard is None and not capture.clipboard_touched:
+            same = self._primary_from(capture.target) and self._read("PRIMARY") == capture.text
+        else:
+            same = self._recopy(capture) == capture.text
+        if not same:
+            log.info("Collage annulé : la sélection a changé pendant la correction express.")
+        return not same
 
     def _write_marker(self, marker: str) -> bool:
         """Marqueur sous un format à nous (_MARKER_TYPE), par python-xlib seulement (capture hors du fil de
@@ -792,11 +953,15 @@ class X11Bridge(Bridge):
     def replace(self, capture: Capture, text: str) -> tuple[bool, str]:
         if capture.saved_clipboard is None and not capture.clipboard_touched:
             capture.saved_clipboard = self._saved_text()
+        if capture.express and self._selection_moved(capture):
+            self._give_back(capture)
+            return False, _SELECTION_MOVED
         if not self._write(text):
             return False, _COPY_FAILED
         capture.clipboard_touched = True
         self._borrow(capture, text)
-        if capture.target and not self._activate(capture.target):
+        # Correction express : la fenêtre d'origine est toujours active (voir _selection_moved).
+        if capture.target and not capture.express and not self._activate(capture.target):
             return False, "Fenêtre d'origine introuvable : texte corrigé copié, collez-le avec Ctrl+V."
         time.sleep(0.05)
         try:
@@ -808,7 +973,7 @@ class X11Bridge(Bridge):
         self._defer(_RESTORE_DELAY_MS, lambda: self._give_back(capture))
         return True, ""
 
-    def copy(self, text: str) -> bool:
+    def _copy_text(self, text: str) -> bool:
         return self._write(text)
 
     def clipboard_text(self) -> str:
@@ -905,6 +1070,7 @@ class WaylandBridge(Bridge):
     def __init__(self, defer: Defer | None = None) -> None:
         super().__init__(defer)
         self._restoring = False  # wl-copy d'une restauration en cours (voir _wait_restoring)
+        self._timeouts = 0  # wl-paste et autres programmes arrêtés faute de réponse (voir _UNREADABLE)
         self._copies: list[subprocess.Popen] = []  # wl-copy --foreground de la correction express
         # Lance la fin d'une restauration (attente, relecture, wl-copy) hors du fil de l'interface.
         self._spawn: Callable[[Callable[[], None]], None] = (
@@ -919,8 +1085,7 @@ class WaylandBridge(Bridge):
         """wl-copy et wl-paste prennent le focus un instant (GNOME : pas de protocole data-control)."""
         return "gnome" in desktop_name()
 
-    @staticmethod
-    def _exec(cmd: list[str], data: str | bytes | None = None, timeout: float = 1.5,
+    def _exec(self, cmd: list[str], data: str | bytes | None = None, timeout: float = 1.5,
               output: bool = True) -> subprocess.CompletedProcess | None:
         """Lance le programme ; None s'il ne démarre pas ou dépasse le délai. `data` en octets : échange binaire.
 
@@ -930,14 +1095,17 @@ class WaylandBridge(Bridge):
         text = {} if isinstance(data, bytes) else {"encoding": "utf-8", "errors": "replace"}
         try:
             return subprocess.run(cmd, input=data, timeout=timeout, env=child_env(), **text, **streams)
-        except (OSError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
+            self._timeouts += 1
+            log.info("%s ne répond pas (plus de %g s).", os.path.basename(cmd[0]), timeout)
+            return None
+        except OSError:
             return None
 
-    @classmethod
-    def _run(cls, cmd: list[str], data: str | bytes | None = None, timeout: float = 1.5,
+    def _run(self, cmd: list[str], data: str | bytes | None = None, timeout: float = 1.5,
              output: bool = True) -> str | None:
         """Sortie du programme (chaîne vide sans `output`), None s'il échoue."""
-        out = cls._exec(cmd, data, timeout, output)
+        out = self._exec(cmd, data, timeout, output)
         if out is None or out.returncode != 0:
             return None
         return out.stdout if output else ""
@@ -1092,7 +1260,14 @@ class WaylandBridge(Bridge):
             time.sleep(0.02)
 
     def capture(self, express: bool = False, from_menu: bool = False) -> Capture:
-        started = time.monotonic()
+        timeouts = self._timeouts
+        capture = self._capture(time.monotonic())
+        capture.express = express
+        if not capture.text and self._timeouts > timeouts:
+            capture.problem = _UNREADABLE  # pas « Aucun texte sélectionné » : la sélection n'a pas pu être lue
+        return capture
+
+    def _capture(self, started: float) -> Capture:
         self._wait_restoring()
         # Jamais la sélection primaire : c'est celle de la dernière application où l'on a sélectionné, pas
         # forcément celle qui est active (Ctrl+Alt+X collait dans Writer un texte sélectionné dans Zen). Toujours
@@ -1119,8 +1294,8 @@ class WaylandBridge(Bridge):
         if not self._send_keys("copy"):
             return Capture("", saved_clipboard=saved, clipboard_touched=owner is not None, started=started, left=left,
                            owner=owner)
-        limit = 1.2 if self._tools_take_focus() else 0.6
-        deadline = time.monotonic() + limit
+        keys_at = time.monotonic()
+        deadline = keys_at + self._copy_limit()
         if owner is not None:
             # L'application copie : le wl-copy du marqueur perd le presse-papiers et s'arrête. Rien à relire
             # avant (sous GNOME, chaque wl-paste prendrait le focus un instant).
@@ -1131,7 +1306,7 @@ class WaylandBridge(Bridge):
                 time.sleep(0.02)
             text = self._paste(primary=False)
             return Capture(text or "", from_selection=bool(text), saved_clipboard=saved, clipboard_touched=True,
-                           started=started, left=text)
+                           started=started, left=text, keys_at=keys_at, docs=self._from_docs(text))
         # Sans marqueur : comparaison avec le contenu d'avant. Sous GNOME, on lit moins souvent.
         first, step = (0.25, 0.15) if self._tools_take_focus() else (0.05, 0.05)
         time.sleep(first)
@@ -1139,10 +1314,45 @@ class WaylandBridge(Bridge):
             text = self._paste(primary=False)
             if text and text != before:
                 return Capture(text, from_selection=True, saved_clipboard=saved, clipboard_touched=True,
-                               started=started, left=text)
+                               started=started, left=text, keys_at=keys_at)
             if time.monotonic() >= deadline:
                 return Capture("", started=started)
             time.sleep(step)
+
+    def _from_docs(self, text: str | None) -> bool:
+        """Copie faite dans Google Docs ? Regardé seulement quand le texte finit par deux retours à la ligne (voir
+        pasted_text) : sous GNOME, chaque lecture prend le focus un instant."""
+        if not text or not text.endswith("\n\n"):
+            return False
+        html = self._paste_bytes("text/html")
+        return bool(html) and b"docs-internal-guid" in html
+
+    def _copy_limit(self) -> float:
+        """Temps laissé à l'application pour copier sa sélection après le Ctrl+Inser simulé."""
+        return 1.2 if self._tools_take_focus() else 0.6
+
+    def _recopy(self, capture: Capture) -> str | None:
+        """Nouvelle copie simulée de la sélection, juste avant un collage express : son texte ("" : rien de
+        sélectionné), None si on ne sait pas. Le presse-papiers garde ensuite cette copie (ou le marqueur), notée
+        comme laissée par le correcteur : le contenu d'origine reste à rendre."""
+        marker = b""
+        owner = self._keep_copy(marker, _MARKER_TYPE)
+        if owner is None:
+            return None
+        capture.clipboard_touched, capture.owner = True, owner
+        self._borrow(capture, SavedClipboard(_MARKER_TYPE, marker))
+        if not self._wait_for_keys(0.0, owner) or not self._send_keys("copy"):
+            return None  # marqueur perdu (copie faite ailleurs entre-temps) ou frappe impossible
+        capture.keys_at = time.monotonic()
+        deadline = capture.keys_at + self._copy_limit()
+        while owner.poll() is None:
+            if time.monotonic() >= deadline:
+                return ""
+            time.sleep(0.02)
+        text = self._paste(primary=False)
+        capture.owner = None
+        self._borrow(capture, text if text is not None else "")
+        return text
 
     def focused_capture(self) -> Capture | None:
         """Le correcteur a le focus : sélection primaire lue par Qt. Sous GNOME, wl-paste prendrait le focus à
@@ -1168,8 +1378,8 @@ class WaylandBridge(Bridge):
         """Remet le presse-papiers d'origine de `capture` par wl-copy, `delay` secondes plus tard (fil de
         l'interface). La restauration n'a lieu que si elle est toujours la plus récente, qu'aucune capture n'est en
         cours, que le correcteur possède encore ce qu'il a laissé et, sous GNOME, après une pause de saisie (la
-        surface de wl-copy ne doit pas prendre une frappe). Sinon, au plus tard _RESTORE_GIVE_UP_S secondes après
-        l'heure prévue, elle est abandonnée : jamais de restauration qui traîne."""
+        surface de wl-copy ne doit pas prendre une frappe). Sans pause de saisie _RESTORE_GIVE_UP_S secondes après
+        l'heure prévue, elle passe à la correction suivante, qui reprend le contenu d'origine."""
         saved = capture.saved_clipboard
         if not capture.clipboard_touched or saved is None:
             return
@@ -1185,8 +1395,13 @@ class WaylandBridge(Bridge):
         with self._lock:
             return job.generation == self._generation
 
-    def _forget(self, job: _Restore, why: str = "") -> None:
-        """Restauration finie ou abandonnée : plus rien n'est dû (une capture suivante n'en hérite pas)."""
+    def _forget(self, job: _Restore, why: str = "", later: bool = False) -> None:
+        """Restauration finie, ou abandonnée parce que le presse-papiers a changé : plus rien n'est dû (une capture
+        suivante n'en hérite pas). `later` : remise à plus tard faute de pause de saisie ; ce que le correcteur a
+        laissé est encore là, la capture suivante reprendra le contenu d'origine (voir Bridge._borrow)."""
+        if later:
+            log.info("Presse-papiers d'origine pas encore remis (%s) : la prochaine correction le rendra.", why)
+            return
         if why:
             log.info("Presse-papiers d'origine non remis : %s.", why)
         with self._lock:
@@ -1199,7 +1414,7 @@ class WaylandBridge(Bridge):
         if not self._is_current(job):
             return
         if time.monotonic() > job.due + _RESTORE_GIVE_UP_S:
-            self._forget(job, "restauration en retard")
+            self._forget(job, "restauration en retard", later=True)
             return
         if job.main_check is not None and not job.main_check():
             self._forget(job, "un autre programme a copié quelque chose depuis")
@@ -1214,7 +1429,7 @@ class WaylandBridge(Bridge):
             if not self._is_current(job):
                 return  # dépassée par un remplacement ou une capture plus récents
             if time.monotonic() > deadline:
-                self._forget(job, f"abandonné après {_RESTORE_GIVE_UP_S:g} s ({why or 'délai dépassé'})")
+                self._forget(job, f"{why or 'délai dépassé'} en {_RESTORE_GIVE_UP_S:g} s", later=True)
                 return
             with self._lock:
                 capturing = self._capturing
@@ -1225,7 +1440,9 @@ class WaylandBridge(Bridge):
             idle = self._idle_ms()
             if idle is not None and idle < _IDLE_BEFORE_RESTORE_MS:
                 why = f"pas de pause de saisie de {_IDLE_BEFORE_RESTORE_MS} ms"
-                time.sleep(max(0.05, (_IDLE_BEFORE_RESTORE_MS - idle) / 1000))
+                # Frappe continue : on relit moins souvent passé quelques secondes.
+                pause = 0.5 if time.monotonic() > job.due + 5 else 0.05
+                time.sleep(max(pause, (_IDLE_BEFORE_RESTORE_MS - idle) / 1000))
                 continue
             if job.sure_check is not None:
                 if not job.sure_check():
@@ -1269,6 +1486,7 @@ class WaylandBridge(Bridge):
         if capture.saved_clipboard is None and not capture.clipboard_touched:
             capture.saved_clipboard = _qt_saved_text()  # le correcteur a le focus : Qt voit le presse-papiers actuel
         self._wait_restoring()
+        text = pasted_text(capture, text)
         if not _qt_set_clipboard(text):
             return False, _COPY_FAILED
         capture.clipboard_touched = True
@@ -1286,26 +1504,46 @@ class WaylandBridge(Bridge):
         return True, _CLIPBOARD_LOST if capture.saved_clipboard is None else ""
 
     def replace(self, capture: Capture, text: str) -> tuple[bool, str]:
-        """Correction express : aucune fenêtre du correcteur n'a le focus, le texte passe par wl-copy."""
+        """Correction express (ou fenêtre de correction qui n'a plus le focus) : le texte passe par wl-copy.
+
+        En correction express, le collage arrive là où est le curseur à ce moment : si l'utilisateur a tapé,
+        cliqué ou changé de fenêtre depuis la copie simulée, la sélection est recopiée et doit rendre exactement
+        le texte capturé (deux fois au plus, puis collage) ; sinon, rien n'est collé."""
         if capture.saved_clipboard is None and not capture.clipboard_touched:
             # Le correcteur a le focus : Qt voit le presse-papiers actuel. Sinon wl-paste, jamais l'avis de Qt sur
             # sa propriété, qui peut rester vrai après une copie faite ailleurs.
             capture.saved_clipboard = _qt_saved_text() if _qt_focused() else self._clipboard_before()[2]
         self._wait_restoring()
-        copy = self._keep_copy(text.encode("utf-8"))
-        if copy is None and not self._set_clipboard(text):
-            return False, "Copie du texte corrigé impossible (wl-copy a échoué) : rien n'a été collé."
-        capture.clipboard_touched = True
-        capture.owner = copy
-        self._borrow(capture, text)
-        if not self._wait_for_keys(capture.started, copy):
-            return False, "Copie du texte corrigé impossible (wl-copy a échoué) : rien n'a été collé."
+        text = pasted_text(capture, text)
+        checks = 2 if capture.express else 0
+        while True:
+            copy = self._keep_copy(text.encode("utf-8"))
+            if copy is None and not self._set_clipboard(text):
+                return False, "Copie du texte corrigé impossible (wl-copy a échoué) : rien n'a été collé."
+            capture.clipboard_touched = True
+            capture.owner = copy
+            self._borrow(capture, text)
+            if not self._wait_for_keys(capture.started, copy):
+                return False, "Copie du texte corrigé impossible (wl-copy a échoué) : rien n'a été collé."
+            if not checks:
+                break
+            checks -= 1
+            acted = self._acted_since(capture.keys_at)
+            if acted is False:
+                break
+            log.info("Activité pendant la correction express : sélection relue avant le collage.")
+            if self._recopy(capture) != capture.text:
+                log.info("Collage annulé : la sélection a changé pendant la correction express.")
+                self._restore_later(capture, 0.0)
+                return False, _SELECTION_MOVED
+            if acted is None:
+                checks = 0  # pas de compteur d'inactivité : la nouvelle copie fait foi
         if not self._send_keys("paste"):
             return False, _NO_PASTE_TOOL
         self._restore_later(capture, self._settle_delay())
         return True, _CLIPBOARD_LOST if capture.saved_clipboard is None else ""
 
-    def copy(self, text: str) -> bool:
+    def _copy_text(self, text: str) -> bool:
         # Fenêtre du correcteur au premier plan (bouton Copier) : par Qt, sans surface de wl-copy.
         if _qt_focused():
             return _qt_set_clipboard(text)

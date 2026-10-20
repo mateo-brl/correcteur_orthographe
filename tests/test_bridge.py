@@ -3,6 +3,7 @@ programmes lancés."""
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -250,6 +251,66 @@ def test_x11_uses_primary_only_from_the_active_application(monkeypatch, clock):
     assert x11.capture().text == "" and keys == ["copy"]
 
 
+class FakeX11:
+    """Bureau X11 simulé pour la correction express : presse-papiers (texte, ou None pour le marqueur), sélection
+    de l'application active (aussi sélection primaire), fenêtre active, dernière activité de l'utilisateur."""
+
+    def __init__(self, clock, monkeypatch, x11: X11Bridge) -> None:
+        self.clock, self.clipboard, self.selection = clock, "témoin", "Ces un test"
+        self.active, self.last_input = 42, clock.now - 10
+        self.keys: list[str] = []
+        self.pasted: list[str | None] = []
+        for name, fn in (("_active_window", lambda: self.active),
+                         ("_primary_from", lambda window: window == 42),
+                         ("_read", lambda sel: self.selection if sel == "PRIMARY" else self.clipboard),
+                         ("_write", self.write), ("_write_marker", self.mark), ("_send_keys", self.send),
+                         ("_idle_ms", lambda: int((self.clock.now - self.last_input) * 1000)),
+                         ("_saved_text", lambda: self.clipboard), ("_activate", lambda wid: True)):
+            monkeypatch.setattr(x11, name, fn)
+
+    def write(self, text, qt_fallback=True):
+        self.clipboard = text
+        return True
+
+    def mark(self, marker):
+        self.clipboard = None
+        return True
+
+    def send(self, action):
+        self.keys.append(action)
+        self.last_input = self.clock.now  # XTEST : les frappes simulées comptent aussi
+        if action == "copy" and self.selection:
+            self.clipboard = self.selection
+        if action == "paste":
+            self.pasted.append(self.clipboard)
+
+
+@pytest.mark.parametrize("what, pasted", [("rien", True), ("souris", True), ("frappe", False),
+                                          ("autre fenêtre", False)])
+def test_x11_express_checks_the_selection_before_pasting(monkeypatch, clock, what, pasted):
+    """L-01 sous X11 : sans activité depuis la capture, collage direct ; souris bougée, sélection relue (identique :
+    collage) ; frappe qui a ôté la sélection, ou autre fenêtre active : rien n'est collé, le témoin revient."""
+    deferred = []
+    x11 = X11Bridge(lambda ms, fn: deferred.append(fn))
+    desk = FakeX11(clock, monkeypatch, x11)
+    capture = x11.capture(express=True)
+    assert capture.text == "Ces un test" and desk.keys == []  # sélection primaire, sans copie simulée
+    clock.sleep(1.0)
+    if what == "souris":
+        desk.last_input = clock.now
+    elif what == "frappe":
+        desk.last_input, desk.selection = clock.now, None
+    elif what == "autre fenêtre":
+        desk.active = 43
+    ok, message = x11.replace(capture, "C'est un test")
+    for restore in deferred:
+        restore()
+    assert ok is pasted and desk.pasted == (["C'est un test"] if pasted else [])
+    assert pasted or "sélection a changé" in message
+    assert desk.clipboard == "témoin"
+    assert desk.keys.count("copy") == (1 if what in ("souris", "frappe") else 0)
+
+
 def test_x11_write_without_qt_fallback(monkeypatch):
     def forbidden(text):
         raise AssertionError("presse-papiers de Qt hors du fil de l'interface")
@@ -312,8 +373,12 @@ class FakeWin:
         self.set_ok, self.activate_ok = True, True
         self.foreground, self.focus = 100, 7
         self.classes = {100: "Notepad", 200: "Shell_TrayWnd"}
+        self.titles: dict[int, str] = {}
         self.elevated = False
         self.watch = None
+        self.copy_keys = {"insert", "c"}  # copies que l'application connaît
+        self.terminal, self.in_menu = False, False
+        self.rewrite_after_paste = False  # l'Explorateur réécrit le presse-papiers après un collage
 
     # presse-papiers
     @staticmethod
@@ -376,18 +441,35 @@ class FakeWin:
     def wait_modifiers_released(self, *args):
         pass
 
-    def send_copy(self, hwnd):
-        self.keys.append(f"copie:{self.window_class(hwnd)}")
-        if self.selection and not self.elevated:
+    def window_title(self, hwnd):
+        return self.titles.get(hwnd, "")
+
+    def is_terminal(self, hwnd):
+        return self.terminal
+
+    def keyboard_in_menu(self, hwnd):
+        return self.in_menu
+
+    def send_copy(self, keys="insert"):
+        self.keys.append(f"copie:{keys}")
+        if keys == "c" and self.terminal:
+            self.document.append("^C")  # programme interrompu
+        if (self.selection and not self.elevated and not self.in_menu and keys in self.copy_keys
+                and self.foreground == 100):
             formats = {13: self.text_bytes(self.selection)}
             if self.html:
                 formats[self.HTML] = self.html
             self._write(formats)
 
     def send_ctrl(self, letter):
+        if letter == "c":
+            self.send_copy("c")
+            return
         self.keys.append(letter)
         if letter == "v":
             self.document.append(self.get_clipboard_text())
+            if self.rewrite_after_paste:
+                self._write({**self.clipboard, 0xC123: b"\0"})  # même texte, numéro de séquence nouveau
 
     def InputWatch(self):
         watch = SimpleNamespace(acted="", ok=True, stopped=False)
@@ -438,7 +520,7 @@ def test_windows_pastes_then_restores_the_clipboard(clock):
     w = FakeWin()
     win, deferred = _windows(w)
     capture = _capture(win)
-    assert capture.text == "Ces un test" and w.keys == ["copie:Notepad"] and w.watch is not None
+    assert capture.text == "Ces un test" and w.keys == ["copie:insert"] and w.watch is not None
     ok, message = win.replace(capture, "C'est un test")
     assert ok and message == "" and w.document == ["C'est un test"] and w.watch.stopped
     for restore in deferred:
@@ -522,13 +604,111 @@ def test_windows_restore_skipped_when_the_user_copied_something(clock):
     assert w.get_clipboard_text() == "copié par l'utilisateur"
 
 
+def test_windows_restores_after_the_explorer_rewrote_the_clipboard(clock):
+    """W-01 : renommage F2 dans l'Explorateur, qui réécrit le presse-papiers après le collage (même texte, numéro
+    de séquence nouveau). Ce n'est pas une copie de l'utilisateur : le témoin revient."""
+    w = FakeWin("Je les ai mit au frigo")
+    w.rewrite_after_paste = True
+    win, deferred = _windows(w)
+    capture = _capture(win)
+    ok, _ = win.replace(capture, "Je les ai mis au frigo")
+    assert ok and w.document == ["Je les ai mis au frigo"]
+    for restore in deferred:
+        restore()
+    assert w.get_clipboard_text() == "témoin"
+
+
+def test_windows_restores_after_windows_added_a_format(clock):
+    """W-15 : texte juste, rien à coller ; entre-temps Windows a ajouté un format au presse-papiers
+    (EnterpriseDataProtectionId) sans changer son texte. Le témoin revient quand même."""
+    w = FakeWin("Les livres que tu m'as prêtés sont super.")
+    win, _ = _windows(w)
+    capture = _capture(win)
+    w._write({**w.clipboard, 0xC456: b"edp"})
+    win.release(capture)
+    assert w.get_clipboard_text() == "témoin"
+
+
+def test_windows_copy_falls_back_to_ctrl_c_except_in_terminals(clock):
+    """Ctrl+Inser d'abord (Reverso et son double Ctrl+C l'ignorent) ; Ctrl+C seulement si l'application ne connaît
+    pas Ctrl+Inser, et jamais dans un terminal (W-18 : terminal de VS Code interrompu)."""
+    w = FakeWin()
+    w.copy_keys = {"c"}
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.text == "Ces un test" and w.keys == ["copie:insert", "copie:c"]
+
+    w = FakeWin()
+    w.copy_keys, w.terminal = {"c"}, True
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.text == "" and w.keys == ["copie:insert"] and "^C" not in w.document
+
+
+def test_windows_explains_why_nothing_was_copied(clock):
+    """W-02 : barre de menus activée par Alt (Bloc-notes) ; W-04 : un autre programme prend le premier plan
+    pendant la copie (panneau de Reverso). Pas « Aucun texte sélectionné »."""
+    w = FakeWin()
+    w.in_menu = True
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.text == "" and "menu" in capture.problem and "Échap" in capture.problem
+
+    w = FakeWin()
+    w.titles[300] = "Reverso Rephrase"
+    copy = w.send_copy
+
+    def steal(keys="insert"):
+        w.foreground = 300
+        copy(keys)
+
+    w.send_copy = steal
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.text == "" and "« Reverso Rephrase »" in capture.problem
+
+    w = FakeWin(selection="")
+    win, _ = _windows(w)
+    assert _capture(win).problem == ""  # rien de sélectionné : le message habituel
+
+
+def test_windows_copy_button_gives_the_clipboard_to_the_user(clock, caplog):
+    """Bouton Copier de la fenêtre, puis Échap : le texte copié reste, sans « un autre programme a copié »."""
+    w = FakeWin()
+    win, deferred = _windows(w)
+    capture = _capture(win, express=False)
+    with caplog.at_level(logging.INFO, logger="correcteur.platform.bridge"):
+        assert win.copy("C'est un test")
+        win.release(capture)
+        for restore in deferred:
+            restore()
+    assert w.get_clipboard_text() == "C'est un test"
+    assert not any("autre programme" in r.getMessage() for r in caplog.records)
+
+
+def test_windows_google_docs_gets_plain_text(clock):
+    """W-17 : Google Docs reconnaît sa propre copie (docs-internal-guid) et recollait son contenu d'origine, sans
+    les corrections. Texte seul."""
+    fragment = '<b style="font-weight:normal;" id="docs-internal-guid-1234"><span>Je les ai mit au frigo.</span></b>'
+    header = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n"
+    body = "<html><body><!--StartFragment-->" + fragment + "<!--EndFragment--></body></html>"
+    w = FakeWin("Je les ai mit au frigo.\n\n", (header + body).encode())
+    w.classes[100] = "Chrome_WidgetWin_1"
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.docs
+    ok, _ = win.replace(capture, "Je les ai mis au frigo.\n\n")
+    # Sans les deux retours à la ligne ajoutés par la copie de Docs (deux paragraphes vides de plus à chaque fois).
+    assert ok and FakeWin.HTML not in w.clipboard and w.document == ["Je les ai mis au frigo."]
+
+
 def test_windows_tray_menu_goes_back_to_the_last_window(clock):
     """G6 : depuis le menu de l'icône, le premier plan est la barre des tâches : retour à la fenêtre de travail."""
     w = FakeWin()
     w.foreground = 200
     win, _ = _windows(w)
     capture = _capture(win, express=False, from_menu=True)
-    assert capture.text == "Ces un test" and capture.target == 100 and w.keys == ["copie:Notepad"]
+    assert capture.text == "Ces un test" and capture.target == 100 and w.keys == ["copie:insert"]
 
 
 def test_windows_explains_elevated_windows(clock):

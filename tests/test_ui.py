@@ -166,10 +166,10 @@ def test_ignore_rule_covers_both_engines_and_spares_spelling(qapp, window):
 
     open_and_wait(qapp, window)
     requested = []
-    window.ignoreRulesRequested.connect(requested.append)
+    window.ignoreRulesRequested.connect(lambda rules, label: requested.append((rules, label)))
     obtenu = next(i for i in window._issues if window._text[i.start:i.end] == "obtenu")
     window.ignore_rule(obtenu)
-    assert requested == [["G_PPAS", "QUE_AVOIR"]]
+    assert requested == [(["G_PPAS", "QUE_AVOIR"], f"{obtenu.message} : « obtenu »")]
     assert all(window._text[i.start:i.end] != "obtenu" for i in window._issues)
 
     # Orthographe : une seule règle par moteur pour tous les mots, on propose le dictionnaire à la place.
@@ -723,3 +723,110 @@ def test_saving_a_taken_hotkey_keeps_the_dialog_open(qapp, home):
     assert not dialog.hk_express_error.isVisibleTo(dialog)
     dialog._accept()
     assert controller.settings.general.hotkey_autocorrect == "<ctrl>+<alt>+j"
+
+
+def test_without_live_check_the_window_says_the_text_changed(qapp, make_window):
+    """L-11, W-12 : revérification coupée, faute tapée après « Aucune faute trouvée » : le bandeau le disait
+    toujours et « Remplacer » restait grisé. Il dit maintenant que le texte a changé, et F5 revérifie."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from correcteur.platform.bridge import Capture
+
+    window = make_window(grammalecte=dict(found=lambda text: []))
+    window.controller.settings.general.live_check = False
+    clean = "Le chat dort."
+    window.open_with(clean, Capture(clean, target=1, from_selection=True))
+    assert wait_until(qapp, lambda: not window._running and window._ready)
+    assert window.placeholder.text() == "✓ Aucune faute trouvée."
+    window.editor.textCursor().insertText(" Il et sorti.")
+    assert "F5" in window.placeholder.text() and "F5" in window.summary.text()
+    assert window.replace_btn.isEnabled() and window.replace_btn.text() == "Remplacer"
+    window.activateWindow()
+    assert wait_until(qapp, lambda: qapp.activeWindow() is window)
+    QTest.keyClick(window.editor, Qt.Key.Key_F5)
+    assert wait_until(qapp, lambda: not window._running and window.placeholder.text() == "✓ Aucune faute trouvée.")
+    assert window.summary.text() == ""
+
+
+def test_f8_starts_from_the_cursor(qapp, window):
+    """L-09 : après Ctrl+Début, F8 allait à la faute qui suit la dernière visitée, pas à la première."""
+    open_and_wait(qapp, window)
+    window._select_relative(+1)
+    window._select_relative(+1)
+    window._select_relative(+1)
+    assert window._selected is window._issues[2]
+    cursor = window.editor.textCursor()
+    cursor.setPosition(0)
+    window.editor.setTextCursor(cursor)
+    window._select_relative(+1)
+    assert window._selected is window._issues[0]
+    cursor.setPosition(len(window._text))
+    window.editor.setTextCursor(cursor)
+    window._select_relative(-1)
+    assert window._selected is window._issues[-1]
+
+
+def test_one_automatic_correction_is_singular(qapp, make_window):
+    """L-12 : « 1 correction sûre appliquée automatiquement : mistake → mistakes (surlignées, …) »."""
+    window = make_window(auto_correct=True, grammalecte=dict(found=lambda text: present_one(text, "grammalecte")),
+                         languagetool=dict(found=lambda text: present_one(text, "languagetool")))
+    window.open_with("Les enfant dorment.")
+    assert wait_until(qapp, lambda: window.auto_note.isVisible())
+    note = window.auto_note.text()
+    assert "1 correction sûre appliquée" in note and "(surlignée," in note
+
+
+def present_one(text, engine):
+    """Les deux moteurs proposent la même correction : elle est sûre."""
+    from test_checker import issue, present
+
+    return present([issue(text, "enfant", ["enfants"], engine, rule="ACCORD")])
+
+
+def test_disabled_rules_are_listed_by_description(qapp, home):
+    """W-13 : les Paramètres listaient les règles coupées sous leur identifiant (« esp_avant_après_tiret »)."""
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    settings.ignored_rules = ["esp_avant_après_tiret", "ANCIENNE"]
+    settings.rule_labels = {"esp_avant_après_tiret": "Espace avant un tiret : « – »"}
+    controller = FakeController(settings, PersonalDictionary())
+    dialog = SettingsDialog(settings, controller)
+    texts = [dialog.rules.item(i).text() for i in range(dialog.rules.count())]
+    assert texts == ["Espace avant un tiret : « – »", "ANCIENNE"]  # avant la 0.1.14 : l'identifiant seul
+    dialog.rules.takeItem(1)
+    dialog._accept()
+    assert controller.settings.ignored_rules == ["esp_avant_après_tiret"]
+    assert controller.settings.rule_labels == {"esp_avant_après_tiret": "Espace avant un tiret : « – »"}
+
+
+def test_long_shortcut_error_is_shown_whole(qapp, home):
+    """W-07 : le message « … est déjà pris par une autre application… » avait sa 2e ligne coupée."""
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    dialog = SettingsDialog(settings, FakeController(settings, PersonalDictionary()))
+    dialog.resize(600, 300)
+    dialog.show()
+    dialog._show_error(dialog.hk_express_error, "Ctrl+Alt+J est déjà pris par une autre application : choisissez-en "
+                       "un autre. " * 3)
+    label = dialog.hk_express_error
+    assert wait_until(qapp, lambda: label.height() >= label.heightForWidth(label.width()))
+    dialog.close()
+
+
+def test_tab_order_follows_the_screen(qapp, window):
+    """W-14 : Tab allait du texte aux boutons du bas, et seulement ensuite aux cartes (affichées au-dessus)."""
+    open_and_wait(qapp, window)
+    order, widget = [], window.editor
+    for _ in range(60):
+        widget = widget.nextInFocusChain()
+        while not (widget.focusPolicy() & Qt.FocusPolicy.TabFocus) or widget is window.scroll:
+            widget = widget.nextInFocusChain()
+        if widget is window.editor:
+            break
+        order.append(widget)
+    first_card_button = window._cards[0].findChildren(__import__("PySide6.QtWidgets").QtWidgets.QAbstractButton)[0]
+    assert order.index(first_card_button) < order.index(window.fix_sure) < order.index(window.replace_btn)
+    assert window.scroll not in order

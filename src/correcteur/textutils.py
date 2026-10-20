@@ -376,18 +376,24 @@ def _word_group(text: str, start: int, end: int, reach: int = 30) -> tuple[int, 
     return s, e
 
 
+def _with_punctuation(text: str, end: int) -> int:
+    """Fin d'un groupe de mots étendue à la ponctuation qui le suit de près : « plage . → plage. » plutôt
+    qu'une espace corrigée sans rien de lisible."""
+    j = end
+    while j < len(text) and j - end < 3 and not text[j].isalnum() and text[j] != "\n":
+        j += 1
+    run = text[end:j]
+    return end + len(run.rstrip()) if run.strip() else end
+
+
 def describe_changes(before: str, after: str, limit: int = 4) -> str:
-    """« aller → allé, a → à, obtenu → obtenus… » : ce qu'une correction a changé, mot à mot. Les espaces
-    corrigées sont comptées à la fin (« a → à, 1 espace corrigée »), pour que la liste corresponde au nombre
-    de corrections annoncé ; seules, elles n'ont rien de lisible à montrer : "" (le nombre suffit)."""
-    words, spaces = [], 0
-    for s, e, rep in diff_edits(before, after):
-        s2, e2 = _word_group(before, s, e)
-        old, new = before[s2:e2].strip(), (before[s2:s] + rep + before[e:e2]).strip()
-        if old.split() != new.split():
-            words.append(f"{old} → {new}")
-        else:
-            spaces += 1
+    """« aller → allé, a → à, obtenu → obtenus… » : ce qu'une correction a changé, mot à mot. Une virgule
+    déplacée se montre en un seul morceau (« heures ,Zorglub → heures, Zorglub », pas « heures → heures,,
+    ,Zorglub → Zorglub »). Les espaces corrigées sont comptées à la fin (« a → à, 1 espace corrigée ») ; seules,
+    elles se montrent avec la ponctuation qu'elles touchent (« plage . → plage. »)."""
+    words, spaces = _changed_words(before, after, with_punctuation=False)
+    if not words and spaces:
+        words, spaces = _changed_words(before, after, with_punctuation=True)
     if not words:
         return ""
     if len(words) > limit:
@@ -395,3 +401,38 @@ def describe_changes(before: str, after: str, limit: int = 4) -> str:
     if spaces:
         words.append("1 espace corrigée" if spaces == 1 else f"{spaces} espaces corrigées")
     return ", ".join(words)
+
+
+def _changed_words(before: str, after: str, with_punctuation: bool) -> tuple[list[str], int]:
+    """(« ancien → nouveau » par groupe de mots modifié, nombre d'espaces corrigées sans autre changement)."""
+    def shown(s2: int, e2: int, edits: list[tuple[int, int, str]]) -> tuple[str, str]:
+        pieces, pos = [], s2
+        for s, e, rep in edits:
+            pieces += [before[pos:s], rep]
+            pos = e
+        pieces.append(before[pos:e2])
+        return before[s2:e2].strip(), "".join(pieces).strip()
+
+    groups: list[list] = []  # [début, fin, modifications] dans `before`
+    for s, e, rep in diff_edits(before, after):
+        s2, e2 = _word_group(before, s, e)
+        old, new = shown(s2, e2, [(s, e, rep)])
+        if with_punctuation and old.split() == new.split():
+            e2 = _with_punctuation(before, e2)
+        if groups:
+            gap = before[groups[-1][1]:s2]
+            punctuation = any(t and not t[-1].isalnum() for t in shown(*groups[-1])) or any(
+                t and not t[0].isalnum() for t in shown(s2, e2, [(s, e, rep)]))
+            if s2 <= groups[-1][1] or (len(gap) <= 2 and not gap.strip() and punctuation):
+                groups[-1][1] = max(groups[-1][1], e2)
+                groups[-1][2].append((s, e, rep))
+                continue
+        groups.append([s2, e2, [(s, e, rep)]])
+    words, spaces = [], 0
+    for group in groups:
+        old, new = shown(*group)
+        if old.split() != new.split():
+            words.append(f"{old} → {new}")
+        else:
+            spaces += 1
+    return words, spaces

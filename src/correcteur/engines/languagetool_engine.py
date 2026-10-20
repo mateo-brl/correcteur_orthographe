@@ -185,6 +185,10 @@ class LanguageToolEngine(Engine):
         except httpx.HTTPError as exc:
             if self.mode == "local":
                 raise EngineError("Le serveur LanguageTool local ne répond pas.") from exc
+            if self.mode == "perso":
+                # Internet marche peut-être très bien : c'est l'adresse saisie qu'il faut vérifier.
+                raise EngineError(f"Serveur LanguageTool personnel injoignable à l'adresse {self.base_url()} : "
+                                  "vérifiez-la dans les paramètres.") from exc
             raise EngineError("LanguageTool injoignable (pas de connexion Internet ?).") from exc
         if resp.status_code == 429:
             raise EngineError("Limite de l'API publique LanguageTool atteinte, réessayez dans une minute.")
