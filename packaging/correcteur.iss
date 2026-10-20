@@ -31,6 +31,10 @@ CloseApplications=yes
 [Languages]
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 
+[Messages]
+; Le texte d'origine parle des « icônes créées sur le Bureau », alors qu'aucune ne l'est sans la case cochée.
+FinishedLabel=L'installation de [name] est terminée. Lancez-le depuis le menu Démarrer : son icône se place ensuite dans la zone de notification, près de l'horloge.
+
 [Tasks]
 Name: "demarrage"; Description: "Lancer le correcteur à l'ouverture de session (conseillé)"
 Name: "bureau"; Description: "Créer un raccourci sur le Bureau"; Flags: unchecked

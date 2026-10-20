@@ -6,6 +6,7 @@ from __future__ import annotations
 import faulthandler
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -47,6 +48,51 @@ def crash_log_path() -> Path:
     return data_dir() / "plantages.log"
 
 
+# Sous Windows, faulthandler écrit aussi les exceptions que le système rattrape lui-même : un client
+# d'accessibilité (UI Automation) en provoque une à chaque lancement (RPC_E_CANTCALLOUT_ININPUTSYNCCALL), sans
+# aucune conséquence. Elles faisaient croire à des plantages : retirées du fichier.
+_HARMLESS_EXCEPTIONS = re.compile(r"^Windows fatal exception: code 0x(?:8001010d|8001010e|80010108)\b", re.I)
+
+
+def clean_crash_log(path: Path) -> None:
+    """Retire de plantages.log les blocs d'exceptions rattrapées sans conséquence (voir _HARMLESS_EXCEPTIONS)."""
+    try:
+        if not path.exists() or path.stat().st_size > 5_000_000:
+            return
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    except OSError:
+        return
+    kept, skipping = [], False
+    for line in lines:
+        if _HARMLESS_EXCEPTIONS.match(line):
+            skipping = True
+            continue
+        if skipping and line.startswith(("--- ", "Windows fatal exception", "Fatal Python error")):
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    if len(kept) != len(lines):
+        try:
+            path.write_text("".join(kept), encoding="utf-8")
+        except OSError:
+            pass
+
+
+def close_crash_log() -> None:
+    """Arrêt normal : faulthandler n'a plus rien à écrire, le fichier est nettoyé (voir clean_crash_log)."""
+    global _crash_file
+    if _crash_file is None:
+        return
+    try:
+        faulthandler.disable()
+        _crash_file.close()
+    except (OSError, ValueError):
+        pass
+    _crash_file = None
+    if sys.platform == "win32":
+        clean_crash_log(crash_log_path())
+
+
 def install_crash_log() -> Path | None:
     """faulthandler écrit la pile de tous les fils dans plantages.log quand le processus plante (segfault d'une
     bibliothèque, par exemple) : le journal n'en garderait aucune trace. Fichier à part, ouvert en ajout : le
@@ -54,6 +100,8 @@ def install_crash_log() -> Path | None:
     global _crash_file
     try:
         path = crash_log_path()
+        if sys.platform == "win32" and (_crash_file is None or _crash_file.closed):
+            clean_crash_log(path)  # fausses alertes des lancements précédents (arrêtés sans passer par quit)
         if _crash_file is None or _crash_file.closed:
             _crash_file = open(path, "a", encoding="utf-8")
         _crash_file.write(f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} : {APP_NAME} {__version__} démarré "
@@ -389,6 +437,10 @@ class Controller(QObject):
         works = self._hotkey_works(g.hotkey_check, verify_id) and self._hotkey_works(g.hotkey_autocorrect, express_id)
         if session_type() == "wayland" and not works:
             return "Correcteur prêt. Utilisez votre raccourci du bureau (commande « correcteur selection »)."
+        if not works and not self._hotkeys_active:
+            # « Correcteur prêt : … Ctrl+Alt+X » suivait l'annonce que ces raccourcis étaient pris.
+            why = "pris par une autre application" if g.hotkeys_enabled else "désactivés dans les paramètres"
+            return f"Correcteur prêt, sans ses raccourcis clavier ({why}) : utilisez le menu de son icône."
         return (f"Correcteur prêt : sélectionnez du texte puis {hotkey_display(g.hotkey_check)} "
                 f"(fenêtre) ou {hotkey_display(g.hotkey_autocorrect)} (correction express).")
 
@@ -459,7 +511,10 @@ class Controller(QObject):
             self._hotkey_failures = failed
             self._hotkeys_active = len(failed) < len(bindings)
             if failed:
-                self.notify("Raccourci déjà utilisé par une autre application : "
+                # Tous pris : souvent un autre Correcteur (installé et portable lancés ensemble).
+                other = (" (un autre Correcteur, installé ou portable, est peut-être déjà lancé)"
+                         if len(failed) == len(bindings) else "")
+                self.notify("Raccourci déjà utilisé par une autre application" + other + " : "
                             + ", ".join(hotkey_display(f) for f in failed) + ". Changez-le dans les paramètres.",
                             error=True)
         elif not supported:
@@ -480,9 +535,11 @@ class Controller(QObject):
             text = why if why.startswith("Raccourcis") else f"Raccourcis globaux inactifs : {why}"
             QTimer.singleShot(2000, lambda: self.notify(text, error=True))
 
-    def _read_gnome_shortcuts(self, warn_missing: bool, install: tuple[str, str] | None = None) -> None:
+    def _read_gnome_shortcuts(self, warn_missing: bool, install: tuple[str, str] | None = None,
+                              remove: bool = False) -> None:
         """Lit les raccourcis GNOME du correcteur, après les avoir créés ou mis à jour avec les touches
-        `install`, dans un fil de travail : gsettings peut mettre plusieurs secondes à répondre."""
+        `install`, ou retirés (`remove`), dans un fil de travail : gsettings peut mettre plusieurs secondes à
+        répondre."""
         def work() -> None:
             if install is not None:
                 try:
@@ -491,6 +548,11 @@ class Controller(QObject):
                                               + " et ".join(hotkey_display(c) for c in install) + ".", False)
                 except Exception as exc:
                     self.notifyRequested.emit(f"Raccourcis GNOME non mis à jour : {exc}", True)
+            if remove:
+                try:
+                    self.notifyRequested.emit(autostart.remove_gnome_shortcuts(), False)
+                except Exception as exc:
+                    self.notifyRequested.emit(f"Raccourcis GNOME non retirés : {exc}", True)
             try:
                 bindings = autostart.gnome_shortcuts()
             except Exception as exc:
@@ -663,10 +725,12 @@ class Controller(QObject):
         if capture is not None and not replaced:
             self.bridge.release(capture)
 
-    def _ignore_rules(self, rule_ids: list[str]) -> None:
+    def _ignore_rules(self, rule_ids: list[str], label: str = "") -> None:
         added = [r for r in dict.fromkeys(rule_ids) if r and r not in self.settings.ignored_rules]
         if added:
             self.settings.ignored_rules.extend(added)
+            if label:
+                self.settings.rule_labels.update({r: label for r in added})
             self.store.save(self.settings)
 
     def open_settings(self) -> None:
@@ -676,6 +740,7 @@ class Controller(QObject):
             self.bring_to_front(self._settings_dialog)
             return
         dialog = SettingsDialog(self.settings, self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # sinon chaque ouverture laissait un dialogue caché
         dialog.setWindowIcon(self.icon)
         self._settings_dialog = dialog
         dialog.finished.connect(lambda _: setattr(self, "_settings_dialog", None))
@@ -700,9 +765,14 @@ class Controller(QObject):
             except Exception as exc:
                 self.notify(f"Démarrage automatique impossible : {exc}", error=True)
         self._start_hotkeys()
-        if hotkeys_changed and session_type() == "wayland" and "gnome" in desktop_name():
-            # Sous Wayland, les raccourcis sont ceux de GNOME : ils prennent les nouvelles touches.
-            self._read_gnome_shortcuts(warn_missing=False, install=(new.hotkey_check, new.hotkey_autocorrect))
+        if session_type() == "wayland" and "gnome" in desktop_name():
+            # Sous Wayland, les raccourcis sont ceux de GNOME : ils prennent les nouvelles touches, disparaissent
+            # quand les raccourcis globaux sont désactivés et reviennent quand ils sont réactivés.
+            keys = (new.hotkey_check, new.hotkey_autocorrect)
+            if old.hotkeys_enabled and not new.hotkeys_enabled:
+                self._read_gnome_shortcuts(warn_missing=False, remove=True)
+            elif new.hotkeys_enabled and (hotkeys_changed or not old.hotkeys_enabled):
+                self._read_gnome_shortcuts(warn_missing=False, install=keys)
         self.checker.warmup()
 
     def _follow_theme(self) -> None:
@@ -742,6 +812,7 @@ class Controller(QObject):
         self.ipc.stop()
         self.window.runner.shutdown()
         self.checker.close()
+        close_crash_log()
         self.app.quit()
 
 
@@ -751,8 +822,8 @@ def run_app(initial_command: str | None = None, startup: bool = False, debug: bo
         debug = logging.getLogger().isEnabledFor(logging.DEBUG)
     install_log(debug)
     install_crash_log()
-    log.info("%s %s démarré (Python %s, %s, session %s %s)", APP_NAME, __version__, sys.version.split()[0],
-             sys.platform, session_type(), desktop_name())
+    log.info("%s %s démarré (Python %s, %s, session %s)", APP_NAME, __version__, sys.version.split()[0],
+             sys.platform, " ".join(part for part in (session_type(), desktop_name()) if part))
     QApplication.setApplicationName(APP_NAME)
     QApplication.setApplicationVersion(__version__)
     QApplication.setQuitOnLastWindowClosed(False)

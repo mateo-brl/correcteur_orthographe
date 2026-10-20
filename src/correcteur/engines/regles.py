@@ -557,6 +557,10 @@ def _coordinated_subject_before(words: list[Mot], i: int, lex: Lexique) -> bool:
         first.text[:1].isupper() and lex.has(first.text, ":M"))
 
 
+_OBJECT_DETERMINERS = frozenset("""un une des du deux trois quatre cinq six sept huit neuf dix plusieurs aucun aucune
+    mon ma mes ton ta tes son sa ses notre nos votre vos""".split())
+
+
 def regle_son_on_pluriel(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
     """« Mes parents son partis » -> « sont » ; « Les enfants on faim » -> « ont ». Grammalecte propose « parti »
     ou « feint » pour le mot d'après : ces remarques sont écartées."""
@@ -579,7 +583,9 @@ def regle_son_on_pluriel(text: str, words: list[Mot], lex: Lexique) -> Iterable[
             ok = (lex.has(after.text, ":Q") or lex.has(after.text, ":A")) and not lex.has(after.text, ":G")
             fix, msg = "sont", "« sont » (verbe être) : le sujet est pluriel."
         else:
-            ok = lex.has(after.text, ":Q") or after.low in AVOIR_NOUNS
+            # « Mes voisins on un chien » : « on » sujet ne peut pas précéder un déterminant (« leur » mis à part :
+            # « Les enfants on leur donne… » est une virgule oubliée).
+            ok = lex.has(after.text, ":Q") or after.low in AVOIR_NOUNS or after.low in _OBJECT_DETERMINERS
             fix, msg = "ont", "« ont » (verbe avoir) : le sujet est pluriel."
         if ok:
             yield Faute(word.start, word.end, fix, msg, "corr_son_on_pluriel", drop=((after.start, after.end),))
@@ -697,6 +703,21 @@ def _verb_and_object_before(text: str, words: list[Mot], i: int, lex: Lexique) -
     return s >= 0 and words[s].low in _SUBJECT_WORDS and _joined(text, words[s], words[s + 1])
 
 
+_HOUR_UNITS = frozenset("heure heures h".split())
+
+
+def _hour_at(words: list[Mot], j: int) -> bool:
+    """Une heure commence au mot `j` (« 21 heures », « 8 h », « 21h30 ») et n'est pas une durée (« 21 heures de
+    retard »)."""
+    if re.fullmatch(r"\d{1,2}h(?:\d{2})?", words[j].low):
+        k = j + 1
+    elif j + 1 < len(words) and words[j].low.isdigit() and words[j + 1].low in _HOUR_UNITS:
+        k = j + 2
+    else:
+        return False
+    return k >= len(words) or words[k].low not in ("de", "d'", "d’")
+
+
 def regle_a_accent(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
     """« a » mis pour « à » là où le verbe avoir est impossible : « Merci a tous », « mal a la main »,
     « partis a la mer »."""
@@ -716,6 +737,9 @@ def regle_a_accent(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]
             if part and part[0] in _MOVE_VERBS and (nxt.low in ("la", "l'", "les", "un", "une") or nxt.text[:1].isupper()
                                                    or nxt.text[:1].isdigit()):
                 fix = True
+            elif (nxt.text[:1].isdigit() and _joined(text, word, nxt) and lex.finite_verb(prev.text)
+                  and prev.low not in AVOIR and prev.low not in ETRE and _hour_at(words, i + 1)):
+                fix = True  # « Le chien qui aboie a 21 heures » (mais « Le train a 21 heures de retard »)
             elif (nxt.low in _AFTER_PREPOSITION_A or nxt.text[:1].isdigit()) and _joined(text, word, nxt):
                 # « Il y a du monde a la fête » ; « nuire a un résultat » (après un infinitif, « a » n'a pas de sujet)
                 fix = _verb_and_object_before(text, words, i, lex) or (
@@ -1291,11 +1315,58 @@ def regle_prie(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
 
 
 def regle_avoir_ete(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
-    """« Il a était malade » -> « Il a été malade »."""
+    """« Il a était malade » -> « Il a été malade » ; « Ils ont étés » -> « été » (participe invariable)."""
     for i in range(1, len(words)):
-        if words[i].low in ("était", "étais", "étaient") and words[i - 1].low in AVOIR and _joined(text, words[i - 1], words[i]):
+        if (words[i].low in ("était", "étais", "étaient", "étés", "étée", "étées") and words[i - 1].low in AVOIR
+                and _joined(text, words[i - 1], words[i])):
             yield Faute(words[i].start, words[i].end, "été", "Participe passé « été » après l'auxiliaire avoir.",
                         "corr_avoir_ete")
+
+
+_CLAUSE_OPENERS = frozenset("et mais car donc or puis alors que qu' quand lorsque lorsqu' si comme parce où".split())
+
+
+_SPACE_BEFORE_FINAL_DOT = re.compile(r"(?<=[\w»)\]])[ \t\u00a0\u202f]+\.(?!\.)(?=[ \t]*(?:\r?\n|$))")
+
+
+def regle_espace_point_final(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Je vais à la plage . » en fin de texte ou de ligne : Grammalecte ne signale l'espace avant le point qu'au
+    milieu du texte (« ... » mis à part)."""
+    for m in _SPACE_BEFORE_FINAL_DOT.finditer(text):
+        yield Faute(m.start(), m.end(), ".", "Pas d'espace avant un point.", "corr_espace_point", Category.TYPOGRAPHY)
+
+
+def regle_nous_sommes(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« Nous somme arrivés » -> « Nous sommes » : « nous » sujet, en tête de proposition (pas « Il nous somme de
+    partir », où « somme » est le verbe sommer)."""
+    for i in range(1, len(words) - 1):
+        word = words[i]
+        if word.low != "somme":
+            continue
+        k = i - 1
+        if words[k].low in ("ne", "n'") and k > 0:
+            k -= 1
+        nous, nxt = words[k], words[i + 1]
+        if nous.low != "nous" or not _joined(text, nous, words[k + 1]) or not _joined(text, word, nxt):
+            continue
+        if nxt.low in ("toute", "totale", "nulle"):
+            continue  # « somme toute »
+        if k == 0 or re.search(r"[.!?;:,(«]\s*$", text[:nous.start]) or words[k - 1].low in _CLAUSE_OPENERS:
+            yield Faute(word.start, word.end, match_case(word.text, "sommes"), "« sommes » (verbe être) avec "
+                        "« nous ».", "corr_nous_sommes")
+
+
+def regle_pluriel_aux(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
+    """« des chevals » -> « chevaux » : mot inconnu en « -als » dont le pluriel en « -aux » existe (Grammalecte
+    proposait « cheval » en premier)."""
+    for word in words:
+        if len(word.low) < 5 or not word.low.endswith("als") or lex.known(word.text):
+            continue
+        plural = word.text[:-3] + ("AUX" if word.text.isupper() else "aux")
+        found = lex.noun_gender_number(plural.lower())
+        if found is not None and found[1] in ("p", "i"):
+            yield Faute(word.start, word.end, plural, f"Pluriel en « -aux » : « {plural.lower()} ».", "corr_pluriel_aux",
+                        Category.SPELLING)
 
 
 def regle_je_ai(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
@@ -1508,7 +1579,9 @@ RULES: tuple[Callable[[str, list[Mot], Lexique], Iterable[Faute]], ...] = (
     regle_a_accent, regle_a_verbe, regle_a_participe, regle_ou_lieu, regle_peu, regle_pret, regle_ca,
     regle_la_demonstratif, regle_leurs, regle_locutions, regle_s_en, regle_t_euphonique, regle_il_faut, regle_m_a,
     regle_infinitif, regle_avoir_participe, regle_la_article, regle_c_est, regle_et, regle_pluriel_nom, regle_la_lieu,
-    regle_c_est_a_dire, regle_ni_ny, regle_prie, regle_avoir_ete, regle_je_ai, regle_quel_genre, regle_sont_son,
+    regle_c_est_a_dire, regle_ni_ny, regle_prie, regle_avoir_ete, regle_nous_sommes, regle_pluriel_aux,
+    regle_espace_point_final, regle_je_ai,
+    regle_quel_genre, regle_sont_son,
     regle_cod_que, regle_content, regle_orthographe_frequente,
     # Vetos, en dernier : une zone déjà corrigée par une règle n'est pas déclarée juste
     veto_a_ete_adjectif, veto_a_verbe, veto_sujets_coordonnes,

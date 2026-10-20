@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Collection, Iterable
 from PySide6.QtCore import QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QCursor, QGuiApplication, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -41,6 +42,8 @@ _FAST_DELAY_MS = 350
 _FULL_DELAY_MS = 1300
 _MAX_CARDS = 150
 _COPY_FAILED = "Copie impossible : le presse-papiers est inaccessible."
+# Revérification pendant la frappe coupée (paramètres) : le texte a changé depuis la dernière vérification.
+_STALE = "Texte modifié : F5 pour revérifier."
 
 
 def native_to_logical(x: int, y: int) -> QPoint | None:
@@ -126,6 +129,17 @@ def card_key(issue: Issue, text: str) -> tuple:
     """Tout ce qu'affiche la carte d'une faute : tant que rien n'a changé, la carte existante sert."""
     return (issue.uid, issue.original(text), issue.category, issue.sources, issue.confident,
             tuple(issue.replacements[:5]), issue.message, issue.url, issue.rules)
+
+
+def rule_label(issue: Issue, text: str) -> str:
+    """Description d'une règle coupée, pour les Paramètres : son message et l'exemple qui l'a montrée."""
+    message = " ".join(issue.message.split())
+    if len(message) > 80:
+        message = message[:79] + "…"
+    example = " ".join(text[issue.start:issue.end].split())
+    if len(example) > 40:
+        example = example[:39] + "…"
+    return f"{message} : « {example} »" if example else message
 
 
 def can_ignore_rule(issue: Issue) -> bool:
@@ -337,7 +351,7 @@ class CorrectionWindow(QWidget):
     finished = Signal(object, bool)          # (capture, remplacé ?)
     replaceRequested = Signal(object, str)   # (capture, texte)
     settingsRequested = Signal()
-    ignoreRulesRequested = Signal(list)     # identifiants des règles à ne plus signaler
+    ignoreRulesRequested = Signal(list, str)  # identifiants des règles à ne plus signaler, description lisible
 
     def __init__(self, checker: Checker, controller, theme: Theme) -> None:
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
@@ -354,6 +368,7 @@ class CorrectionWindow(QWidget):
         self._selected: Issue | None = None
         self._cards: list[IssueCard] = []
         self._applying: set[int] = set()  # fautes dont la correction est en train d'être insérée
+        self._stale = False  # texte modifié sans revérification (revérification pendant la frappe coupée)
         self._closing_handled = False
         self._auto_running = False
         # Correction automatique (réglage « Corriger automatiquement ») : à chaque ouverture, une fois la
@@ -439,6 +454,8 @@ class CorrectionWindow(QWidget):
         info = QHBoxLayout()
         self.summary = QLabel("")
         self.summary.setObjectName("muted")
+        self.summary.setWordWrap(True)  # fenêtre étroite : le bilan passe à la ligne au lieu d'être recouvert
+        self.summary.setMinimumWidth(80)
         info.addWidget(self.summary, 1)
         self.hint = QLabel("")
         self.hint.setObjectName("muted")
@@ -447,6 +464,7 @@ class CorrectionWindow(QWidget):
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # pas d'arrêt de Tab sur une zone sans nom
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list_host = QWidget()
         self.list_layout = QVBoxLayout(self.list_host)
@@ -473,13 +491,14 @@ class CorrectionWindow(QWidget):
         self.fix_sure.setToolTip("Applique les corrections confirmées (accents, accords validés par les deux moteurs, ponctuation).")
         self.fix_sure.clicked.connect(self.apply_confident)
         foot.addWidget(self.fix_sure)
-        more = QToolButton()
+        more = self.more_btn = QToolButton()
         more.setText("⋯")
         more.setToolTip("Plus d'actions")
+        more.setAccessibleName("Plus d'actions")
         more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         more_menu = QMenu(more)
         more_menu.addAction("Accepter toutes les premières suggestions", self.apply_all)
-        more_menu.addAction("Revérifier", lambda: self._start_check())
+        more_menu.addAction("Revérifier (F5)", lambda: self._start_check())
         more.setMenu(more_menu)
         foot.addWidget(more)
         foot.addStretch(1)
@@ -500,6 +519,7 @@ class CorrectionWindow(QWidget):
             ("Ctrl+Enter", self.replace_text),
             ("Ctrl+Shift+Return", self.apply_confident),
             ("Ctrl+R", lambda: self._start_check()),
+            ("F5", lambda: self._start_check()),
             ("F8", lambda: self._select_relative(+1)),
             ("Shift+F8", lambda: self._select_relative(-1)),
             # Pour toute la fenêtre : après F8, le focus n'est plus forcément dans la zone de texte.
@@ -546,7 +566,7 @@ class CorrectionWindow(QWidget):
         self.editor.set_issues([], self._text)
         self._auto_pending = bool(self.controller.settings.general.auto_correct and text.strip())
         self._ready = not text.strip()
-        self._replace_pending = self._fix_tried = self._auto_cancelled = False
+        self._replace_pending = self._fix_tried = self._auto_cancelled = self._stale = False
         self._last_fix = None
         self.auto_note.hide()
         cursor = self.editor.textCursor()
@@ -586,6 +606,7 @@ class CorrectionWindow(QWidget):
         self.move(QPoint(x, y))
 
     def _start_check(self, only: Iterable[str] | None = None) -> None:
+        self._stale = False
         self._fast_timer.stop()
         if only is None:
             self._full_timer.stop()
@@ -630,6 +651,8 @@ class CorrectionWindow(QWidget):
         if not live:
             # Aucune revérification ne suivra, et les réponses attendues concernent l'ancien texte.
             self._running.clear()
+            if not self._applying:
+                self._stale = True  # le bilan et « Aucune faute » ne valent plus : F5 pour revérifier
         self._refresh_issues()
         if not live and not self._ready and not self._applying:
             self._set_ready()  # sinon « Remplacer » attendrait une vérification qui ne viendra jamais
@@ -750,8 +773,20 @@ class CorrectionWindow(QWidget):
                 card.show()
         self._cards = cards
         self.list_host.setUpdatesEnabled(True)
+        self._fix_tab_order()
         self._sync_card_selection()
         self._update_summary()
+
+    def _fix_tab_order(self) -> None:
+        """Tab : le texte, les cartes dans l'ordre affiché, puis les boutons du bas. Les cartes, créées après les
+        boutons, venaient en dernier."""
+        chain: list[QWidget] = [self.editor]
+        for card in self._cards:
+            chain += [b for b in card.findChildren(QAbstractButton)
+                      if b.focusPolicy() & Qt.FocusPolicy.TabFocus]
+        chain += [self.fix_sure, self.more_btn, self.copy_btn, self.replace_btn]
+        for first, second in zip(chain, chain[1:]):
+            QWidget.setTabOrder(first, second)
 
     def _sync_card_selection(self) -> None:
         uid = self._selected.uid if self._selected is not None else None
@@ -762,16 +797,18 @@ class CorrectionWindow(QWidget):
         if self._auto_running:
             return
         if not self._issues:
-            self.summary.setText("")
+            self.summary.setText(_STALE if self._stale else "")
             self.fix_sure.setText("Corrections sûres")
             self.fix_sure.setEnabled(False)
+            self._update_replace_button()  # texte retouché : « Remplacer » restait grisé
             return
         counts: dict[Category, int] = {}
         for issue in self._issues:
             counts[issue.category] = counts.get(issue.category, 0) + 1
         parts = [f"{n} {cat.label.lower()}" for cat, n in counts.items()]
         total = len(self._issues)
-        self.summary.setText(f"{total} remarque{'s' if total > 1 else ''} : " + " · ".join(parts))
+        summary = f"{total} remarque{'s' if total > 1 else ''} : " + " · ".join(parts)
+        self.summary.setText(f"{_STALE} {summary}" if self._stale else summary)
         sure = count_sure(self._issues)
         self.fix_sure.setText(f"Corrections sûres ({sure})")
         self.fix_sure.setEnabled(sure > 0)
@@ -871,6 +908,8 @@ class CorrectionWindow(QWidget):
             ok, failed = self._engine_report()
             if self._running:
                 text = "Vérification en cours…"
+            elif self._stale:
+                text = "Texte modifié depuis la vérification : appuyez sur F5 pour le revérifier."
             elif ok:
                 text = "✓ Aucune faute trouvée."
             elif failed:
@@ -900,14 +939,23 @@ class CorrectionWindow(QWidget):
         layout.activate()
 
     def _select_relative(self, step: int) -> None:
-        if not self._issues:
+        """F8 et Maj+F8 : faute suivante ou précédente. Depuis la faute sélectionnée tant que le curseur est
+        dessus ; sinon depuis le curseur (après Ctrl+Début, F8 va à la première faute, pas à celle qui suit la
+        dernière visitée)."""
+        issues = self._issues
+        if not issues:
             return
-        uids = [i.uid for i in self._issues]
-        if self._selected is not None and self._selected.uid in uids:
-            idx = (uids.index(self._selected.uid) + step) % len(self._issues)
+        pos = self.editor.cursor_index()
+        selected = self._selected
+        uids = [i.uid for i in issues]
+        if selected is not None and selected.uid in uids and selected.start <= pos <= max(selected.end,
+                                                                                          selected.start + 1):
+            idx = (uids.index(selected.uid) + step) % len(issues)
+        elif step > 0:
+            idx = next((k for k, i in enumerate(issues) if i.end > pos or i.start >= pos), 0)
         else:
-            idx = 0 if step > 0 else len(self._issues) - 1
-        self._select(self._issues[idx])
+            idx = next((k for k in range(len(issues) - 1, -1, -1) if issues[k].start < pos), len(issues) - 1)
+        self._select(issues[idx])
 
     def _open_menu(self) -> None:
         """Maj+F10 : menu de la faute sélectionnée (F8), sinon celui du mot sous le curseur."""
@@ -1039,7 +1087,7 @@ class CorrectionWindow(QWidget):
         rest = " Cliquez une suggestion pour corriger le reste." if any(
             i.replacements for i in self._issues if i.uid not in self._applying) else ""
         note = ((done + " automatiquement" if auto else done) + (f" : {changes}" if changes else "")
-                + " (surlignées, Ctrl+Z pour annuler)." + rest)
+                + f" (surlignée{plural}, Ctrl+Z pour annuler)." + rest)
         self._show_note(note, ok=True)
         # Ctrl+Z puis Ctrl+Maj+Z : le texte corrigé revient, le surlignage et le bilan aussi (_on_text_changed).
         self._last_fix = (self.editor.plain_text(), ranges, note)
@@ -1090,7 +1138,7 @@ class CorrectionWindow(QWidget):
     def ignore_rule(self, issue: Issue) -> None:
         # Toutes les règles de la faute : sinon l'autre moteur la resignalerait à la vérification suivante.
         rules = set(issue.rules)
-        self.ignoreRulesRequested.emit(list(issue.rules))
+        self.ignoreRulesRequested.emit(list(issue.rules), rule_label(issue, self._text))
         self._drop(lambda i: bool(rules & set(i.rules)))
 
     def ignore_rule_uid(self, uid: int) -> None:

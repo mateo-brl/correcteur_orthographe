@@ -194,3 +194,22 @@ def install_gnome_shortcuts(check_combo: str, express_combo: str) -> str:
             _read(schema, key) != value for (schema, key), value in expected.items()):
         raise RuntimeError("les raccourcis GNOME relus ne correspondent pas à ceux enregistrés.")
     return "Raccourcis GNOME créés (Paramètres > Clavier > Raccourcis personnalisés)."
+
+
+def remove_gnome_shortcuts() -> str:
+    """Retire les deux raccourcis personnalisés GNOME du correcteur (raccourcis globaux désactivés dans ses
+    paramètres), sans toucher aux autres. Renvoie un message ; le résultat est relu."""
+    ours = [f"{_GNOME_BASE}{ident}/" for ident in GNOME_SHORTCUT_IDS]
+    current = _keybinding_list()
+    kept = [path for path in current if path not in ours]
+    if kept != current:
+        _gsettings("set", _GNOME_SCHEMA, "custom-keybindings", str(kept))
+    for path in ours:
+        for key in ("name", "command", "binding"):
+            try:
+                _gsettings("reset", f"{_GNOME_SCHEMA}.custom-keybinding:{path}", key)
+            except RuntimeError:
+                pass
+    if any(path in _keybinding_list() for path in ours):
+        raise RuntimeError("les raccourcis GNOME du correcteur sont encore présents après leur retrait.")
+    return "Raccourcis GNOME du correcteur retirés."

@@ -117,11 +117,12 @@ def _forced_encoding() -> tuple[str, str] | None:
     return name, errors or "replace"
 
 
-def _utf8_io() -> None:
+def _utf8_io(utf8: bool = False) -> None:
     """Sorties en UTF-8, sauf sous Windows vers un tube : PowerShell, findstr ou more lisent alors dans la page de
-    code de la console (850), et « $r = correcteur-cli ... » donnait « lev├® » au lieu de « levé ». Un encodage
-    imposé par PYTHONIOENCODING passe avant tout."""
-    forced = _forced_encoding()
+    code de la console (850), et « $r = correcteur-cli ... » donnait « lev├® » au lieu de « levé ». Les caractères
+    absents de cette page (œ, ’, …) y deviennent « oe », « ' », « ... » : `utf8` (option --utf8) garde l'UTF-8,
+    sans perte, pour un programme qui le lit. Un encodage imposé par PYTHONIOENCODING passe avant tout."""
+    forced = _forced_encoding() or (("utf-8", "replace") if utf8 else None)
     for number, stream in ((-11, sys.stdout), (-12, sys.stderr)):
         encoding, errors = forced or ("utf-8", "replace")
         if not forced and sys.platform == "win32" and _windows_stream(number) == "tube":
@@ -139,9 +140,42 @@ def _ansi() -> str:
     return preferred if preferred and codecs.lookup(preferred).name not in ("utf-8", "ascii") else "cp1252"
 
 
+class BinaryData(ValueError):
+    """Contenu qui n'est pas du texte (programme, image...) : le vérifier prendrait des minutes pour rien."""
+
+
+# Caractères de contrôle qu'un texte ne contient pas (tabulation, fins de ligne, saut de page, fin de fichier DOS et
+# échappement mis à part) : nombreux, ils trahissent un fichier binaire.
+_CONTROLS = re.compile("[\x00-\x08\x0e-\x19\x1c-\x1f]")
+
+
+def _looks_binary(text: str) -> bool:
+    return len(_CONTROLS.findall(text)) > max(3, len(text) // 100)
+
+
+def _utf16(data: bytes) -> tuple[str, str] | None:
+    """UTF-16 sans BOM (Bloc-notes, PowerShell) : un octet sur deux nul pour un texte surtout latin, et aucun
+    caractère nul ni de contrôle une fois décodé (sinon c'est un fichier binaire)."""
+    if len(data) < 2 or len(data) % 2:
+        return None
+    for name, high in (("utf-16-le", data[1::2]), ("utf-16-be", data[0::2])):
+        if high.count(0) * 2 <= len(high):
+            continue
+        try:
+            text = data.decode(name)
+        except UnicodeDecodeError:
+            continue
+        if "\0" not in text.rstrip("\0") and not _looks_binary(text):
+            return text.rstrip("\0"), name
+    return None
+
+
 def decode_text(data: bytes, fallback: str | None = None) -> tuple[str, str]:
-    """(texte, encodage) d'un fichier ou de l'entrée standard : BOM UTF-8 ou UTF-16, UTF-8, UTF-16 sans BOM
-    (Bloc-notes, PowerShell), sinon `fallback` (par défaut : ANSI)."""
+    """(texte, encodage) d'un fichier ou de l'entrée standard : BOM UTF-8 ou UTF-16, UTF-16 sans BOM (Bloc-notes,
+    PowerShell), UTF-8, sinon `fallback` (par défaut : ANSI). BinaryData si ce n'est pas du texte.
+
+    Un texte en UTF-16 sans BOM fait seulement de caractères ASCII est aussi de l'UTF-8 valide (octets nuls
+    compris) : il était lu tel quel, et « on » n'était pas corrigé. Les octets nuls sont donc regardés d'abord."""
     for bom, name in ((codecs.BOM_UTF8, "utf-8"), (codecs.BOM_UTF32_LE, "utf-32-le"), (codecs.BOM_UTF32_BE, "utf-32-be"),
                       (codecs.BOM_UTF16_LE, "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16-be")):
         if data.startswith(bom):
@@ -149,19 +183,21 @@ def decode_text(data: bytes, fallback: str | None = None) -> tuple[str, str]:
                 return data[len(bom):].decode(name), name
             except UnicodeDecodeError:
                 break
+    if b"\0" in data:
+        found = _utf16(data)
+        if found is not None:
+            return found
+        data = data.rstrip(b"\0")  # octets nuls de remplissage en fin de fichier : tolérés
+        if b"\0" in data:
+            raise BinaryData("contenu binaire")
     try:
-        return data.decode("utf-8"), "utf-8"
+        text, name = data.decode("utf-8"), "utf-8"
     except UnicodeDecodeError:
-        pass
-    if len(data) >= 4 and len(data) % 2 == 0:
-        for name, zeros in (("utf-16-le", data[1::2]), ("utf-16-be", data[0::2])):
-            if zeros.count(0) * 2 > len(zeros):
-                try:
-                    return data.decode(name), name
-                except UnicodeDecodeError:
-                    pass
-    name = fallback or _ansi()
-    return data.decode(name, errors="replace"), name
+        name = fallback or _ansi()
+        text = data.decode(name, errors="replace")
+    if _looks_binary(text):
+        raise BinaryData("contenu binaire")
+    return text, name
 
 
 def _colors() -> bool:
@@ -202,9 +238,15 @@ def _read_file(path: str) -> str:
     except FileNotFoundError:
         raise ValueError(f"fichier « {path} » introuvable.") from None
     except OSError as exc:
-        cause = _OS_CAUSES.get(exc.errno or 0, f"erreur système {exc.errno}" if exc.errno else "erreur système")
+        if getattr(exc, "winerror", None) in (32, 33):  # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+            cause = "fichier ouvert par un autre programme"
+        else:
+            cause = _OS_CAUSES.get(exc.errno or 0, f"erreur système {exc.errno}" if exc.errno else "erreur système")
         raise ValueError(f"lecture du fichier « {path} » impossible ({cause}).") from None
-    text, encoding = decode_text(data)
+    try:
+        text, encoding = decode_text(data)
+    except BinaryData:
+        raise ValueError(f"« {path} » n'est pas un fichier texte (contenu binaire).") from None
     if encoding != "utf-8":
         name = _ENCODING_NAMES.get(encoding) or f"ANSI ({encoding})"
         print(f"Remarque : « {path} » n'est pas en UTF-8, il a été lu en {name}.", file=sys.stderr)
@@ -228,7 +270,10 @@ def _read_stdin() -> str:
         return sys.stdin.read()
     data = sys.stdin.buffer.read()
     fallback = _console_code_page(output=False) if kind == "tube" else None
-    return decode_text(data, fallback)[0]
+    try:
+        return decode_text(data, fallback)[0]
+    except BinaryData:
+        raise ValueError("l'entrée standard n'est pas du texte (contenu binaire).") from None
 
 
 def _read_text(args) -> str:
@@ -331,8 +376,7 @@ def cmd_verifier(args) -> int:
             payload["non_verifie"] = unchecked
         print(json.dumps(payload, ensure_ascii=_ascii_json(), indent=2))
         if unchecked:
-            print(unchecked, file=sys.stderr)
-            return EXIT_UNCHECKED
+            return EXIT_UNCHECKED  # la raison est dans le JSON (« non_verifie ») : rien sur la sortie d'erreur
         return 1 if _counts(result.issues) else 0
     if unchecked:
         print(unchecked, file=sys.stderr)
@@ -419,19 +463,55 @@ def cmd_diagnostic(args) -> int:
     print(f"Données : {data_dir()}")
     print(f"Journal : {log_path()}")
     print(f"Plantages : {data_dir() / 'plantages.log'}")
-    print(f"Instance en cours : {'oui' if send_command('ping', timeout=1) else 'non'}")
-    print(f"Grammalecte : {'installé' if import_grammalecte() else 'non installé'} (activé : {settings.grammalecte.enabled})")
-    print(f"LanguageTool : mode {settings.languagetool.mode} (activé : {settings.languagetool.enabled})")
-    print(f"  serveur local installé : {'oui' if _find_server_jar() else 'non'} · Java : {find_java() or 'introuvable'}")
+    def yes(value) -> str:
+        return "oui" if value else "non"
+
+    print(f"Instance en cours : {yes(send_command('ping', timeout=1))}")
+    print(f"Grammalecte : {'installé' if import_grammalecte() else 'non installé'} (activé : {yes(settings.grammalecte.enabled)})")
+    print(f"LanguageTool : mode {settings.languagetool.mode} (activé : {yes(settings.languagetool.enabled)})")
+    print(f"  serveur local installé : {yes(_find_server_jar())} · Java : {find_java() or 'introuvable'}")
+    print(f"Raccourcis globaux activés : {yes(settings.general.hotkeys_enabled)}")
+    try:
+        from correcteur.platform.autostart import autostart_enabled
+
+        print(f"Démarrage automatique : {yes(autostart_enabled())}")
+    except Exception as exc:
+        print(f"Démarrage automatique : inconnu ({exc})")
     if session_type() == "x11":
         from correcteur.platform.bridge import X11Bridge
 
         ok, why = X11Bridge().hotkeys_supported()
         print(f"Raccourcis globaux : {'oui (pynput)' if ok else why.splitlines()[0]}")
     if sys.platform.startswith("linux"):
+        if "gnome" in desktop_name():
+            try:
+                from correcteur.platform.autostart import gnome_shortcuts
+                from correcteur.platform.bridge import _gnome_display
+
+                found = gnome_shortcuts()
+                print("Raccourcis GNOME : " + (", ".join(_gnome_display(b) for b in found.values()) or "aucun"))
+            except Exception as exc:
+                print(f"Raccourcis GNOME : illisibles ({exc})")
         for tool in ("wl-paste", "wl-copy", "wtype", "ydotool", "xdotool", "gsettings"):
-            print(f"  {tool} : {'oui' if which(tool) else 'non'}")
+            print(f"  {tool} : {yes(which(tool))}")
+        if which("ydotool"):
+            print(f"  ydotoold (service de ydotool) : {_ydotoold_state()}")
     return 0
+
+
+def _ydotoold_state() -> str:
+    """ydotoold, sans lequel ydotool ne tape rien : « en marche », « arrêté » ou « inconnu »."""
+    import subprocess
+
+    from correcteur.platform import child_env, which
+
+    if not which("pgrep"):
+        return "inconnu"
+    try:
+        out = subprocess.run(["pgrep", "-x", "ydotoold"], capture_output=True, timeout=2, env=child_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return "inconnu"
+    return "en marche" if out.returncode == 0 else "arrêté"
 
 
 def cmd_gnome(args) -> int:
@@ -480,11 +560,22 @@ def _french(message: str) -> str:
     return _ARGPARSE_FR.get(message, message)
 
 
+class _Formatter(argparse.HelpFormatter):
+    """Titres de l'aide à la française : « options : », pas « options: »."""
+
+    def start_section(self, heading):
+        super().start_section(f"{heading} " if heading else heading)
+
+
 class _Parser(argparse.ArgumentParser):
     """Avec --json, les erreurs de la ligne de commande (option inconnue, argument manquant) sortent aussi en JSON,
     sur la sortie standard, comme les autres erreurs (voir main). Les sous-commandes héritent de cette classe."""
 
     json_errors = False
+
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("formatter_class", _Formatter)
+        super().__init__(*args, **kwargs)
 
     def error(self, message: str):
         if _Parser.json_errors:
@@ -495,7 +586,9 @@ class _Parser(argparse.ArgumentParser):
 
 def build_parser() -> argparse.ArgumentParser:
     argparse._ = _french  # type: ignore[attr-defined]  (argparse traduit ses textes par cette fonction)
-    parser = _Parser(prog="correcteur", description="Correcteur d'orthographe et de grammaire.")
+    # Exécutable empaqueté : son vrai nom (« correcteur-cli.exe » sous Windows) dans l'aide.
+    prog = os.path.basename(sys.argv[0]) if getattr(sys, "frozen", False) and sys.argv[0] else "correcteur"
+    parser = _Parser(prog=prog, description="Correcteur d'orthographe et de grammaire.")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     parser.add_argument("--demarrage", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--debug", action="store_true", help="journal détaillé")
@@ -514,11 +607,14 @@ def build_parser() -> argparse.ArgumentParser:
     for name, func, help_text in (("verifier", cmd_verifier, "vérifier un texte dans le terminal"),
                                   ("corriger", cmd_corriger, "afficher le texte corrigé")):
         p = sub.add_parser(name, help=help_text)
-        p.add_argument("texte", nargs="*", help="texte à vérifier (sinon : entrée standard)")
+        p.add_argument("texte", nargs="*", help=("texte à vérifier" if name == "verifier" else "texte à corriger")
+                       + " (sinon : entrée standard)")
         p.add_argument("-f", "--fichier", help="fichier texte (UTF-8, UTF-16 ou ANSI)")
         p.add_argument("-l", "--langue", help="auto, fr, ou un code comme en ou en-US")
         p.add_argument("--strict", action="store_true", help="typographie stricte")
         p.add_argument("--hors-ligne", action="store_true", help="n'utiliser que les moteurs locaux")
+        p.add_argument("--utf8", action="store_true",
+                       help="sortie en UTF-8, même dans un tube sous Windows (sinon : page de code de la console)")
         if name == "verifier":
             p.add_argument("--json", action="store_true", help="sortie JSON")
         else:
@@ -542,9 +638,16 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv and argv[0] not in ("--demarrage",) + tuple(_GUI_COMMANDS):
         _attach_console_windows()
-    _utf8_io()
+    _utf8_io(utf8="--utf8" in argv)
     _Parser.json_errors = "--json" in argv
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extras = parser.parse_known_args(argv)
+    if extras:
+        # Option inconnue d'une commande : l'erreur montre l'utilisation de cette commande, pas la générale.
+        command = getattr(args, "commande", None) or ""
+        target = next((a.choices[command] for a in parser._actions
+                       if isinstance(a, argparse._SubParsersAction) and command in a.choices), parser)
+        target.error(_french("unrecognized arguments: %s") % " ".join(extras))
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     if hasattr(args, "func"):

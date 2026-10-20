@@ -142,6 +142,9 @@ class Settings:
     grammalecte: GrammalecteSettings = field(default_factory=GrammalecteSettings)
     languagetool: LanguageToolSettings = field(default_factory=LanguageToolSettings)
     ignored_rules: list[str] = field(default_factory=list)
+    # Description lisible des règles désactivées (identifiant -> « message : « exemple » »), notée au moment où
+    # l'utilisateur les coupe : les Paramètres ne montrent plus « g2__pleo_locutions__b7_a1_1 ».
+    rule_labels: dict[str, str] = field(default_factory=dict)
 
     @property
     def strict_typography(self) -> bool:
@@ -181,6 +184,9 @@ def _from_dict(cls, data: Any):
         elif isinstance(current, list):
             if isinstance(value, list):
                 kwargs[f.name] = [str(v) for v in value]
+        elif isinstance(current, dict):
+            if isinstance(value, dict):
+                kwargs[f.name] = {str(k): str(v) for k, v in value.items()}
         elif isinstance(current, str):
             if isinstance(value, str):
                 kwargs[f.name] = value

@@ -155,6 +155,10 @@ class CheckEditor(QPlainTextEdit):
                 return issue
         return None
 
+    def cursor_index(self) -> int:
+        """Position du curseur de saisie dans le texte (indice Python)."""
+        return self._map.to_py(self.textCursor().position())
+
     def issue_at_cursor(self) -> Issue | None:
         """Faute sous le curseur de saisie (juste avant, au milieu ou juste après le mot)."""
         index = self._map.to_py(self.textCursor().position())

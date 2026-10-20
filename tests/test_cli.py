@@ -94,10 +94,35 @@ def test_offline_unsupported_language_is_not_a_success(home, command):
 
 
 def test_offline_unsupported_language_json(home):
+    """L-16 : avec --json, la raison est dans le JSON seulement, pas aussi sur la sortie d'erreur."""
     out = run_cli("verifier", "--json", "--hors-ligne", "-l", "en", "This is a speling mistake.")
     assert out.returncode == EXIT_UNCHECKED
-    assert json.loads(out.stdout)["moteurs"] == {}
-    assert "Aucun moteur" in out.stderr
+    payload = json.loads(out.stdout)
+    assert payload["moteurs"] == {} and "Aucun moteur" in payload["non_verifie"]
+    assert out.stderr == ""
+
+
+def test_cli_help_and_errors_in_french(capsys):
+    """L-16 : « options : » avec l'espace, aide de corriger juste, et une option inconnue montre l'utilisation de
+    la commande, pas celle de la commande principale."""
+    from correcteur.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["corriger", "--help"])
+    help_text = capsys.readouterr().out
+    assert "options :" in help_text and "arguments :" in help_text and "texte à corriger" in help_text
+    with pytest.raises(SystemExit) as stop:
+        main(["verifier", "--inconnu", "Bonjour"])
+    assert stop.value.code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("utilisation : correcteur verifier") and "arguments inconnus : --inconnu" in err
+
+
+def test_diagnostic_says_yes_or_no(home, capsys):
+    assert main(["diagnostic"]) == 0
+    out = capsys.readouterr().out
+    assert "True" not in out and "False" not in out and "(activé : oui)" in out
+    assert "Démarrage automatique :" in out and "Raccourcis globaux activés : oui" in out
 
 
 @pytest.mark.parametrize("value, expected", [("auto", "auto"), ("AUTO", "auto"), ("fr", "fr"), ("FR", "fr"),
@@ -216,11 +241,53 @@ def test_file_not_in_utf8_is_read_as_ansi_with_a_remark(home, tmp_path, capsys):
     (b"\xfe\xff" + "Élève".encode("utf-16-be"), ("Élève", "utf-16-be")),
     ("Élève à l'école".encode("utf-16-le"), ("Élève à l'école", "utf-16-le")),  # Bloc-notes, PowerShell
     ("Élève à l'école".encode("cp1252"), ("Élève à l'école", "cp1252")),
-], ids=["utf-8", "utf-8 BOM", "utf-16 LE BOM", "utf-16 BE BOM", "utf-16 sans BOM", "ansi"])
+    # L-07 : tout en ASCII, l'UTF-16 sans BOM est aussi de l'UTF-8 valide (octets nuls compris) : lu tel quel.
+    ("Les enfants on faim.\n".encode("utf-16-le"), ("Les enfants on faim.\n", "utf-16-le")),
+    ("Les enfants on faim.\n".encode("utf-16-be"), ("Les enfants on faim.\n", "utf-16-be")),
+    ("Fin\n".encode("utf-8") + b"\0\0", ("Fin\n", "utf-8")),  # octets nuls de remplissage
+], ids=["utf-8", "utf-8 BOM", "utf-16 LE BOM", "utf-16 BE BOM", "utf-16 sans BOM", "ansi", "utf-16 LE ascii",
+        "utf-16 BE ascii", "remplissage"])
 def test_decode_text_recognizes_windows_encodings(data, expected):
     from correcteur.cli import decode_text
 
     assert decode_text(data) == expected
+
+
+@pytest.mark.parametrize("data", [
+    b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00" * 64 + bytes(range(256)) * 8,
+    b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4,
+    bytes(range(1, 32)) * 50,
+], ids=["programme", "image", "contrôles"])
+def test_decode_text_refuses_binary_data(data):
+    """W-09 : pip.exe lu en ANSI, puis « vérifié » pendant 73 s."""
+    from correcteur.cli import BinaryData, decode_text
+
+    with pytest.raises(BinaryData):
+        decode_text(data)
+
+
+def test_binary_file_is_refused_at_once(home, tmp_path, capsys):
+    path = tmp_path / "pip.exe"
+    path.write_bytes(b"MZ\x90\x00" + bytes(range(256)) * 400)
+    assert main(["verifier", "--hors-ligne", "-f", str(path)]) == 2
+    assert "n'est pas un fichier texte" in capsys.readouterr().err
+
+
+def test_locked_file_cause_is_named(home, tmp_path, capsys, monkeypatch):
+    """W-11 : fichier ouvert en écriture exclusive par un autre programme (Windows : erreur 32), pas « accès
+    refusé »."""
+    import builtins
+
+    def locked(*args, **kwargs):
+        exc = PermissionError(13, "The process cannot access the file")
+        exc.winerror = 32
+        raise exc
+
+    path = tmp_path / "verrou.txt"
+    path.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(builtins, "open", locked)
+    assert main(["verifier", "-f", str(path)]) == 2
+    assert "(fichier ouvert par un autre programme)" in capsys.readouterr().err
 
 
 def test_decode_text_uses_the_console_code_page_for_pipes():
@@ -344,3 +411,23 @@ def test_stdin_follows_pythonioencoding(monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(raw, encoding="cp1252"))
     monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
     assert cli._read_stdin() == "Il ces levé tôt"
+
+
+def test_utf8_option_keeps_pipes_lossless(monkeypatch):
+    """W-03 : dans un tube sous Windows, la sortie suit la page de code de la console (850) et « œ », « ’ », « … »
+    y deviennent « oe », « ' », « ... ». --utf8 garde l'UTF-8, sans perte."""
+    import io
+
+    from correcteur import cli
+
+    out, err = (io.TextIOWrapper(io.BytesIO(), encoding="cp1252") for _ in range(2))
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(cli, "_windows_stream", lambda number: "tube")
+    monkeypatch.setattr(cli, "_console_code_page", lambda output=True: "cp850")
+    cli._utf8_io()
+    assert out.encoding == "cp850"
+    cli._utf8_io(utf8=True)
+    assert out.encoding == "utf-8"
