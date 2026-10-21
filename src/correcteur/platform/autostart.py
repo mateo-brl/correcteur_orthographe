@@ -198,12 +198,13 @@ def install_gnome_shortcuts(check_combo: str, express_combo: str) -> str:
 
 def remove_gnome_shortcuts() -> str:
     """Retire les deux raccourcis personnalisés GNOME du correcteur (raccourcis globaux désactivés dans ses
-    paramètres), sans toucher aux autres. Renvoie un message ; le résultat est relu."""
+    paramètres), sans toucher aux autres. Renvoie un message, vide s'il n'y en avait pas ; le résultat est relu."""
     ours = [f"{_GNOME_BASE}{ident}/" for ident in GNOME_SHORTCUT_IDS]
     current = _keybinding_list()
     kept = [path for path in current if path not in ours]
-    if kept != current:
-        _gsettings("set", _GNOME_SCHEMA, "custom-keybindings", str(kept))
+    if kept == current:
+        return ""
+    _gsettings("set", _GNOME_SCHEMA, "custom-keybindings", str(kept))
     for path in ours:
         for key in ("name", "command", "binding"):
             try:

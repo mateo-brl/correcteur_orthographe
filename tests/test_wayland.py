@@ -110,6 +110,8 @@ class Desktop:
         self.selected_html: bytes | None = None  # sa version HTML, copiée avec elle (navigateurs)
         self.idle_ms = 60_000       # temps depuis la dernière frappe (gdbus)
         self.last_input: float | None = None  # heure de la dernière frappe ou du dernier clic (sinon : idle_ms)
+        self.busy_until: float | None = None  # souris ou clavier en action sans pause jusqu'à cette heure
+        self.selected_formats: dict[str, bytes] = {}  # autres formats copiés avec la sélection
         self.blocked = False        # wl-paste et wl-copy ne répondent plus (renommage dans Fichiers)
         self.pasted: list[object] = []
         self.calls: list[tuple[float, list[str], dict]] = []
@@ -182,6 +184,7 @@ class Desktop:
                 self.set_text(self.selected)  # copie de l'application (Ctrl+Inser)
                 if self.selected_html is not None:
                     self.formats["text/html"] = self.selected_html
+                self.formats.update(self.selected_formats)
             if "47:1" in args or (name == "wtype" and "v" in args):
                 self.pasted.append(self.text() if self.text() is not None else dict(self.formats))
             if "46:1" in args or (name == "wtype" and "c" in args):
@@ -189,6 +192,8 @@ class Desktop:
             return done()
         if name == "gdbus":
             idle = self.idle_ms if self.last_input is None else int((self.clock.now - self.last_input) * 1000)
+            if self.busy_until is not None and self.clock.now < self.busy_until:
+                idle = 0
             return done(0, f"(uint64 {idle},)\n")
         return done()
 
@@ -488,15 +493,15 @@ def test_restore_during_endless_typing_passes_to_the_next_correction(setup, capl
     assert desktop.restores() == ["témoin"]
 
 
-def test_burst_while_typing_never_loses_the_clipboard(setup):
-    """L-02 : rafale de corrections express pendant que l'utilisateur tape (aucune pause de 400 ms), dont une
-    phrase juste et une capture sans sélection : le témoin revient à la fin."""
+def test_burst_never_loses_the_clipboard(setup):
+    """L-02 : rafale de corrections express (une toutes les 0,5 s : la restauration d'une correction n'a jamais
+    lieu avant la suivante), dont une phrase juste et une capture sans sélection : le témoin revient à la fin."""
     wl, desktop, clock = setup()
     desktop.set_text("témoin")
-    desktop.idle_ms = 10
     for line, fixed in (("Ces un test", "C'est un test"), ("Il pense à toi.", None), (None, None),
                         ("Mes parents son partis.", "Mes parents sont partis.")):
         desktop.selected = line
+        desktop.last_input = clock.now  # raccourci tapé
         wl.begin_capture()
         capture = wl.capture(express=True)
         wl.end_capture(capture)
@@ -505,10 +510,9 @@ def test_burst_while_typing_never_loses_the_clipboard(setup):
         else:
             assert wl.replace(capture, fixed)[0]
         clock.advance(0.5)
-    assert desktop.restores() == []
-    desktop.idle_ms = 60_000  # fin de la rafale : pause
+        assert set(desktop.restores()) <= {"témoin"}  # jamais un texte corrigé remis comme contenu d'origine
     clock.advance(10)
-    assert desktop.restores() == ["témoin"] and desktop.text() == "témoin"
+    assert desktop.text() == "témoin" and desktop.pasted == ["C'est un test", "Mes parents sont partis."]
 
 
 def test_newer_replace_cancels_the_older_restore(setup):
@@ -781,6 +785,129 @@ def test_express_without_idle_counter_always_checks_the_selection(setup, moved):
     assert ok is not moved and desktop.pasted == ([] if moved else ["C'est un test"])
     clock.advance(10)
     assert desktop.text() == "témoin"
+
+
+def test_express_never_copies_nor_pastes_during_continuous_activity(setup):
+    """Souris ou clavier en action sans pause pendant la correction : la sélection n'est pas recopiée en pleine
+    frappe (la surface de wl-copy et le Ctrl simulé prendraient des touches), rien n'est collé, et le témoin
+    revient après."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "Ces un test"
+    desktop.last_input = clock.now
+    desktop.busy_until = clock.now + 8
+    _, (ok, message) = _express_with(wl, desktop, clock, "C'est un test",
+                                     lambda: setattr(desktop, "last_input", clock.now))
+    assert not ok and "clavier ou souris" in message and desktop.pasted == []
+    assert len(desktop.ran("ydotool", "110:1")) == 1  # aucune copie simulée pendant l'activité
+    clock.advance(20)
+    assert desktop.text() == "témoin"
+
+
+def test_express_checks_activity_again_just_before_the_paste(setup):
+    """Clic sur une autre ligne après la dernière vérification, pendant que le texte corrigé est mis dans le
+    presse-papiers : la sélection est relue (elle a changé), rien n'est collé. Avant, après deux relectures, le
+    collage partait sans nouveau contrôle."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "Ces un test"
+    desktop.last_input = clock.now
+    wl.begin_capture()
+    capture = wl.capture(express=True)
+    wl.end_capture(capture)
+    clock.advance(1.0)
+
+    def click_elsewhere():
+        desktop.last_input, desktop.selected = clock.now, None
+
+    clock.at(clock.now + 0.2, click_elsewhere)
+    ok, message = wl.replace(capture, "C'est un test")
+    assert not ok and "sélection a changé" in message and desktop.pasted == []
+    clock.advance(10)
+    assert desktop.text() == "témoin"
+
+
+def test_express_gives_up_after_two_checks(setup, monkeypatch):
+    """Activité revue juste avant chaque collage : deux relectures, puis rien n'est collé."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "Ces un test"
+    wl.begin_capture()
+    capture = wl.capture(express=True)
+    wl.end_capture(capture)
+    recopies = []
+    monkeypatch.setattr(wl, "_acted_since", lambda moment: True)
+    monkeypatch.setattr(wl, "_wait_for_pause", lambda: True)
+    monkeypatch.setattr(wl, "_recopy", lambda capture: recopies.append(1) or capture.text)
+    ok, message = wl.replace(capture, "C'est un test")
+    assert not ok and "clavier ou souris" in message and len(recopies) == 2 and desktop.pasted == []
+
+
+def test_express_never_copies_during_a_keystroke(setup):
+    """Frappe pendant la relecture, entre le marqueur et le Ctrl+Inser simulé : pas de copie simulée (le Ctrl se
+    mêlerait à la touche), rien n'est collé."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "Ces un test"
+    desktop.last_input = clock.now
+    wl.begin_capture()
+    capture = wl.capture(express=True)
+    wl.end_capture(capture)
+    clock.advance(0.5)
+    desktop.last_input = clock.now  # activité pendant la correction
+    clock.advance(1.0)
+    pause_found = []
+    real_recopy = wl._recopy
+
+    def recopy(capture):
+        pause_found.append(clock.now)
+        clock.at(clock.now + 0.2, lambda: setattr(desktop, "last_input", clock.now))  # frappe
+        return real_recopy(capture)
+
+    wl._recopy = recopy
+    ok, message = wl.replace(capture, "C'est un test")
+    assert pause_found and not ok and "clavier ou souris" in message and desktop.pasted == []
+    assert len(desktop.ran("ydotool", "110:1")) == 1
+
+
+def test_copy_then_escape_never_restores(setup, caplog):
+    """Fenêtre de correction : bouton Copier, puis Échap. Le texte copié reste, sans restauration ni ligne
+    « non remis » au journal (le témoin écrasait la copie quand elle était identique au texte capturé)."""
+    for copied in ("Ces un test", "C'est un test"):
+        wl, desktop, clock = setup()
+        desktop.set_text("témoin")
+        desktop.selected = "Ces un test"
+        wl.begin_capture()
+        capture = wl.capture()
+        wl.end_capture(capture)
+        assert wl.copy(copied)
+        with caplog.at_level(logging.INFO, logger="correcteur.platform.bridge"):
+            wl.release(capture)
+            clock.advance(10)
+        assert desktop.text() == copied and desktop.restores() == [copied]
+        assert not [r for r in caplog.records if "non remis" in r.getMessage()]
+
+
+def test_line_copied_without_selection_is_no_selection(setup):
+    """VS Code, sans sélection : la copie prend la ligne entière (données « isFromEmptySelection »). Corrigée, elle
+    était collée au curseur. C'est « aucun texte sélectionné », et le témoin revient."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "    x = 1  # ligne du curseur\n"
+    desktop.selected_formats = {
+        "chromium/x-web-custom-data": b"\x40\0\0\0" + '{"version":1,"isFromEmptySelection":true}'.encode("utf-16-le")}
+    capture, outcome = express(wl, "corrigé")
+    assert capture.text == "" and outcome is None
+    clock.advance(10)
+    assert desktop.text() == "témoin" and desktop.pasted == []
+
+    # Lignes entières vraiment sélectionnées : une sélection comme une autre.
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "Ces un test\n"
+    desktop.selected_formats = {"chromium/x-web-custom-data": '"isFromEmptySelection":false'.encode("utf-16-le")}
+    capture, (ok, _) = express(wl, "C'est un test\n")
+    assert capture.text == "Ces un test\n" and ok
 
 
 def test_window_flow_never_checks_the_selection(setup):

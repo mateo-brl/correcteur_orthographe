@@ -34,36 +34,45 @@ def _wait_event(d, predicate, timeout: float):
 
 def read_selection(selection: str = "PRIMARY", timeout: float = 1.0) -> str | None:
     """Texte de la sélection, ou None si personne ne la possède / pas de texte."""
-    from Xlib import X, Xatom, display
+    for target_name in ("UTF8_STRING", "text/plain;charset=utf-8", "STRING"):
+        data = read_target(selection, target_name, timeout)
+        if data is not None:
+            return data.decode("latin-1" if target_name == "STRING" else "utf-8", "replace")
+    return None
 
-    d = display.Display()
+
+def read_target(selection: str, target_name: str, timeout: float = 1.0) -> bytes | None:
+    """Données de la sélection dans le format `target_name`, None si personne ne la possède ou s'il n'est pas
+    offert."""
+    from Xlib import X, display
+
+    try:
+        d = display.Display()
+    except Exception as exc:
+        log.debug("Écran X11 inaccessible : %s", exc)
+        return None
     try:
         sel = d.intern_atom(selection)
         if d.get_selection_owner(sel) == X.NONE:
             return None
         win = d.screen().root.create_window(0, 0, 1, 1, 0, X.CopyFromParent, event_mask=X.PropertyChangeMask)
         prop = d.intern_atom("_CORRECTEUR_SELECTION")
-        incr = d.intern_atom("INCR")
-        for target_name in ("UTF8_STRING", "text/plain;charset=utf-8", "STRING"):
-            target = d.intern_atom(target_name)
-            win.convert_selection(sel, target, prop, X.CurrentTime)
-            d.flush()
-            ev = _wait_event(d, lambda e: e.type == X.SelectionNotify and e.requestor.id == win.id, timeout)
-            if ev is None or ev.property == X.NONE:
-                continue
-            reply = win.get_full_property(prop, X.AnyPropertyType, sizehint=1 << 20)
-            if reply is None:
-                continue
-            if reply.property_type == incr:
-                data = _read_incr(d, win, prop, timeout)
-            else:
-                data = reply.value
-                win.delete_property(prop)
-            if isinstance(data, str):
-                data = data.encode("latin-1", "replace")
-            encoding = "latin-1" if target_name == "STRING" else "utf-8"
-            return bytes(data).decode(encoding, "replace")
-        return None
+        win.convert_selection(sel, d.intern_atom(target_name), prop, X.CurrentTime)
+        d.flush()
+        ev = _wait_event(d, lambda e: e.type == X.SelectionNotify and e.requestor.id == win.id, timeout)
+        if ev is None or ev.property == X.NONE:
+            return None
+        reply = win.get_full_property(prop, X.AnyPropertyType, sizehint=1 << 20)
+        if reply is None:
+            return None
+        if reply.property_type == d.intern_atom("INCR"):
+            data = _read_incr(d, win, prop, timeout)
+        else:
+            data = reply.value
+            win.delete_property(prop)
+        if isinstance(data, str):
+            data = data.encode("latin-1", "replace")
+        return bytes(data)
     except Exception as exc:
         log.debug("Lecture de la sélection %s impossible : %s", selection, exc)
         return None
