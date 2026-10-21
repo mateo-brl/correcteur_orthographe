@@ -345,6 +345,22 @@ def test_x11_express_checks_activity_just_before_the_paste(monkeypatch, clock):
     assert not ok and "clavier ou souris" in message and desk.pasted == [] and desk.clipboard == "témoin"
 
 
+def test_x11_calc_cell_copy_mode_is_left_at_once(monkeypatch, clock):
+    """L-03 sous X11 : la copie d'une cellule de Calc hors édition met Calc en mode copie (Entrée collerait le
+    presse-papiers du moment) : Échap juste après la copie."""
+    from correcteur.platform import x11_selection
+
+    x11 = X11Bridge(lambda ms, fn: None)
+    desk = FakeX11(clock, monkeypatch, x11)
+    monkeypatch.setattr(x11, "_primary_from", lambda window: False)
+    x11._owner = SimpleNamespace(owns=lambda: desk.clipboard is None)
+    desk.selection = "Les enfants on faim.\n"
+    monkeypatch.setattr(x11_selection, "selection_targets", lambda selection: ["TARGETS", "UTF8_STRING"] + (
+        ["application/x-libreoffice-tsvc"] if desk.clipboard == desk.selection else []))
+    capture = x11.capture(express=True)
+    assert capture.text == "Les enfants on faim.\n" and desk.keys == ["copy", "escape"]
+
+
 def test_x11_line_copied_without_selection_is_no_selection(monkeypatch, clock):
     """VS Code sous X11, sans sélection : la copie prend la ligne entière (données « isFromEmptySelection »)."""
     from correcteur.platform import x11_selection
@@ -435,6 +451,7 @@ class FakeWin:
         self.terminal, self.in_menu = False, False
         self.rewrite_after_paste = False  # l'Explorateur réécrit le presse-papiers après un collage
         self.line_copy = False  # sans sélection, l'application copie la ligne entière (VS Code, Notepad++)
+        self.cells = False  # la sélection est une cellule de tableur hors édition (format Biff8)
 
     # presse-papiers
     @staticmethod
@@ -472,6 +489,12 @@ class FakeWin:
 
     def copied_line(self):
         return self.line_copy
+
+    def copied_cells(self):
+        return self.cells and 13 in self.clipboard and self.get_clipboard_text() == self.selection.replace("\n", "\r\n")
+
+    def send_escape(self):
+        self.keys.append("échap")
 
     # fenêtres et clavier
     def foreground_window(self):
@@ -782,6 +805,21 @@ def test_windows_line_copied_without_selection_is_no_selection(clock):
     w = FakeWin(selection="Ces un test\n")
     win, _ = _windows(w)
     assert _capture(win).text == "Ces un test\n"
+
+
+def test_windows_spreadsheet_cell_copy_mode_is_left_at_once(clock):
+    """L-03 sous Windows : une cellule de Calc copiée hors édition met Calc en mode copie, où Entrée colle le
+    presse-papiers du moment (le témoin, une fois remis) : Échap juste après la copie."""
+    w = FakeWin(selection="Les enfants on faim.\n")
+    w.cells = True
+    w.classes[100] = "SALFRAME"
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.text == "Les enfants on faim.\n" and w.keys == ["copie:insert", "échap"]
+    w = FakeWin(selection="Les enfants on faim.\n")  # texte d'une cellule en édition : pas d'Échap
+    win, _ = _windows(w)
+    _capture(win)
+    assert w.keys == ["copie:insert"]
 
 
 def test_windows_tray_menu_goes_back_to_the_last_window(clock):
