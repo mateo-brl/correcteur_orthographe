@@ -168,8 +168,12 @@ class _TimedConnection:
 
 
 class IpcServer:
-    def __init__(self, handler: Callable[[str, str], None]) -> None:
+    def __init__(self, handler: Callable[[str, str], None] | None = None) -> None:
         self._handler = handler
+        # Sans destinataire (canal ouvert dès le lancement, avant l'interface : voir cli.main), les commandes
+        # attendent ici et set_handler les transmet dans l'ordre.
+        self._waiting: list[tuple[str, str]] = []
+        self._handler_lock = threading.Lock()
         self._listener: Listener | None = None
         self._thread: threading.Thread | None = None
         self._key = b""
@@ -181,6 +185,26 @@ class IpcServer:
         self.error = reason
         log.warning("%s", reason)
         return False
+
+    @property
+    def listening(self) -> bool:
+        return self._listener is not None
+
+    def set_handler(self, handler: Callable[[str, str], None]) -> None:
+        """Destinataire des commandes ; il reçoit d'abord celles arrivées avant lui."""
+        with self._handler_lock:
+            self._handler = handler
+            waiting, self._waiting = self._waiting, []
+            for command, data in waiting:
+                handler(command, data)
+
+    def _dispatch(self, command: str, data: str) -> None:
+        with self._handler_lock:
+            handler = self._handler
+            if handler is None:
+                self._waiting.append((command, data))
+                return
+        handler(command, data)
 
     def start(self) -> bool:
         """False si une autre instance écoute déjà (`other_instance`) ou si l'écoute est impossible ; la raison
@@ -234,7 +258,7 @@ class IpcServer:
             command = message.get("commande", "") if isinstance(message, dict) else ""
             conn.send("ok")
             if command and command != "ping":
-                self._handler(command, str(message.get("donnees", "")))
+                self._dispatch(command, str(message.get("donnees", "")))
         except Exception as exc:
             log.debug("Connexion de commande abandonnée : %s", exc)
         finally:

@@ -47,6 +47,57 @@ def test_quit_without_instance_returns_error():
     assert main(["quitter"]) == 1
 
 
+def _fake_interface(monkeypatch, run_app):
+    """correcteur.ui.app remplacé : ni Qt ni fenêtre."""
+    import types
+
+    module = types.ModuleType("correcteur.ui.app")
+    module.run_app = run_app
+    monkeypatch.setitem(sys.modules, "correcteur.ui.app", module)
+
+
+def test_launch_opens_the_channel_before_loading_the_interface(home, monkeypatch):
+    """Le canal de commande est ouvert avant de charger Qt et l'interface (0,2 à 0,3 s) : un raccourci tapé pendant
+    ce temps attend l'application au lieu de lancer une 2e instance."""
+    from correcteur.platform.ipc import send_command
+
+    seen = {}
+
+    def run_app(initial_command=None, startup=False, ipc=None):
+        seen.update(command=initial_command, listening=ipc is not None and ipc.listening)
+        seen["queued"] = send_command("correction-express")
+        ipc.stop()
+        return 0
+
+    _fake_interface(monkeypatch, run_app)
+    assert main(["selection"]) == 0
+    assert seen == {"command": "verifier-selection", "listening": True, "queued": True}
+
+
+def test_launch_forwards_to_an_instance_started_meanwhile(home, monkeypatch):
+    """Une autre instance s'est mise à écouter entre la première tentative et l'ouverture du canal : elle reçoit
+    la commande, sans charger l'interface pour rien."""
+    from correcteur.platform import ipc
+
+    received, done = [], threading.Event()
+    other = ipc.IpcServer(lambda cmd, data: (received.append(cmd), done.set()))
+    assert other.start(), other.error
+    real_send, calls = ipc.send_command, []
+
+    def send_command(command, payload="", timeout=2.0):
+        calls.append(command)
+        return False if len(calls) == 1 else real_send(command, payload, timeout)  # 1re tentative : trop tôt
+
+    monkeypatch.setattr(ipc, "send_command", send_command)
+    _fake_interface(monkeypatch, lambda **kwargs: pytest.fail("interface chargée alors qu'une instance répond"))
+    try:
+        assert main(["express"]) == 0
+        assert done.wait(3)
+    finally:
+        other.stop()
+    assert received == ["correction-express"]
+
+
 @needs_grammalecte
 def test_verifier_json_offline():
     out = run_cli("verifier", "--json", "--hors-ligne", "Il faut que tu viens.")

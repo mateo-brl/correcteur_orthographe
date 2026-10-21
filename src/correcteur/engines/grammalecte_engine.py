@@ -189,9 +189,9 @@ class GrammalecteEngine(Engine):
 
     def warmup(self) -> None:
         with self._lock:
-            checker = self._ensure_loaded()
-            # La première analyse compile les règles (plusieurs secondes) : on la fait tout de suite.
-            checker.getParagraphErrors("Les enfant joue dans le jardin, il fesait beau.", self._options(False), False, True)
+            # La première analyse compile les règles (plusieurs secondes) : on la fait tout de suite, comme une vraie
+            # vérification, pour charger aussi les règles du correcteur et leur lexique (_apply_rules).
+            self._check_paragraph("Les enfant joue dans le jardin, il fesait beau.", self.settings.strict_typography)
 
     def _options(self, strict: bool) -> dict:
         opts = self._options_cache.get(strict)

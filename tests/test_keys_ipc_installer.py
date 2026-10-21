@@ -108,6 +108,35 @@ def test_ipc_roundtrip(home):
     assert send_command("ouvrir", timeout=1) is False
 
 
+def test_ipc_commands_wait_for_their_handler(home):
+    """Canal ouvert dès le lancement, avant l'interface (cli.main) : les commandes reçues attendent leur
+    destinataire et lui arrivent dans l'ordre, puis les suivantes directement."""
+    from correcteur.platform.ipc import IpcServer, send_command
+
+    server = IpcServer()
+    assert server.start(), server.error
+    try:
+        assert send_command("verifier-selection", "abc")
+        assert send_command("ouvrir")
+        end = time.monotonic() + 3
+        while len(server._waiting) < 2 and time.monotonic() < end:
+            time.sleep(0.01)
+        received, event = [], threading.Event()
+
+        def handler(cmd, data):
+            received.append((cmd, data))
+            if len(received) == 3:
+                event.set()
+
+        server.set_handler(handler)
+        assert received == [("verifier-selection", "abc"), ("ouvrir", "")]
+        assert send_command("parametres")
+        assert event.wait(3)
+        assert received[2] == ("parametres", "")
+    finally:
+        server.stop()
+
+
 def test_extract_rejects_path_traversal(tmp_path):
     from correcteur.installer import _extract
 

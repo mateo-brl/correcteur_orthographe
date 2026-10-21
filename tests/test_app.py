@@ -100,9 +100,9 @@ def make_controller(qapp, home, monkeypatch):
     monkeypatch.setattr(app_module, "Checker", lambda s, d: Checker(s, d, engines=[QuietEngine(s)]))
     made = []
 
-    def make(bridge_factory=FakeBridge, startup=True):
+    def make(bridge_factory=FakeBridge, startup=True, ipc=None):
         monkeypatch.setattr(app_module, "create_bridge", lambda defer: bridge_factory(defer))
-        controller = app_module.Controller(qapp, startup=startup)
+        controller = app_module.Controller(qapp, startup=startup, ipc=ipc)
         made.append(controller)
         return controller, notes
 
@@ -110,6 +110,21 @@ def make_controller(qapp, home, monkeypatch):
     for controller in made:
         controller.window.close()
         controller.quit()
+
+
+def test_commands_received_before_the_interface_are_handled(qapp, make_controller):
+    """Canal ouvert par la ligne de commande avant le chargement de Qt (cli.main) : la commande reçue pendant ce
+    temps est traitée une fois l'interface prête."""
+    from correcteur.platform.ipc import IpcServer, send_command
+
+    server = IpcServer()
+    assert server.start(), server.error
+    assert send_command("ouvrir", "Les enfant joue.")
+    assert wait_until(qapp, lambda: server._waiting, timeout=3)
+    controller, _ = make_controller(ipc=server)
+    assert controller.ipc is server
+    assert wait_until(qapp, controller.window.isVisible)
+    assert controller.window.editor.toPlainText() == "Les enfant joue."
 
 
 def test_copy_text_reports_failure(make_controller):

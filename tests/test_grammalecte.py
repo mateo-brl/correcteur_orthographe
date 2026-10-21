@@ -46,6 +46,15 @@ def test_standard_mode_hides_typography_pedantry():
     assert any(i.rule_id.startswith("apostrophe_typographique") for i in strict)
 
 
+def test_warmup_also_loads_the_corrector_rules():
+    """Le préchargement passe par une vraie vérification : les règles du correcteur et leur lexique sont prêts
+    avant la première correction, pas seulement Grammalecte."""
+    e = engine()
+    assert e._lexique is None
+    e.warmup()
+    assert e._checker is not None and e._lexique is not None
+
+
 def test_paragraph_cache_makes_rechecks_fast():
     e = engine()
     e.warmup()

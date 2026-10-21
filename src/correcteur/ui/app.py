@@ -298,9 +298,17 @@ class Controller(QObject):
     notifyRequested = Signal(str, bool)   # notification demandée depuis un fil de travail
     gnomeShortcutsRead = Signal(object, bool)  # (raccourcis GNOME du correcteur ou None, prévenir s'il en manque)
 
-    def __init__(self, app: QApplication, startup: bool = False) -> None:
+    def __init__(self, app: QApplication, startup: bool = False, ipc: IpcServer | None = None) -> None:
         super().__init__()
         self.app = app
+        # Canal de commande ouvert avant les travaux lents (fenêtres, icône), ou dès le lancement par la ligne de
+        # commande (voir cli.main) : les commandes reçues attendent la boucle d'événements.
+        self.command.connect(self._on_command, Qt.ConnectionType.QueuedConnection)
+        if ipc is None:
+            ipc = IpcServer()
+            ipc.start()
+        self.ipc = ipc
+        ipc.set_handler(lambda cmd, data: self.command.emit(cmd, data))
         self.store = SettingsStore()
         self.settings: Settings = self.store.load()
         self._sync_autostart()
@@ -333,7 +341,6 @@ class Controller(QObject):
         if scheme_changed is not None:
             scheme_changed.connect(lambda *_: self._follow_theme())
 
-        self.command.connect(self._on_command, Qt.ConnectionType.QueuedConnection)
         self.expressDone.connect(self._express_done, Qt.ConnectionType.QueuedConnection)
         self.captured.connect(self._on_captured, Qt.ConnectionType.QueuedConnection)
         self.notifyRequested.connect(self.notify, Qt.ConnectionType.QueuedConnection)
@@ -355,8 +362,7 @@ class Controller(QObject):
             self._create_tray_menu()
             self.tray.show()
 
-        self.ipc = IpcServer(lambda cmd, data: self.command.emit(cmd, data))
-        if not self.ipc.start():
+        if not self.ipc.listening:
             if self.ipc.other_instance:
                 QTimer.singleShot(0, self.quit)  # lancée en même temps qu'une autre : celle-là répond déjà
             else:
@@ -843,8 +849,10 @@ class Controller(QObject):
         self.app.quit()
 
 
-def run_app(initial_command: str | None = None, startup: bool = False, debug: bool | None = None) -> int:
-    """`debug` : journal détaillé ; par défaut, celui de la ligne de commande (option --debug)."""
+def run_app(initial_command: str | None = None, startup: bool = False, debug: bool | None = None,
+            ipc: IpcServer | None = None) -> int:
+    """`debug` : journal détaillé ; par défaut, celui de la ligne de commande (option --debug). `ipc` : canal de
+    commande déjà ouvert (voir cli.main)."""
     if debug is None:
         debug = logging.getLogger().isEnabledFor(logging.DEBUG)
     install_log(debug)
@@ -864,7 +872,7 @@ def run_app(initial_command: str | None = None, startup: bool = False, debug: bo
     app = QApplication(sys.argv[:1])
     collector = MainThreadGarbageCollector(app)  # noqa: F841 (actif jusqu'à la fin de app.exec())
     load_qt_translation(app)
-    controller = Controller(app, startup=startup)
+    controller = Controller(app, startup=startup, ipc=ipc)
     app.aboutToQuit.connect(controller.checker.close)
     # Arrêt normal noté au journal : sans cette ligne, une fin brutale (plantage, session fermée) se repère.
     app.aboutToQuit.connect(lambda: log.info("%s arrêté normalement.", APP_NAME))
