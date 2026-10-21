@@ -411,11 +411,11 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(QLabel("Règles désactivées :"))
         self.rules = QListWidget()
-        for rule in self.settings.ignored_rules:
-            # La description si elle est connue (règle coupée depuis la 0.1.14), l'identifiant en infobulle.
-            item = QListWidgetItem(self.settings.rule_labels.get(rule) or rule)
-            item.setData(Qt.ItemDataRole.UserRole, rule)
-            item.setToolTip(rule)
+        for label, rules in self.settings.ignored_rule_groups():
+            # Une ligne par faute coupée, toutes ses règles réactivées ensemble ; les identifiants en infobulle.
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, rules)
+            item.setToolTip("\n".join(rules))
             self.rules.addItem(item)
         layout.addWidget(self.rules, 1)
         restore = QPushButton("Réactiver la règle sélectionnée")
@@ -548,7 +548,7 @@ class SettingsDialog(QDialog):
         lt.picky = self.lt_picky.isChecked()
         # Règles coupées et mots ajoutés depuis la fenêtre de correction pendant que celle-ci était ouverte :
         # gardés. Seuls disparaissent ceux que l'utilisateur a retirés ici.
-        rules = [self.rules.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.rules.count())]
+        rules = [rule for i in range(self.rules.count()) for rule in self.rules.item(i).data(Qt.ItemDataRole.UserRole)]
         s.ignored_rules = _merged(self.settings.ignored_rules, rules, self.controller.settings.ignored_rules)
         labels = {**self.settings.rule_labels, **self.controller.settings.rule_labels}
         s.rule_labels = {r: labels[r] for r in s.ignored_rules if r in labels}

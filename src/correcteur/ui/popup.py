@@ -133,9 +133,10 @@ def card_key(issue: Issue, text: str) -> tuple:
 
 def rule_label(issue: Issue, text: str) -> str:
     """Description d'une règle coupée, pour les Paramètres : son message et l'exemple qui l'a montrée."""
-    message = " ".join(issue.message.split())
+    # Sans sa ponctuation finale, qui donnait « Pléonasme. : « au jour d'aujourd'hui » » (L-20).
+    message = " ".join(issue.message.split()).rstrip(" .,;:!?")
     if len(message) > 80:
-        message = message[:79] + "…"
+        message = message[:79].rstrip(" .,;:!?") + "…"
     example = " ".join(text[issue.start:issue.end].split())
     if len(example) > 40:
         example = example[:39] + "…"
