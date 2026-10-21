@@ -8,6 +8,7 @@ import functools
 import json
 import logging
 import os
+import re
 import stat
 import sys
 import threading
@@ -150,6 +151,16 @@ class Settings:
     def strict_typography(self) -> bool:
         return self.general.typography == "stricte"
 
+    def ignored_rule_groups(self) -> list[tuple[str, list[str]]]:
+        """Règles désactivées, une entrée (libellé, identifiants) par faute coupée : une faute signalée par
+        Grammalecte et LanguageTool coupe leurs deux règles sous un même libellé, que les Paramètres listaient
+        deux fois (L-20). Les règles coupées avant la 0.1.14, sans libellé, restent une entrée par identifiant."""
+        groups: dict[tuple[bool, str], list[str]] = {}
+        for rule in dict.fromkeys(self.ignored_rules):
+            label = self.rule_labels.get(rule)
+            groups.setdefault((True, _tidy_rule_label(label)) if label else (False, rule), []).append(rule)
+        return [(text, rules) for (_, text), rules in groups.items()]
+
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
@@ -159,6 +170,14 @@ class Settings:
 
     def copy(self) -> "Settings":
         return Settings.from_dict(json.loads(json.dumps(self.to_dict())))
+
+
+# Ponctuation finale du message, restée dans les libellés notés par la 0.1.14 et la 0.1.15 : « Pléonasme. : « … » ».
+_LABEL_END_RE = re.compile(r"[.,;:!?]+ : « ")
+
+
+def _tidy_rule_label(label: str) -> str:
+    return _LABEL_END_RE.sub(" : « ", label, count=1)
 
 
 def _from_dict(cls, data: Any):

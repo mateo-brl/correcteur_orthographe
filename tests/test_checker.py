@@ -787,3 +787,45 @@ def test_offline_choice_goes_first_when_languagetool_proposes_it(home):
     assert issue.replacements[0] == "est" and issue.confident
     assert c.autocorrect(text)[0] == "Il est sorti d'affaire."
     c.close()
+
+
+def test_word_cut_before_a_lone_letter_is_not_suggested(home):
+    """Ergonomie 9 : pour « chevals », LanguageTool (PLURIEL_AL2) propose « chevaux », « cheval » et « cheval s ».
+    La 3e ne fait que couper le mot devant une lettre qui n'est pas un mot. Une faute qui n'avait que ce genre de
+    suggestion reste signalée."""
+    text = "Les chevals et les chevalx courent."
+    s = Settings()
+    lt = lambda t: present([issue(t, "chevals", ["chevaux", "cheval", "cheval s"], "languagetool", rule="PLURIEL_AL2"),
+                            issue(t, "chevalx", ["cheval x"], "languagetool", rule="PLURIEL_AL2")])
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "languagetool", lt)])
+    found = by_text(c.check(text).issues, text)
+    assert found["chevals"].replacements == ["chevaux", "cheval"]
+    assert found["chevalx"].replacements == [] and not found["chevalx"].confident
+    c.close()
+
+
+def test_suggestions_of_two_real_words_keep_their_space(home):
+    """« a priori », « parce que », « au fur », « y aller » : une espace ajoutée, mais entre deux vrais mots."""
+    text = "Il viendra apriori parceque aufur et yaller."
+    s = Settings()
+    words = {"apriori": "a priori", "parceque": "parce que", "aufur": "au fur", "yaller": "y aller"}
+    lt = lambda t: present([issue(t, w, [r], "languagetool", Category.SPELLING, "FR_SPELLING_RULE")
+                            for w, r in words.items()])
+    c = Checker(s, PersonalDictionary(), engines=[FakeEngine(s, "languagetool", lt)])
+    found = by_text(c.check(text).issues, text)
+    assert {w: found[w].replacements for w in words} == {w: [r] for w, r in words.items()}
+    c.close()
+
+
+def test_splits_off_a_letter():
+    from correcteur.checker import _splits_off_a_letter
+
+    assert _splits_off_a_letter("chevals", "cheval s")
+    assert _splits_off_a_letter("Chevals", "cheval s")
+    assert _splits_off_a_letter("lami", "l ami")
+    assert not _splits_off_a_letter("chevals", "chevaux")
+    assert not _splits_off_a_letter("apriori", "a priori")
+    assert not _splits_off_a_letter("Ican", "I can")       # anglais
+    assert not _splits_off_a_letter("10h", "10 h")          # unité après un nombre
+    assert not _splits_off_a_letter("chevals", "cheva ls")  # deux lettres
+    assert not _splits_off_a_letter("chevals", "chevals ")

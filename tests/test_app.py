@@ -727,3 +727,33 @@ def test_ready_message_follows_the_settings(qapp, make_controller, monkeypatch):
     monkeypatch.setattr(app_module, "session_type", lambda: "x11")
     controller.settings.general.hotkeys_enabled = True
     assert "(indisponibles sur ce système)" in controller._ready_message()
+
+
+def test_fault_cut_in_both_engines_is_one_line_in_the_settings(qapp, make_controller, monkeypatch):
+    """L-20 : « Ne plus signaler cette règle » sur « au jour d'aujourd'hui » coupe la règle de Grammalecte et celle de
+    LanguageTool. Les Paramètres les listaient deux fois, « Pléonasme. : « … » » ; la ligne réactive les deux."""
+    from correcteur.config import SettingsStore
+    from correcteur.models import Category, Issue
+    from correcteur.ui import app as app_module
+    from correcteur.ui.settings import SettingsDialog
+
+    monkeypatch.setattr(app_module, "desktop_name", lambda: "")
+    controller, _ = make_controller()
+    rules = ("g2__pleo_locutions__b7_a1_1", "AU_JOUR_D_AUJOURD_HUI")
+    text = "Au jour d'aujourd'hui, il pleut."
+    controller.window.open_with(text)
+    assert wait_until(qapp, lambda: not controller.window._running)
+    controller.window.ignore_rule(Issue(0, 21, "Pléonasme.", ["Aujourd'hui"], Category.STYLE, rules[0], "grammalecte",
+                                        sources=("grammalecte", "languagetool"), rules=rules))
+    saved = SettingsStore().load()
+    assert saved.ignored_rules == list(rules)
+    assert saved.rule_labels == dict.fromkeys(rules, "Pléonasme : « Au jour d'aujourd'hui »")
+
+    dialog = SettingsDialog(controller.settings, controller)
+    assert [dialog.rules.item(i).text() for i in range(dialog.rules.count())] == [
+        "Pléonasme : « Au jour d'aujourd'hui »"]
+    dialog.rules.takeItem(0)
+    dialog._accept()
+    saved = SettingsStore().load()
+    assert saved.ignored_rules == [] and saved.rule_labels == {}
+    assert controller.checker.settings.ignored_rules == []

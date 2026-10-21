@@ -370,10 +370,12 @@ class Checker:
                 return None
             if self.settings.general.accept_abbreviations and word.lower() in COMMON_ABBREVIATIONS:
                 return None
-        had = bool(issue.replacements)
+        # « cheval s » écartée avant le reste : une faute qui n'avait que ce genre de suggestion reste signalée.
+        candidates = [rep for rep in issue.replacements if not _splits_off_a_letter(original, rep)]
+        had = bool(candidates)
         seen: set[str] = set()
         replacements = []
-        for rep in issue.replacements:
+        for rep in candidates:
             if not strict:
                 rep = adapt_to_user_style(rep, text, original)
             if issue.category is Category.SPELLING and rep.casefold() != original.casefold():
@@ -517,6 +519,22 @@ class Checker:
         remaining += [i for i in slow_only if not i.confident and not any(i.overlaps(r) for r in remaining)]
         remaining.sort(key=lambda i: i.start)
         return current, applied_all, remaining, result
+
+
+# Mots d'une lettre : a, à, y, ô en français ; e, é, è, i, o, ó, u en espagnol, italien ou portugais ; I en anglais.
+_ONE_LETTER_WORDS = frozenset("aàeéèioóôuy")
+
+
+def _splits_off_a_letter(original: str, replacement: str) -> bool:
+    """La suggestion ne fait que couper le mot fautif par une espace, à côté d'une lettre seule qui n'est pas un
+    mot : « chevals » -> « cheval s » (LanguageTool, PLURIEL_AL2). « apriori » -> « a priori », « parceque » ->
+    « parce que » et « 10h » -> « 10 h » restent."""
+    if not original.isalpha() or len(replacement) != len(original) + 1:
+        return False
+    left, space, right = replacement.partition(" ")
+    if not space or (left + right).casefold() != original.casefold():
+        return False
+    return any(len(part) == 1 and part.lower() not in _ONE_LETTER_WORDS for part in (left, right))
 
 
 def _distinct(replacements: list[str]) -> list[str]:
