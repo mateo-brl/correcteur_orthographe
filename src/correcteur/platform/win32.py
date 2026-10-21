@@ -54,6 +54,7 @@ SECURITY_MANDATORY_HIGH_RID = 0x3000
 
 VK_SHIFT, VK_CONTROL, VK_MENU = 0x10, 0x11, 0x12
 VK_INSERT = 0x2D
+VK_ESCAPE = 0x1B
 VK_LWIN, VK_RWIN = 0x5B, 0x5C
 VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU = 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5
 _MODIFIER_VKS = (VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN)
@@ -518,6 +519,10 @@ def send_copy(keys: str = "insert") -> None:
         send_ctrl(keys)
 
 
+def send_escape() -> None:
+    _send([_key_input(VK_ESCAPE, False), _key_input(VK_ESCAPE, True)])
+
+
 def process_name(hwnd: int) -> str:
     """Nom du programme de la fenêtre, en minuscules (« code.exe ») ; "" s'il est illisible."""
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, _window_pid(hwnd)) if hwnd else None
@@ -874,6 +879,12 @@ def html_format() -> int:
 _LINE_COPY_FORMATS = ("MSDEVLineSelect", "VisualStudioEditorOperationsLineCutCopyClipboardTag")
 _WEB_CUSTOM_DATA = "Chromium Web Custom MIME Data Format"
 _EMPTY_SELECTION = '"isFromEmptySelection":true'.encode("utf-16-le")
+
+
+def copied_cells() -> bool:
+    """Le presse-papiers contient-il des cellules de tableur copiées hors édition (format « Biff8 » d'Excel et de
+    LibreOffice Calc) ?"""
+    return bool(user32.IsClipboardFormatAvailable(user32.RegisterClipboardFormatW("Biff8")))
 
 
 def copied_line() -> bool:

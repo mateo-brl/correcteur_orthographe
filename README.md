@@ -169,9 +169,10 @@ suit la frappe.
 Après une correction express, la notification indique les premières corrections faites (« aller → allé, a → à,
 c'est → s'est… ») et le nombre de remarques laissées à vérifier. Si vous tapez, cliquez ou changez de fenêtre
 pendant qu'elle se fait, rien n'est collé : la sélection a pu bouger, et le texte corrigé atterrirait ailleurs. Le
-correcteur le dit, et vous rend votre presse-papiers. Sous Linux, au moindre mouvement de souris, il attend une
-courte pause, relit la sélection, et colle si elle n'a pas changé ; si le clavier ou la souris ne s'arrêtent pas, il
-ne colle rien et le dit. Sans sélection, VS Code et Notepad++ copient la ligne entière : le correcteur le repère et
+correcteur le dit, et vous rend votre presse-papiers. Sous Linux, le moindre geste compte : sous GNOME, un simple
+mouvement de souris pendant la correction suffit pour qu'elle ne soit pas collée (relire la sélection ferait perdre
+une touche, voir plus bas) ; sous X11, le correcteur attend une courte pause, relit la sélection, et colle si elle
+n'a pas changé. Sans sélection, VS Code et Notepad++ copient la ligne entière : le correcteur le repère et
 répond « Aucun texte sélectionné » au lieu de coller cette ligne au curseur. Sous Windows, ses messages s'affichent
 dans une bulle à lui, visible même en mode « Ne pas déranger ».
 
@@ -228,9 +229,6 @@ sa sortie suit la page de code de la console (que lisent cmd, PowerShell 5, `fin
 - Sous Wayland, tant que le renommage d'un fichier (<kbd>F2</kbd> dans Fichiers) ou la recherche de la vue d'ensemble
   de GNOME est ouvert, le presse-papiers ne répond pas : le correcteur le dit. Copiez le texte, puis utilisez
   « Vérifier le presse-papiers ».
-- Dans une cellule de LibreOffice Calc en cours d'édition (<kbd>F2</kbd>), la copie simulée met Calc dans un état où
-  <kbd>Entrée</kbd> colle le presse-papiers rendu au lieu de valider la cellule corrigée. Sélectionnez la cellule
-  sans l'éditer avant la correction : c'est alors son contenu entier qui est corrigé.
 - Dans Word et Outlook, corriger un paragraphe sélectionné avec sa marque de fin (tout le document, par exemple)
   peut laisser un paragraphe vide après lui.
 - PowerShell 5 remplace les accents par « ? » dans le texte qu'il envoie à un programme par un tube
@@ -300,11 +298,15 @@ flowchart LR
    en forme (HTML), les corrections y sont reportées mot à mot sans toucher aux balises, et les deux versions sont
    collées. Pendant une correction express, le correcteur note les frappes et les clics sous Windows (Raw Input,
    qui reçoit une copie des évènements sans jamais les retarder) : s'il y en a eu, il ne colle rien. Sous Linux, il
-   lit le compteur d'inactivité du bureau (GNOME, X11) juste avant de coller : si vous avez tapé, cliqué ou bougé
-   la souris depuis la copie, ou s'il ne peut pas le savoir, il recopie la sélection et ne colle que si elle n'a pas
-   changé. Cette nouvelle copie attend une pause de 0,3 s (1,5 s au plus), pour que son <kbd>Ctrl</kbd> simulé ne
-   se mêle pas à vos touches, et le compteur est relu juste avant le collage ; après deux relectures, ou sans pause,
-   rien n'est collé. Sans compteur (Wayland hors GNOME), une seule relecture, puis collage.
+   lit le compteur d'inactivité du bureau (GNOME, X11) juste avant de coller. Sous GNOME, si vous avez tapé, cliqué
+   ou bougé la souris depuis la copie, il ne colle rien : wl-copy et wl-paste y prennent le focus clavier un
+   instant, et relire la sélection pendant que vous tapez vous ferait perdre une touche. Sous X11, il attend une
+   pause de 0,3 s (1,5 s au plus, pour que son <kbd>Ctrl</kbd> simulé ne se mêle pas à vos touches), recopie la
+   sélection et ne colle que si elle n'a pas changé ; le compteur est relu juste avant le collage. Sans compteur
+   (Wayland hors GNOME, où wl-copy ne prend pas le focus), la sélection est toujours relue avant le collage.
+   Quand la sélection est une cellule de tableur copiée hors édition (LibreOffice Calc, Excel), le correcteur
+   envoie <kbd>Échap</kbd> juste après la copie : Calc passe sinon en mode copie, où <kbd>Entrée</kbd> colle le
+   presse-papiers du moment au lieu de valider la cellule.
    Un gestionnaire d'historique du presse-papiers (GPaste, Clipboard Indicator, Klipper) garde la trace du texte
    capturé et du texte corrigé, comme pour toute copie.
 3. Les deux moteurs tournent en parallèle. Les résultats de Grammalecte s'affichent tout de suite, ceux de
