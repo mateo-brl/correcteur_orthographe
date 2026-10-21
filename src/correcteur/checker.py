@@ -586,11 +586,15 @@ _FEMININE_DETERMINERS = frozenset("la une cette ma ta sa".split())
 
 def _solo_pick(text: str, issue: Issue) -> str | None:
     """Parmi plusieurs suggestions, celle que le contexte impose, quand il l'impose : l'auxiliaire devant un
-    participe (« Je vous est envoyé » -> « ai », pas « aie » ni « suis »), le genre du déterminant qui suit
-    (« Quelque soit le temps » -> « Quel que soit »)."""
+    participe (« Tu a mangé » -> « as »), le genre du déterminant qui suit (« Quelque soit le temps » -> « Quel
+    que soit »)."""
     family = rule_family(issue.rule_id)
     first = issue.replacements[0]
     if family in ("conj_je", "conj_tu") and first in ("ai", "as") and _PARTICIPLE_AFTER_RE.match(text, issue.end):
+        if family == "conj_je" and "suis" in issue.replacements:
+            # « J'est fatigué » : « suis » aussi possible. La règle du correcteur (regle_je_ai) tranche quand le
+            # contexte le permet (« Je vous est envoyé le dossier » -> « ai »).
+            return None
         return first
     if family.endswith("_non_verbe") and text[issue.start:issue.end].lower() == "et" and "est" in issue.replacements:
         return "est"  # « Il et sorti » : « est », pas « ait » ni « hait »

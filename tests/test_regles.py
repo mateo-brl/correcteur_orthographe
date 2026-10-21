@@ -116,6 +116,22 @@ FIXES = [
     ("Elle est contante.", "contante", "contente", "corr_orthographe"),
     ("Cela lui a fait du tord.", "tord", "tort", "corr_locution"),
     ("Il a des tords envers elle.", "tords", "torts", "corr_locution"),
+    # Rapport de test de la 0.1.15 : « a » après un groupe nominal sujet et son verbe, ou « avoir soif ».
+    ("Mes cousins ont une maison a la campagne depuis 21 ans.", "a", "à", "corr_a_preposition"),
+    ("Les promeneurs ont soif a la fontaine.", "a", "à", "corr_a_preposition"),
+    ("Mon oncle a une maison a la campagne.", "a", "à", "corr_a_preposition"),
+    ("C'est lui qui a laissé son sac a la gare.", "a", "à", "corr_a_preposition"),
+    ("Je ne sais pas s'il a mis son sac a la gare.", "a", "à", "corr_a_preposition"),
+    ("Il a pris la voiture a la gare.", "a", "à", "corr_a_preposition"),   # « pris » : aussi passé simple
+    ("Je n'est pas fini mon travail.", "est", "ai", "corr_je_ai"),
+    ("Je n'est rien fait.", "est", "ai", "corr_je_ai"),
+    ("Je n'est pas dormi de la nuit.", "est", "ai", "corr_je_ai"),
+    ("J'est pas fini mon travail.", "est", "ai", "corr_je_ai"),
+    ("J'est allé au marché.", "J'est", "Je suis", "corr_je_ai"),
+    ("Je n'est pas allé à l'école.", "n'est", "ne suis", "corr_je_ai"),
+    ("Je m'est trompé.", "m'est", "me suis", "corr_je_ai"),
+    ("Ils se sont trompé de chemin hier soir.", "trompé", "trompés", "corr_ppas_pronominal_sujet"),
+    ("Elle s'est trompé de porte.", "trompé", "trompée", "corr_ppas_pronominal_sujet"),
 ]
 
 
@@ -192,6 +208,37 @@ UNTOUCHED = [
     "Il raconte en contant des histoires.",
     "Il est, contant fleurette, reparti.",
     "Il tord le fer.",
+    # « a » verbe après un sujet nominal, une relative, une coordination, un participe (rapport de la 0.1.15).
+    "Le chien qui aboie a peur du noir.",
+    "Ce que tu dis a la valeur d'un aveu.",
+    "La porte a la poignée cassée.",
+    "Il mange et a la grippe.",
+    "Le livre posé sur la table a la couverture rouge.",
+    "Le train a 21 heures de retard.",
+    "Son frère a la grippe.",
+    "Il y a la mer.",
+    "La ferme a la toiture refaite.",
+    "Le chien qui mange un os a la queue coupée.",
+    "Celui qui a le ballon a la priorité.",
+    "Celui qui a faim a la priorité.",
+    "L'homme dont elle aime le fils a la grippe.",
+    "Le livre que tu lis le soir a la couverture rouge.",
+    "Ce que tu dis le matin a la valeur d'un aveu.",
+    "La maison où il passe ses vacances a la forme d'un bateau.",
+    "Le livre écrit la nuit a la couverture rouge.",
+    "Mon oncle porte un chapeau et a la barbe.",
+    "Le soleil brille la mer a la couleur de l'encre.",
+    "Quand il pleut la rivière a la couleur du café.",
+    "Ce qui compte, c'est que celui qui a le ballon a la priorité.",
+    # « je » + auxiliaire sans choix sûr entre « ai » et « suis » ; pronominal sans accord.
+    "Je n'est pas content.",
+    "J'est fatigué.",
+    "J'est passé te voir.",
+    "Je n'est pas fatigué ce soir.",
+    "Je vous est obligé.",
+    "J'est entré la tête haute.",
+    "Ils se sont parlé.",
+    "Ils se sont servi de l'eau.",
 ]
 
 

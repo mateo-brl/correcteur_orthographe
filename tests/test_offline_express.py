@@ -76,6 +76,13 @@ FIXED = [
     ("Il ces levé tôt ce matin.", "Il s'est levé tôt ce matin."),
     # Grammalecte proposait « S'étais » : c'est « C'était » (règle du correcteur).
     ("C'étais lui le plus jeune.", "C'était lui le plus jeune."),
+    # Rapport de test de la 0.1.15 : « a » après le verbe d'un sujet nominal (après « on » -> « ont » pour le
+    # premier), auxiliaire de « je » derrière la négation, participe de « se tromper de ».
+    ("Mes cousins on une maison a la campagne depuis 21 ans.", "Mes cousins ont une maison à la campagne depuis 21 ans."),
+    ("Les promeneurs ont soif a la fontaine.", "Les promeneurs ont soif à la fontaine."),
+    ("Je n'est pas fini mon travail.", "Je n'ai pas fini mon travail."),
+    ("Je n'est pas allé à l'école.", "Je ne suis pas allé à l'école."),
+    ("Ils se sont trompé de chemin hier soir.", "Ils se sont trompés de chemin hier soir."),
 ]
 
 UNTOUCHED = [
@@ -105,6 +112,13 @@ UNTOUCHED = [
     "Les enfants sont partis en vacances avec leurs parents.",
     "Elle a mangé les pommes qu'elle avait achetées.",
     "stp envoie-moi le rdv par mail, merci !",
+    # « a » verbe d'un autre sujet que celui du verbe d'avant (rapport de test de la 0.1.15).
+    "Le chien qui mange un os a la queue coupée.",
+    "Le livre que tu lis le soir a la couverture rouge.",
+    # « ai » ou « suis » ? Grammalecte propose les deux : rien d'office.
+    "Je n'est pas content.",
+    "J'est fatigué.",
+    "J'est passé te voir.",
 ]
 
 
