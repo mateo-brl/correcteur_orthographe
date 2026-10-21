@@ -238,8 +238,7 @@ sa sortie suit la page de code de la console (que lisent cmd, PowerShell 5, `fin
   toujours en tête.
 - Sans LanguageTool, certaines fautes restent signalées sans être corrigées d'office, faute d'indice pour choisir :
   « Quels changement » (« Quel changement » ou « Quels changements » ?). D'autres ne sont pas signalées du tout hors
-  ligne : « Je les ai vu » (« vus » ou « vues » ?), ou « a » pour « à » dans « Mes cousins ont une maison a la
-  campagne » (corrigé dans « Ils ont une maison a la campagne »).
+  ligne : « Je les ai vu » (« vus » ou « vues » ?).
 - Le mode LanguageTool en ligne est limité à environ 20 vérifications par minute.
 
 ## Moteurs et confidentialité
