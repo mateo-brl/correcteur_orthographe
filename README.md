@@ -169,9 +169,11 @@ suit la frappe.
 Après une correction express, la notification indique les premières corrections faites (« aller → allé, a → à,
 c'est → s'est… ») et le nombre de remarques laissées à vérifier. Si vous tapez, cliquez ou changez de fenêtre
 pendant qu'elle se fait, rien n'est collé : la sélection a pu bouger, et le texte corrigé atterrirait ailleurs. Le
-correcteur le dit, et vous rend votre presse-papiers. Sous Linux, au moindre mouvement de souris, il relit la
-sélection avant de coller, et colle si elle n'a pas changé. Sous Windows, ses messages s'affichent dans une bulle à
-lui, visible même en mode « Ne pas déranger ».
+correcteur le dit, et vous rend votre presse-papiers. Sous Linux, au moindre mouvement de souris, il attend une
+courte pause, relit la sélection, et colle si elle n'a pas changé ; si le clavier ou la souris ne s'arrêtent pas, il
+ne colle rien et le dit. Sans sélection, VS Code et Notepad++ copient la ligne entière : le correcteur le repère et
+répond « Aucun texte sélectionné » au lieu de coller cette ligne au curseur. Sous Windows, ses messages s'affichent
+dans une bulle à lui, visible même en mode « Ne pas déranger ».
 
 Sous Windows, la mise en forme est gardée (gras, italique, liens, espaces insécables) quand l'application copie le
 texte avec elle : Word, Outlook, les navigateurs, LibreOffice. Google Docs reçoit le texte seul : il recollait
@@ -299,7 +301,9 @@ flowchart LR
    qui reçoit une copie des évènements sans jamais les retarder) : s'il y en a eu, il ne colle rien. Sous Linux, il
    lit le compteur d'inactivité du bureau (GNOME, X11) juste avant de coller : si vous avez tapé, cliqué ou bougé
    la souris depuis la copie, ou s'il ne peut pas le savoir, il recopie la sélection et ne colle que si elle n'a pas
-   changé.
+   changé. Cette nouvelle copie attend une pause de 0,3 s (1,5 s au plus), pour que son <kbd>Ctrl</kbd> simulé ne
+   se mêle pas à vos touches, et le compteur est relu juste avant le collage ; après deux relectures, ou sans pause,
+   rien n'est collé. Sans compteur (Wayland hors GNOME), une seule relecture, puis collage.
    Un gestionnaire d'historique du presse-papiers (GPaste, Clipboard Indicator, Klipper) garde la trace du texte
    capturé et du texte corrigé, comme pour toute copie.
 3. Les deux moteurs tournent en parallèle. Les résultats de Grammalecte s'affichent tout de suite, ceux de

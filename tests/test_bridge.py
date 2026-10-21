@@ -311,6 +311,61 @@ def test_x11_express_checks_the_selection_before_pasting(monkeypatch, clock, wha
     assert desk.keys.count("copy") == (1 if what in ("souris", "frappe") else 0)
 
 
+def test_x11_express_never_pastes_during_continuous_activity(monkeypatch, clock):
+    """Souris ou clavier en action sans pause de 300 ms : la sélection n'est pas relue en pleine frappe (le Ctrl
+    simulé s'y mêlerait), et rien n'est collé."""
+    deferred = []
+    x11 = X11Bridge(lambda ms, fn: deferred.append(fn))
+    desk = FakeX11(clock, monkeypatch, x11)
+    capture = x11.capture(express=True)
+    clock.sleep(1.0)
+    monkeypatch.setattr(x11, "_idle_ms", lambda: 20)
+    ok, message = x11.replace(capture, "C'est un test")
+    assert not ok and "clavier ou souris" in message and desk.pasted == [] and desk.keys == []
+
+
+def test_x11_express_checks_activity_just_before_the_paste(monkeypatch, clock):
+    """Activité après la relecture de la sélection, juste avant le Ctrl+V (clic sur une autre ligne) : rien n'est
+    collé, le témoin revient."""
+    deferred = []
+    x11 = X11Bridge(lambda ms, fn: deferred.append(fn))
+    desk = FakeX11(clock, monkeypatch, x11)
+    capture = x11.capture(express=True)
+    clock.sleep(1.0)
+    write = desk.write
+
+    def write_then_click(text, qt_fallback=True):
+        desk.last_input = clock.now  # clic juste après la vérification
+        return write(text, qt_fallback)
+
+    monkeypatch.setattr(x11, "_write", write_then_click)
+    ok, message = x11.replace(capture, "C'est un test")
+    for restore in deferred:
+        restore()
+    assert not ok and "clavier ou souris" in message and desk.pasted == [] and desk.clipboard == "témoin"
+
+
+def test_x11_line_copied_without_selection_is_no_selection(monkeypatch, clock):
+    """VS Code sous X11, sans sélection : la copie prend la ligne entière (données « isFromEmptySelection »)."""
+    from correcteur.platform import x11_selection
+
+    x11 = X11Bridge(lambda ms, fn: None)
+    desk = FakeX11(clock, monkeypatch, x11)
+    monkeypatch.setattr(x11, "_primary_from", lambda window: False)
+    x11._owner = SimpleNamespace(owns=lambda: desk.clipboard is None)  # marqueur encore en place
+    desk.selection = "    x = 1\n"
+    custom = b"\x10\0\0\0" + '"isFromEmptySelection":true'.encode("utf-16-le")
+    # Données personnalisées offertes seulement par la copie de VS Code.
+    monkeypatch.setattr(x11_selection, "selection_targets", lambda selection: ["TARGETS", "UTF8_STRING"] + (
+        ["chromium/x-web-custom-data"] if desk.clipboard == desk.selection else []))
+    monkeypatch.setattr(x11_selection, "read_target", lambda selection, target: custom)
+    capture = x11.capture(express=True)
+    assert capture.text == "" and capture.clipboard_touched
+    desk.clipboard = "témoin"
+    monkeypatch.setattr(x11_selection, "read_target", lambda selection, target: b"autre")
+    assert x11.capture(express=True).text == "    x = 1\n"
+
+
 def test_x11_write_without_qt_fallback(monkeypatch):
     def forbidden(text):
         raise AssertionError("presse-papiers de Qt hors du fil de l'interface")
@@ -379,6 +434,7 @@ class FakeWin:
         self.copy_keys = {"insert", "c"}  # copies que l'application connaît
         self.terminal, self.in_menu = False, False
         self.rewrite_after_paste = False  # l'Explorateur réécrit le presse-papiers après un collage
+        self.line_copy = False  # sans sélection, l'application copie la ligne entière (VS Code, Notepad++)
 
     # presse-papiers
     @staticmethod
@@ -413,6 +469,9 @@ class FakeWin:
 
     def html_format(self):
         return self.HTML
+
+    def copied_line(self):
+        return self.line_copy
 
     # fenêtres et clavier
     def foreground_window(self):
@@ -454,6 +513,9 @@ class FakeWin:
         self.keys.append(f"copie:{keys}")
         if keys == "c" and self.terminal:
             self.document.append("^C")  # programme interrompu
+        if self.line_copy and keys in self.copy_keys and self.foreground == 100:
+            self._write({13: self.text_bytes("    x = 1  # ligne du curseur\n")})
+            return
         if (self.selection and not self.elevated and not self.in_menu and keys in self.copy_keys
                 and self.foreground == 100):
             formats = {13: self.text_bytes(self.selection)}
@@ -700,6 +762,26 @@ def test_windows_google_docs_gets_plain_text(clock):
     ok, _ = win.replace(capture, "Je les ai mis au frigo.\n\n")
     # Sans les deux retours à la ligne ajoutés par la copie de Docs (deux paragraphes vides de plus à chaque fois).
     assert ok and FakeWin.HTML not in w.clipboard and w.document == ["Je les ai mis au frigo."]
+
+
+def test_windows_line_copied_without_selection_is_no_selection(clock):
+    """VS Code, Notepad++ : sans sélection, la copie prend la ligne entière. Corrigée, elle était collée au curseur,
+    au milieu de la ligne. C'est « aucun texte sélectionné », et le témoin revient."""
+    w = FakeWin(selection="")
+    w.line_copy = True
+    w.classes[100] = "Chrome_WidgetWin_1"
+    win, deferred = _windows(w)
+    capture = _capture(win)
+    assert capture.text == "" and not capture.from_selection
+    win.release(capture)
+    for restore in deferred:
+        restore()
+    assert w.get_clipboard_text() == "témoin" and w.document == []
+
+    # Une sélection qui finit par un retour à la ligne reste une sélection.
+    w = FakeWin(selection="Ces un test\n")
+    win, _ = _windows(w)
+    assert _capture(win).text == "Ces un test\n"
 
 
 def test_windows_tray_menu_goes_back_to_the_last_window(clock):

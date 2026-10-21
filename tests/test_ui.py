@@ -274,6 +274,9 @@ def test_express_message_lists_changes_and_missing_engines():
     # Une espace en trop n'a rien de lisible à montrer : seulement le nombre.
     assert express_message("le  mail", "le mail", 1, 0, {}, "X") == (
         "1 correction appliquée.\nCtrl+Z dans l'application pour annuler.", False)
+    # Espace avant le point final : le détail finit déjà par un point, pas de second.
+    assert express_message("Je vais à la plage .", "Je vais à la plage.", 1, 0, {}, "X")[0].splitlines()[0] == (
+        "1 correction appliquée : plage . → plage.")
     # Aucun moteur n'a vérifié le texte : ce n'est pas « aucune faute ».
     assert express_message("ok", "ok", 0, 0, {}, "X") == (
         "Vérification impossible : aucun moteur actif n'a vérifié le texte.", True)

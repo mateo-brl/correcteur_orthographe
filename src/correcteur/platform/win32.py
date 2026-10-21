@@ -869,6 +869,21 @@ def html_format() -> int:
     return _html_format
 
 
+# Ligne entière copiée faute de sélection : Scintilla (Notepad++) et Visual Studio la signalent par un format à
+# eux ; VS Code, dans les données personnalisées de Chromium (« isFromEmptySelection », en UTF-16).
+_LINE_COPY_FORMATS = ("MSDEVLineSelect", "VisualStudioEditorOperationsLineCutCopyClipboardTag")
+_WEB_CUSTOM_DATA = "Chromium Web Custom MIME Data Format"
+_EMPTY_SELECTION = '"isFromEmptySelection":true'.encode("utf-16-le")
+
+
+def copied_line() -> bool:
+    """Le presse-papiers contient-il une ligne copiée faute de sélection (VS Code, Notepad++, Visual Studio) ?"""
+    if any(user32.IsClipboardFormatAvailable(user32.RegisterClipboardFormatW(name)) for name in _LINE_COPY_FORMATS):
+        return True
+    data = get_clipboard_bytes(int(user32.RegisterClipboardFormatW(_WEB_CUSTOM_DATA)))
+    return bool(data) and _EMPTY_SELECTION in data
+
+
 def get_clipboard_bytes(fmt: int, limit: int = 8 * 1024 * 1024) -> bytes | None:
     """Données brutes d'un format du presse-papiers (None s'il est absent, illisible ou trop gros)."""
     if not _open_clipboard():

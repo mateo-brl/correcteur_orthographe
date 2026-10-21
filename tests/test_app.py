@@ -313,6 +313,30 @@ def test_disabling_hotkeys_removes_the_gnome_shortcuts(qapp, make_controller, mo
     assert calls == [("retirés",), ("créés", ("<ctrl>+<alt>+c", "<ctrl>+<alt>+x"))]
 
 
+def test_disabling_hotkeys_on_gnome_xorg_removes_the_gnome_shortcuts(qapp, make_controller, monkeypatch):
+    """GNOME sur Xorg : les raccourcis GNOME créés sous Wayland (réglages communs aux deux sessions) marchaient
+    encore après « Activer les raccourcis globaux » décoché. Recoché, pynput s'en charge : rien n'est recréé."""
+    from correcteur.ui import app as app_module
+
+    controller, notes = make_controller()
+    monkeypatch.setattr(app_module, "session_type", lambda: "x11")
+    monkeypatch.setattr(app_module, "desktop_name", lambda: "ubuntu:gnome")
+    calls = []
+    monkeypatch.setattr(app_module.autostart, "install_gnome_shortcuts", lambda *keys: calls.append(("créés", keys)))
+    monkeypatch.setattr(app_module.autostart, "remove_gnome_shortcuts", lambda: calls.append(("retirés",)) or "")
+    monkeypatch.setattr(app_module.autostart, "gnome_shortcuts", lambda: {})
+    off = controller.settings.copy()
+    off.general.hotkeys_enabled = False
+    controller.apply_settings(off)
+    assert wait_until(qapp, lambda: controller._gnome_bindings is not None)
+    on = controller.settings.copy()
+    on.general.hotkeys_enabled = True
+    controller.apply_settings(on)
+    qapp.processEvents()
+    assert calls == [("retirés",)]
+    assert not [text for text, _ in notes if "GNOME" in text]  # aucun à retirer : rien à annoncer
+
+
 def test_remove_gnome_shortcuts_keeps_the_others(monkeypatch):
     from correcteur.platform import autostart
 
@@ -331,6 +355,9 @@ def test_remove_gnome_shortcuts_keeps_the_others(monkeypatch):
     assert autostart.remove_gnome_shortcuts() == "Raccourcis GNOME du correcteur retirés."
     assert listed == [f"{base}custom0/"]
     assert sum(1 for c in calls if c[0] == "reset") == 6
+    calls.clear()
+    assert autostart.remove_gnome_shortcuts() == ""  # déjà retirés : rien à faire ni à dire
+    assert calls == []
 
 
 def _open_ready(qapp, window, capture: Capture) -> None:
@@ -645,19 +672,58 @@ def test_crash_log_drops_harmless_windows_exceptions(tmp_path):
 
 def test_taken_hotkeys_are_never_announced_as_ready(qapp, make_controller, monkeypatch):
     """W-19 : portable et installée lancées ensemble : « Raccourci déjà utilisé… » puis « Correcteur prêt : …
-    Ctrl+Alt+X », alors qu'aucun raccourci ne marchait. Le message nomme l'autre Correcteur possible, et « prêt »
-    dit qu'il n'y a pas de raccourci."""
+    Ctrl+Alt+X », alors qu'aucun raccourci ne marchait. Puis « prêt » remplaçait l'explication dans la bulle 0,3 s
+    plus tard : un seul message, qui dit tout, en erreur (il va au journal)."""
     from correcteur.ui import app as app_module
 
     monkeypatch.setattr(app_module, "session_type", lambda: "windows")
 
     class TakenBridge(FakeBridge):
+        taken = ("<ctrl>+<alt>+c", "<ctrl>+<alt>+x")
+
         def start_hotkeys(self, bindings):
-            return list(bindings)
+            return [combo for combo in bindings if combo in self.taken]
 
     controller, notes = make_controller(TakenBridge, startup=False)
     assert wait_until(qapp, lambda: any("prêt" in text for text, _ in notes))
-    taken = next(text for text, error in notes if "déjà utilisé" in text)
-    assert "un autre Correcteur" in taken
-    ready = next(text for text, _ in notes if "prêt" in text)
-    assert "sans ses raccourcis" in ready and "Ctrl+Alt+X" not in ready
+    assert notes == [("Correcteur prêt, sans ses raccourcis clavier : utilisez le menu de son icône.\n"
+                      "Ctrl+Alt+C et Ctrl+Alt+X sont déjà pris par une autre application (un autre Correcteur, "
+                      "installé ou portable, est peut-être déjà lancé) : changez-les dans les paramètres.", True)]
+
+    # Un seul pris : « prêt » ne nomme que celui qui marche.
+    controller.quit()
+    notes.clear()
+    TakenBridge.taken = ("<ctrl>+<alt>+x",)
+    controller, notes = make_controller(TakenBridge, startup=False)
+    assert wait_until(qapp, lambda: any("prêt" in text for text, _ in notes))
+    assert notes == [("Correcteur prêt : sélectionnez du texte puis Ctrl+Alt+C (fenêtre).\n"
+                      "Ctrl+Alt+X est déjà pris par une autre application : changez-le dans les paramètres.", True)]
+
+    # Raccourcis changés plus tard dans les paramètres : pas de « prêt » qui suit, le message vient tout de suite.
+    notes.clear()
+    controller._start_hotkeys()
+    assert notes and notes[0][0].startswith("Raccourci déjà utilisé par une autre application : Ctrl+Alt+X.")
+
+
+def test_ready_message_follows_the_settings(qapp, make_controller, monkeypatch):
+    """Raccourcis désactivés : « prêt » ne promet aucun raccourci, sous Wayland GNOME aussi (il renvoyait au
+    raccourci du bureau que la case venait de retirer). Hors GNOME, sous Wayland, les raccourcis sont ceux du
+    bureau, que la case ne coupe pas."""
+    from correcteur.ui import app as app_module
+
+    controller, _ = make_controller()
+    controller.settings.general.hotkeys_enabled = False
+    controller._hotkeys_active, controller._hotkey_failures = False, []  # comme après _start_hotkeys
+    disabled = ("Correcteur prêt, sans ses raccourcis clavier (désactivés dans les paramètres) : utilisez le menu "
+                "de son icône.")
+    for session, desktop in (("windows", ""), ("x11", "gnome"), ("wayland", "ubuntu:gnome")):
+        monkeypatch.setattr(app_module, "session_type", lambda s=session: s)
+        monkeypatch.setattr(app_module, "desktop_name", lambda d=desktop: d)
+        assert controller._ready_message() == disabled, session
+    monkeypatch.setattr(app_module, "desktop_name", lambda: "kde")
+    assert "raccourci du bureau" in controller._ready_message()
+
+    # Raccourcis globaux indisponibles (pynput absent), sans aucun pris : pas « pris par une autre application ».
+    monkeypatch.setattr(app_module, "session_type", lambda: "x11")
+    controller.settings.general.hotkeys_enabled = True
+    assert "(indisponibles sur ce système)" in controller._ready_message()

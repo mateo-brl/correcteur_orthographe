@@ -240,7 +240,7 @@ def express_message(before: str, after: str, applied: int, remaining: int,
     changes = describe_changes(before, after, limit=3)  # espaces corrigées comptées : la liste suit le nombre
     summary = _plural(applied, "correction appliquée")
     if changes:
-        summary += " : " + changes + ("" if changes.endswith("…") else ".")
+        summary += " : " + changes + ("" if changes.endswith(("…", ".", "!", "?")) else ".")
     lines = [summary if changes else summary + ".", "Ctrl+Z dans l'application pour annuler."]
     if remaining:
         lines.append(f"{_plural(remaining, 'remarque')} à vérifier ({check_hotkey}).")
@@ -363,7 +363,9 @@ class Controller(QObject):
                 QTimer.singleShot(1500, lambda: self.notify(
                     f"{self.ipc.error} Les raccourcis du bureau et « correcteur quitter » ne fonctionneront pas.",
                     error=True))
-        self._start_hotkeys()
+        # Hors ouverture de session (et au premier lancement), « Correcteur prêt » suit et dit quels raccourcis
+        # sont pris.
+        self._start_hotkeys(ready_follows=not startup or not self.settings.general.first_run_done)
         self.checker.warmup()
 
         if not self.settings.general.first_run_done:
@@ -374,7 +376,7 @@ class Controller(QObject):
                 self._ready_pending = True
                 QTimer.singleShot(3000, self._show_ready)
             else:
-                QTimer.singleShot(300, lambda: self.notify(self._ready_message()))
+                QTimer.singleShot(300, self._announce_ready)
 
     def _defer(self, ms: int, fn) -> None:
         QTimer.singleShot(ms, fn)
@@ -433,21 +435,39 @@ class Controller(QObject):
 
     def _ready_message(self) -> str:
         g = self.settings.general
+        wayland = session_type() == "wayland"
+        if not g.hotkeys_enabled and (not wayland or "gnome" in desktop_name()):
+            # Sous Wayland hors GNOME, les raccourcis sont ceux du bureau : la case ne les coupe pas.
+            return ("Correcteur prêt, sans ses raccourcis clavier (désactivés dans les paramètres) : utilisez le "
+                    "menu de son icône.")
         verify_id, express_id = autostart.GNOME_SHORTCUT_IDS
-        works = self._hotkey_works(g.hotkey_check, verify_id) and self._hotkey_works(g.hotkey_autocorrect, express_id)
-        if session_type() == "wayland" and not works:
+        keys = ((g.hotkey_check, verify_id, "fenêtre"), (g.hotkey_autocorrect, express_id, "correction express"))
+        working = [f"{hotkey_display(combo)} ({what})" for combo, gnome_id, what in keys
+                   if self._hotkey_works(combo, gnome_id)]
+        if len(working) == len(keys):
+            return f"Correcteur prêt : sélectionnez du texte puis {working[0]} ou {working[1]}."
+        if wayland:
             return "Correcteur prêt. Utilisez votre raccourci du bureau (commande « correcteur selection »)."
-        if not works and not self._hotkeys_active:
-            # « Correcteur prêt : … Ctrl+Alt+X » suivait l'annonce que ces raccourcis étaient pris.
-            why = "pris par une autre application" if g.hotkeys_enabled else "désactivés dans les paramètres"
-            return f"Correcteur prêt, sans ses raccourcis clavier ({why}) : utilisez le menu de son icône."
-        return (f"Correcteur prêt : sélectionnez du texte puis {hotkey_display(g.hotkey_check)} "
-                f"(fenêtre) ou {hotkey_display(g.hotkey_autocorrect)} (correction express).")
+        taken = [hotkey_display(combo) for combo, _, _ in keys if combo in self._hotkey_failures]
+        if not taken:
+            return ("Correcteur prêt, sans ses raccourcis clavier (indisponibles sur ce système) : utilisez le menu "
+                    "de son icône.")
+        # Un seul message pour « prêt » et les raccourcis pris : le second remplaçait le premier dans la bulle.
+        lead = (f"Correcteur prêt : sélectionnez du texte puis {working[0]}." if working
+                else "Correcteur prêt, sans ses raccourcis clavier : utilisez le menu de son icône.")
+        other = "" if working else " (un autre Correcteur, installé ou portable, est peut-être déjà lancé)"
+        verb, pronoun = ("est", "le") if len(taken) == 1 else ("sont", "les")
+        return (f"{lead}\n{' et '.join(taken)} {verb} déjà pris par une autre application{other} : "
+                f"changez-{pronoun} dans les paramètres.")
+
+    def _announce_ready(self) -> None:
+        # Raccourcis pris : le message est une erreur (et va au journal).
+        self.notify(self._ready_message(), error=bool(self._hotkey_failures))
 
     def _show_ready(self) -> None:
         if self._ready_pending:
             self._ready_pending = False
-            self.notify(self._ready_message())
+            self._announce_ready()
 
     def _hotkey_works(self, combo: str, gnome_id: str) -> bool:
         """Le raccourci fonctionne réellement : raccourcis globaux actifs, ou raccourci GNOME du correcteur
@@ -497,7 +517,8 @@ class Controller(QObject):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
             self.command.emit("ouvrir", "")
 
-    def _start_hotkeys(self) -> None:
+    def _start_hotkeys(self, ready_follows: bool = False) -> None:
+        """`ready_follows` : le message « Correcteur prêt » suit, et dira lui-même quels raccourcis sont pris."""
         self.bridge.stop_hotkeys()
         self._hotkeys_active, self._hotkey_failures = False, []
         g = self.settings.general
@@ -510,7 +531,7 @@ class Controller(QObject):
             failed = self.bridge.start_hotkeys(bindings)
             self._hotkey_failures = failed
             self._hotkeys_active = len(failed) < len(bindings)
-            if failed:
+            if failed and not ready_follows:
                 # Tous pris : souvent un autre Correcteur (installé et portable lancés ensemble).
                 other = (" (un autre Correcteur, installé ou portable, est peut-être déjà lancé)"
                          if len(failed) == len(bindings) else "")
@@ -550,7 +571,9 @@ class Controller(QObject):
                     self.notifyRequested.emit(f"Raccourcis GNOME non mis à jour : {exc}", True)
             if remove:
                 try:
-                    self.notifyRequested.emit(autostart.remove_gnome_shortcuts(), False)
+                    message = autostart.remove_gnome_shortcuts()
+                    if message:
+                        self.notifyRequested.emit(message, False)
                 except Exception as exc:
                     self.notifyRequested.emit(f"Raccourcis GNOME non retirés : {exc}", True)
             try:
@@ -765,14 +788,18 @@ class Controller(QObject):
             except Exception as exc:
                 self.notify(f"Démarrage automatique impossible : {exc}", error=True)
         self._start_hotkeys()
-        if session_type() == "wayland" and "gnome" in desktop_name():
-            # Sous Wayland, les raccourcis sont ceux de GNOME : ils prennent les nouvelles touches, disparaissent
-            # quand les raccourcis globaux sont désactivés et reviennent quand ils sont réactivés.
-            keys = (new.hotkey_check, new.hotkey_autocorrect)
-            if old.hotkeys_enabled and not new.hotkeys_enabled:
+        if "gnome" in desktop_name():
+            if session_type() == "wayland":
+                # Sous Wayland, les raccourcis sont ceux de GNOME : ils prennent les nouvelles touches, disparaissent
+                # quand les raccourcis globaux sont désactivés et reviennent quand ils sont réactivés.
+                keys = (new.hotkey_check, new.hotkey_autocorrect)
+                if old.hotkeys_enabled and not new.hotkeys_enabled:
+                    self._read_gnome_shortcuts(warn_missing=False, remove=True)
+                elif new.hotkeys_enabled and (hotkeys_changed or not old.hotkeys_enabled):
+                    self._read_gnome_shortcuts(warn_missing=False, install=keys)
+            elif old.hotkeys_enabled and not new.hotkeys_enabled:
+                # GNOME sur Xorg : ceux créés sous Wayland (réglages communs aux deux sessions) marcheraient encore.
                 self._read_gnome_shortcuts(warn_missing=False, remove=True)
-            elif new.hotkeys_enabled and (hotkeys_changed or not old.hotkeys_enabled):
-                self._read_gnome_shortcuts(warn_missing=False, install=keys)
         self.checker.warmup()
 
     def _follow_theme(self) -> None:
@@ -802,7 +829,7 @@ class Controller(QObject):
                 self.checker.warmup()
         if session_type() == "wayland" or self.tray is None:
             self.open_settings()
-        self.notify(self._ready_message())
+        self._announce_ready()
 
     def quit(self) -> None:
         if self._stopped:
