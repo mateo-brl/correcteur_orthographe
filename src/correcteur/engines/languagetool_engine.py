@@ -132,6 +132,9 @@ class LanguageToolEngine(Engine):
     def warmup(self) -> None:
         if self.mode == "local" and self.server is not None:
             self.server.ensure_started()
+        # Client HTTP prêt avant la première vérification (import de httpx, certificats) : sinon elle attendait
+        # aussi ce chargement avant d'envoyer le texte.
+        self._http()
 
     def close(self) -> None:
         with self._client_lock:
@@ -172,6 +175,8 @@ class LanguageToolEngine(Engine):
         return params
 
     def _request(self, text: str, language: str) -> list[tuple]:
+        # Client d'abord : si le préchargement est en train de le créer (et d'importer httpx), on l'attend.
+        client = self._http()
         import httpx
 
         if self.mode == "local" and self.server is not None:
@@ -179,7 +184,7 @@ class LanguageToolEngine(Engine):
         self._throttle()
         data = {"text": text, **self._params(language)}
         try:
-            resp = self._http().post(self.base_url() + "/v2/check", data=data)
+            resp = client.post(self.base_url() + "/v2/check", data=data)
         except httpx.TimeoutException as exc:
             raise EngineError("LanguageTool ne répond pas (délai dépassé).") from exc
         except httpx.HTTPError as exc:

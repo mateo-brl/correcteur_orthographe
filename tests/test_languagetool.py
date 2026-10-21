@@ -115,6 +115,17 @@ def test_results_are_cached(settings):
     assert len(server.requests) == 1
 
 
+def test_warmup_prepares_the_http_client(settings):
+    """Préchargement : le client HTTP (import de httpx, certificats) est prêt avant la première vérification, sans
+    rien envoyer ; elle s'en sert ensuite."""
+    engine = LanguageToolEngine(settings)
+    engine.warmup()
+    client = engine._client
+    assert client is not None
+    assert engine._http() is client
+    engine.close()
+
+
 def test_long_text_is_split_in_chunks(settings):
     paragraph = "Les enfant jouent dans le jardin pendant que les parents discutent. " * 20 + "\n"
     text = paragraph * 20  # ~27 000 caractères > limite de l'API publique

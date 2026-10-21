@@ -47,6 +47,11 @@ if sys.platform.startswith("linux"):
 _unused = ("libqgtk3", "libgtk-3", "libgdk-3", "libatk-1.0", "libatk-bridge-2.0")
 a.binaries = [b for b in a.binaries if not any(part in b[0] for part in _unused)]
 
+# Le crochet d'exécution de PyInstaller pour PySide6 importe QtCore à chaque lancement (0,1 s), pour un qt.conf que
+# PySide6 crée déjà lui-même : la ligne de commande le payait sans jamais ouvrir de fenêtre. lancer.py pose ses
+# chemins (plugins de Qt).
+a.scripts = [script for script in a.scripts if script[0] != "pyi_rth_pyside6"]
+
 pyz = PYZ(a.pure)
 
 common = dict(debug=False, bootloader_ignore_signals=False, strip=False, upx=False,

@@ -354,9 +354,12 @@ flowchart LR
 
 <br>
 
-- Grammalecte est préchargé au démarrage et garde un cache par paragraphe : seul le paragraphe modifié est
-  réanalysé.
-- LanguageTool garde un cache et une connexion ouverte ; les longs textes sont découpés automatiquement.
+- Grammalecte et les règles du correcteur sont préchargés au démarrage, et Grammalecte garde un cache par
+  paragraphe : seul le paragraphe modifié est réanalysé.
+- LanguageTool garde un cache et une connexion ouverte, et son client réseau est prêt dès le démarrage ; les longs
+  textes sont découpés automatiquement.
+- Le canal de commande s'ouvre dès le lancement, avant l'interface : un raccourci tapé pendant le démarrage attend
+  que l'application soit prête.
 - Pendant la frappe, seul Grammalecte est relancé tout de suite. LanguageTool attend une courte pause.
 - En correction express, LanguageTool a 8 secondes pour répondre (réseau lent, serveur local qui démarre). Passé ce
   délai, Grammalecte corrige seul avec ses règles prudentes, et la réponse de LanguageTool, gardée en cache, sert à
