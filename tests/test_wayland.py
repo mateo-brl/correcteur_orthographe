@@ -155,6 +155,7 @@ class Desktop:
 
         args = cmd[1:]
         if self.blocked and name in ("wl-paste", "wl-copy"):
+            self.clock.sleep(kwargs.get("timeout", 1.5))  # délai d'attente écoulé, gestes de l'utilisateur compris
             raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1.5))
         if name == "wl-paste":
             if "--primary" in args:
@@ -685,15 +686,16 @@ def test_marker_is_never_in_the_clipboard_history(setup):
 
 def test_copy_is_read_at_once_without_polling(setup):
     """Le marqueur est gardé par wl-copy --foreground : il s'arrête dès que l'application copie, et le texte est
-    lu une seule fois, sans wl-paste répétés (chacun prend le focus un instant sous GNOME)."""
+    lu une seule fois, sans wl-paste répétés (chacun prend le focus un instant sous GNOME), puis ses formats (cellule
+    de Calc, voir test_calc_cell_copy_mode_is_left_at_once)."""
     wl, desktop, _ = setup()
     desktop.set_text("témoin")
     desktop.selected = "Ces un test"
     capture = wl.capture()
     assert capture.text == "Ces un test"
     (copy_at,) = desktop.times("ydotool")
-    reads = [t for t, cmd, _ in desktop.calls if os.path.basename(cmd[0]) == "wl-paste" and t > copy_at]
-    assert len(reads) == 1 and reads[0] - copy_at <= 0.1
+    reads = [(t, cmd) for t, cmd, _ in desktop.calls if os.path.basename(cmd[0]) == "wl-paste" and t > copy_at]
+    assert len(reads) == 2 and reads[0][0] - copy_at <= 0.1 and "--list-types" in reads[1][1]
 
 
 # P12 : une copie faite pendant la capture n'est pas écrasée
@@ -744,7 +746,7 @@ def test_express_never_pastes_after_any_activity_on_gnome(setup, what):
     capture, (ok, message) = _express_with(wl, desktop, clock, "Ça fait longtemps qu'on ne s'est pas vu !", act)
     assert capture.text == "Sa fait longtemps qu'on ne c'est pas vu !"
     assert not ok and message == bridge._BUSY_GNOME and desktop.pasted == []
-    assert len(desktop.ran("ydotool", "110:1")) == 1 and len(desktop.ran("wl-paste")) == 3  # rien de relu
+    assert len(desktop.ran("ydotool", "110:1")) == 1 and len(desktop.ran("wl-paste")) == 4  # rien de relu
     clock.advance(10)
     assert desktop.text() == "témoin"
 
@@ -812,21 +814,60 @@ def test_unreadable_copy_while_typing_still_gives_back_the_clipboard(setup):
     wl.begin_capture()
     capture = wl.capture(express=True)
     wl.end_capture(capture)
-    assert capture.text == "" and capture.problem == bridge._BUSY_GNOME
+    assert capture.text == "" and capture.problem == bridge._BUSY_READING
     wl.release(capture)
     clock.advance(20)
     assert desktop.text() == "témoin" and desktop.restores() == ["témoin"]
 
 
+def test_unreadable_copy_is_read_again_after_a_pause(setup):
+    """L-18 : quand la frappe s'arrête vite, la copie est relue après la pause : le texte lu permet ensuite de
+    garder une copie faite par l'utilisateur entre-temps (le témoin ne l'écrase pas)."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "Sa fait longtemps qu'on ne c'est pas vu !"
+    for k in range(13):  # frappe jusqu'à 1,2 s après l'appui
+        clock.at(clock.now + 0.1 * k, lambda: setattr(desktop, "last_input", clock.now))
+    clock.at(clock.now + 0.3, lambda: desktop.failures.__setitem__("wl-paste", "lecture"))
+    clock.at(clock.now + 1.0, lambda: desktop.failures.pop("wl-paste"))
+    wl.begin_capture()
+    capture = wl.capture(express=True)
+    wl.end_capture(capture)
+    assert capture.text == "Sa fait longtemps qu'on ne c'est pas vu !" and capture.left == capture.text
+    assert not wl.replace(capture, "Ça fait longtemps qu'on ne s'est pas vu !")[0]  # activité : rien de collé
+    desktop.set_text("NOUVEAU")  # copie de l'utilisateur, avant la restauration
+    clock.advance(20)
+    assert desktop.text() == "NOUVEAU"
+
+
+@pytest.mark.parametrize("typing", [False, True])
+def test_unreadable_before_the_copy(setup, typing):
+    """Presse-papiers bloqué dès la lecture d'avant la copie : « renommage de fichier » sans activité, lecture
+    interrompue s'il y a eu une frappe après le relâchement du raccourci."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.blocked = True
+    desktop.last_input = clock.now - 5.0
+    if typing:  # pendant les 1,5 s d'attente de wl-paste
+        clock.at(clock.now + 0.8, lambda: setattr(desktop, "last_input", clock.now))
+    capture = wl.capture(express=False)
+    assert capture.problem == (bridge._BUSY_READING if typing else bridge._UNREADABLE)
+
+
 def test_calc_cell_copy_mode_is_left_at_once(setup):
-    """L-03 : cellule de Calc sélectionnée hors édition. La copie simulée met Calc en mode copie, et Entrée y
-    collait ensuite le presse-papiers du moment (le témoin, une fois remis, remplaçait la cellule corrigée) : Échap
-    juste après la copie, texte juste compris. En édition (F2), pas d'Échap : il annulerait la saisie."""
-    for line, fixed in (("Les enfants on faim.\n", "Les enfants ont faim.\n"), ("Il pense à toi.\n", None)):
+    """L-03 : cellule de Calc sélectionnée hors édition (cellule seule, sans retour à la ligne, ou plage). La copie
+    simulée met Calc en mode copie, et Entrée y collait ensuite le presse-papiers du moment (le témoin, une fois
+    remis, remplaçait la cellule corrigée) : Échap juste après la copie, texte juste compris. L'Échap simulé n'est
+    pas un geste de l'utilisateur : la correction est collée. En édition (F2), pas d'Échap : il annulerait la saisie."""
+    cell = {"application/x-libreoffice-tsvc": b"Les enfants on faim."}
+    for line, fixed in (("Les enfants on faim.", "Les enfants ont faim."),
+                        ("Les enfants on faim.\nIl pense à toi.\n", "Les enfants ont faim.\nIl pense à toi.\n"),
+                        ("Il pense à toi.", None)):
         wl, desktop, clock = setup()
         desktop.set_text("témoin")
         desktop.selected = line
-        desktop.selected_formats = {"application/x-libreoffice-tsvc": b"Les enfants on faim.\n"}
+        desktop.selected_formats = cell
+        desktop.last_input = clock.now  # compteur d'inactivité réel : les frappes simulées comptent
         wl.begin_capture()
         capture = wl.capture(express=True)
         wl.end_capture(capture)
@@ -844,9 +885,35 @@ def test_calc_cell_copy_mode_is_left_at_once(setup):
 
     wl, desktop, clock = setup()
     desktop.set_text("témoin")
-    desktop.selected = "Les enfants on faim.\n"  # cellule en édition : pas de format de cellule
-    express(wl, "Les enfants ont faim.\n")
+    desktop.selected = "Les enfants on faim."  # cellule en édition : pas de format de cellule
+    express(wl, "Les enfants ont faim.")
     assert desktop.ran("ydotool", "1:1") == []
+
+
+def test_calc_escape_never_follows_the_user(setup):
+    """L'utilisateur a tapé ou changé de fenêtre entre la copie de la cellule et l'Échap : il n'est pas envoyé (il
+    annulerait la saisie commencée dans la cellule, ou partirait dans l'autre fenêtre)."""
+    wl, desktop, clock = setup()
+    desktop.set_text("témoin")
+    desktop.selected = "Les enfants on faim."
+    desktop.selected_formats = {"application/x-libreoffice-tsvc": b"Les enfants on faim."}
+    desktop.last_input = clock.now
+    clock.at(clock.now + 0.8, lambda: setattr(desktop, "last_input", clock.now))  # frappe après la copie
+    capture = wl.capture(express=True)
+    assert capture.text == "Les enfants on faim." and desktop.ran("ydotool", "1:1") == []
+
+
+def test_calc_cell_read_again_without_idle_counter_is_left_too(setup):
+    """Hors de GNOME, la sélection est relue avant le collage : la nouvelle copie remet Calc en mode copie, et elle
+    est suivie d'un Échap elle aussi, avant le Ctrl+V."""
+    wl, desktop, clock = setup(gnome=False)
+    desktop.set_text("témoin")
+    desktop.selected = "Les enfants on faim."
+    desktop.selected_formats = {"application/x-libreoffice-tsvc": b"Les enfants on faim."}
+    _, (ok, _) = _express_with(wl, desktop, clock, "Les enfants ont faim.")
+    copies, escapes, paste = desktop.times("ydotool", "110:1"), desktop.times("ydotool", "1:1"), desktop.times(
+        "ydotool", "47:1")
+    assert ok and len(copies) == 2 and len(escapes) == 2 and copies[-1] < escapes[-1] < paste[0]
 
 
 def test_copy_then_escape_never_restores(setup, caplog):
@@ -922,16 +989,19 @@ def test_blocked_clipboard_is_said_unreadable(setup):
 def test_google_docs_gets_no_extra_paragraphs(setup):
     """L-15 : Google Docs met un retour à la ligne par fin de paragraphe sélectionnée (un de plus pour tout le
     document), et la fin de paragraphe qui termine la sélection reste au collage : recollés, ils ajoutaient des
-    paragraphes vides, au document entier comme à un paragraphe du milieu (Début, Maj+Bas). Ailleurs, rien ne change,
-    et le HTML n'est lu que pour une copie de Chromium."""
-    docs = {"chromium/x-web-custom-data": b"\x10\0\0\0",
-            "text/html": b'<meta charset="utf-8"><b id="docs-internal-guid-12ab">Je les ai mit au frigo.</b>'}
-    for copied, fixed in (("Je les ai mit au frigo.\n\n", "Je les ai mis au frigo.\n\n"),
-                          ("Les enfants on faim.\n", "Les enfants ont faim.\n")):
+    paragraphes vides, au document entier comme à un paragraphe du milieu (Début, Maj+Bas), dans Chrome comme dans
+    Firefox. Ailleurs, rien ne change, et le HTML n'est lu que pour une copie de navigateur."""
+    html = b'<meta charset="utf-8"><b id="docs-internal-guid-12ab">Je les ai mit au frigo.</b>'
+    chrome = {"chromium/x-web-custom-data": b"\x10\0\0\0", "text/html": html}
+    firefox = {"application/x-moz-custom-clipdata": b"\0\0\0\0", "text/html": html}
+    for copied, fixed, browser in (("Je les ai mit au frigo.\n\n", "Je les ai mis au frigo.\n\n", chrome),
+                                   ("Les enfants on faim.\n", "Les enfants ont faim.\n", chrome),
+                                   ("Je les ai mit au frigo.\n\n", "Je les ai mis au frigo.\n\n", firefox),
+                                   ("Les enfants on faim.\n", "Les enfants ont faim.\n", firefox)):
         wl, desktop, clock = setup()
         desktop.set_text("témoin")
         desktop.selected = copied
-        desktop.selected_formats = docs
+        desktop.selected_formats = browser
         capture, (ok, _) = express(wl, fixed)
         assert capture.docs and ok and desktop.pasted == [fixed.rstrip("\n")]
         clock.advance(10)  # restauration faite avant le bureau suivant (même horloge)

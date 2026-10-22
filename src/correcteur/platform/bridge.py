@@ -66,12 +66,19 @@ _STILL_BUSY = ("Correction non collée : clavier ou souris en action pendant qu'
 _BUSY_GNOME = ("Correction non collée : clavier ou souris en action pendant qu'elle se faisait. Rien n'a été collé, "
                "mais une touche tapée à ce moment a pu se perdre : vérifiez le texte, puis recommencez sans y toucher "
                "avant la notification.")
+# Même chose, pendant la lecture de la sélection (rien n'a encore été corrigé).
+_BUSY_READING = ("Lecture de la sélection interrompue : clavier ou souris en action pendant la copie. Une touche tapée "
+                 "à ce moment a pu se perdre : vérifiez le texte, puis recommencez sans y toucher.")
 # Ligne entière copiée faute de sélection par VS Code (et les éditeurs faits avec Chromium) : ils le disent dans
 # leurs données personnalisées, en UTF-16. Ce n'est pas une sélection : la corriger la collerait au curseur.
 _WEB_CUSTOM_DATA = "chromium/x-web-custom-data"
 _EMPTY_SELECTION = '"isFromEmptySelection":true'.encode("utf-16-le")
+# Données personnalisées d'une page copiée dans Firefox : avec celles de Chromium, la marque d'une copie de navigateur,
+# dont le HTML peut venir de Google Docs (voir pasted_text).
+_FIREFOX_CUSTOM_DATA = "application/x-moz-custom-clipdata"
 # Cellule de Calc copiée hors édition : Calc passe en mode copie, et Entrée colle alors le presse-papiers du moment
-# (le contenu d'origine, une fois remis, remplaçait la cellule corrigée). Échap quitte ce mode, juste après la copie.
+# (le contenu d'origine, une fois remis, remplaçait la cellule corrigée). Échap quitte ce mode, juste après la copie,
+# sauf si l'utilisateur a déjà agi (il annulerait une saisie commencée, ou partirait dans une autre fenêtre).
 _CALC_CELL = "application/x-libreoffice-tsvc"
 # Wayland : wl-paste ou wl-copy bloqués tant que certaines fenêtres sont ouvertes (renommage dans Fichiers,
 # recherche de la vue d'ensemble de GNOME).
@@ -520,9 +527,10 @@ class WindowsBridge(Bridge):
             time.sleep(0.02)  # certaines applications écrivent en plusieurs fois
             copied = (w.get_clipboard_text() or "").replace("\r\n", "\n")
         text = copied
-        if copied.endswith("\n") and w.copied_cells():
+        if changed and w.copied_cells() and not (watch is not None and watch.acted):
             # Calc passe en mode copie, où Entrée colle le presse-papiers du moment (le contenu d'origine, une fois
-            # remis, remplaçait la cellule corrigée) : Échap le quitte.
+            # remis, remplaçait la cellule corrigée) : Échap le quitte. Pas après une frappe de l'utilisateur, qu'il
+            # annulerait.
             log.info("Cellules de tableur copiées (%s) : Échap pour quitter le mode copie.", w.window_class(hwnd))
             w.send_escape()
         if copied.endswith("\n") and w.copied_line():
@@ -892,7 +900,7 @@ class X11Bridge(Bridge):
             if text.strip():
                 # Aucune frappe simulée : l'activité compte à partir du relâchement des touches du raccourci.
                 return Capture(text, target=target, from_selection=True, started=started,
-                               keys_at=started + _KEYS_RELEASE_S, docs=self._inspect(text, "PRIMARY")[1])
+                               keys_at=started + _KEYS_RELEASE_S)
         # Pas de sélection primaire de l'application active : copie simulée (Ctrl+Inser). Le presse-papiers n'est
         # marqué (voir _clipboard_marker) que s'il ne contient que du texte qu'on a pu lire ; sinon, on compare avec
         # son contenu d'avant.
@@ -923,37 +931,41 @@ class X11Bridge(Bridge):
             if text and text != before:
                 break
         changed = bool(text) and text != before
-        line, docs = self._inspect(text) if changed else (False, False)
+        line, docs, keys_at = self._inspect(text, keys_at) if changed else (False, False, keys_at)
         selected = changed and not line
         return Capture(text if selected else "", target=target, from_selection=selected,
                        saved_clipboard=saved, clipboard_touched=changed or marked, started=started,
                        left=text if changed else (marker if marked else None), keys_at=keys_at,
                        docs=docs and selected)
 
-    def _inspect(self, text: str, selection: str = "CLIPBOARD") -> tuple[bool, bool]:
-        """(ligne entière copiée faute de sélection, copie de Google Docs) d'après les formats de `selection`,
-        regardés seulement quand le texte finit par un retour à la ligne (voir _EMPTY_SELECTION et pasted_text). Une
-        cellule de Calc copiée reçoit Échap (voir _CALC_CELL) ; la sélection primaire, lue sans copie simulée, n'en
-        a pas besoin."""
-        if not text.endswith("\n"):
-            return False, False
+    def _inspect(self, text: str, keys_at: float) -> tuple[bool, bool, float]:
+        """(ligne entière copiée faute de sélection, copie de Google Docs, heure de la dernière frappe simulée)
+        d'après les formats du presse-papiers, copié par l'application à `keys_at` (voir _EMPTY_SELECTION et
+        pasted_text). Une cellule de Calc copiée reçoit Échap (voir _CALC_CELL), qui n'est pas un geste de
+        l'utilisateur : l'heure rendue est celle de l'Échap."""
         try:
             from correcteur.platform.x11_selection import read_target, selection_targets
         except ImportError:
-            return False, False
-        targets = selection_targets(selection) or []
-        if selection == "CLIPBOARD" and _CALC_CELL in targets:
-            log.info("Cellule de Calc copiée : Échap pour quitter son mode copie.")
-            try:
-                self._send_keys("escape")
-            except Exception:
-                pass
-        if _WEB_CUSTOM_DATA not in targets:
-            return False, False
-        if _EMPTY_SELECTION in (read_target(selection, _WEB_CUSTOM_DATA) or b""):
+            return False, False, keys_at
+        targets = selection_targets("CLIPBOARD") or []
+        if _CALC_CELL in targets:
+            if self._acted_since(keys_at):
+                log.info("Cellule de Calc copiée, mais activité depuis : pas d'Échap.")
+            else:
+                log.info("Cellule de Calc copiée : Échap pour quitter son mode copie.")
+                try:
+                    self._send_keys("escape")
+                    keys_at = time.monotonic()
+                except Exception:
+                    pass
+        if not text.endswith("\n"):
+            return False, False, keys_at
+        if _WEB_CUSTOM_DATA in targets and _EMPTY_SELECTION in (read_target("CLIPBOARD", _WEB_CUSTOM_DATA) or b""):
             log.info("Ligne entière copiée faute de sélection : ignorée.")
-            return True, False
-        return False, "text/html" in targets and _GOOGLE_DOCS in (read_target(selection, "text/html") or b"")
+            return True, False, keys_at
+        browser = _WEB_CUSTOM_DATA in targets or _FIREFOX_CUSTOM_DATA in targets
+        docs = browser and "text/html" in targets and _GOOGLE_DOCS in (read_target("CLIPBOARD", "text/html") or b"")
+        return False, docs, keys_at
 
     def _idle_ms(self) -> int | None:
         """Temps depuis la dernière frappe ou le dernier mouvement de souris (extension MIT-SCREEN-SAVER), None si
@@ -991,6 +1003,7 @@ class X11Bridge(Bridge):
             text = self._read("CLIPBOARD")  # le marqueur n'offre aucun texte : tout texte lu vient de la copie
             if text:
                 self._borrow(capture, text)
+                capture.keys_at = self._inspect(text, capture.keys_at)[2]  # Calc : de nouveau en mode copie
                 return text
         return ""
 
@@ -1360,10 +1373,11 @@ class WaylandBridge(Bridge):
         capture = self._capture(time.monotonic())
         capture.express = express
         if not capture.text and self._timeouts > timeouts:
-            # Pas « Aucun texte sélectionné » : la sélection n'a pas pu être lue. Après la copie simulée, c'est en
-            # général une frappe pendant la lecture ; avant, une fenêtre qui bloque le presse-papiers.
-            busy = capture.keys_at and self._acted_since(capture.keys_at)
-            capture.problem = _BUSY_GNOME if busy else _UNREADABLE
+            # Pas « Aucun texte sélectionné » : la sélection n'a pas pu être lue. Pendant une frappe, wl-paste
+            # n'obtient pas le focus ; sans frappe, c'est une fenêtre qui bloque le presse-papiers. Avant la copie
+            # simulée, l'activité compte après le relâchement des touches du raccourci.
+            busy = self._acted_since(capture.keys_at or capture.started + 2 * _KEYS_RELEASE_S)
+            capture.problem = _BUSY_READING if busy else _UNREADABLE
         return capture
 
     def _capture(self, started: float) -> Capture:
@@ -1404,6 +1418,10 @@ class WaylandBridge(Bridge):
                                    owner=owner)
                 time.sleep(0.02)
             text = self._paste(primary=False)
+            if text is None and self._wait_for_pause():
+                # Pendant une frappe, wl-paste n'obtient pas le focus sous GNOME : une fois la pause venue, il le
+                # peut. Le texte lu permet ensuite de voir si l'utilisateur a copié autre chose (voir _still_left).
+                text = self._paste(primary=False)
             if text is None:
                 log.info("Copie de l'application illisible : le contenu d'origine sera remis quand même.")
                 return Capture("", saved_clipboard=saved, clipboard_touched=True, started=started, left=_APP_COPY,
@@ -1421,24 +1439,35 @@ class WaylandBridge(Bridge):
             time.sleep(step)
 
     def _copied(self, text: str, saved: Any, started: float, keys_at: float) -> Capture:
-        """Capture de `text`, copié par l'application. Ses formats ne sont regardés que s'il finit par un retour à la
-        ligne (sous GNOME, chaque lecture prend le focus un instant) : ligne entière copiée faute de sélection (voir
-        _EMPTY_SELECTION), copie de Google Docs (voir pasted_text), ou cellule de Calc, qui reçoit Échap (voir
-        _CALC_CELL)."""
-        types = (self._clipboard_types() or []) if text.endswith("\n") else []
-        if _CALC_CELL in types:
-            log.info("Cellule de Calc copiée : Échap pour quitter son mode copie.")
-            self._wait_for_keys(started)
-            self._send_keys("escape")
+        """Capture de `text`, copié par l'application à `keys_at`. Ses formats disent si c'est une cellule de Calc,
+        qui reçoit Échap (voir _leave_calc_copy) ; quand le texte finit par un retour à la ligne, si c'est une ligne
+        entière copiée faute de sélection (voir _EMPTY_SELECTION) ou une copie de Google Docs (voir pasted_text).
+        Sous GNOME, chaque lecture prend le focus un instant : le HTML n'est lu que pour une copie de navigateur."""
+        types = self._clipboard_types() or []
+        keys_at = self._leave_calc_copy(types, started, keys_at)
         selected, docs = text, False
-        if _WEB_CUSTOM_DATA in types:  # copie faite par Chromium : VS Code, Google Docs
-            if _EMPTY_SELECTION in (self._paste_bytes(_WEB_CUSTOM_DATA) or b""):
+        if text.endswith("\n"):
+            if _WEB_CUSTOM_DATA in types and _EMPTY_SELECTION in (self._paste_bytes(_WEB_CUSTOM_DATA) or b""):
                 log.info("Ligne entière copiée faute de sélection : ignorée.")
                 selected = ""
-            elif "text/html" in types:
+            elif "text/html" in types and (_WEB_CUSTOM_DATA in types or _FIREFOX_CUSTOM_DATA in types):
                 docs = _GOOGLE_DOCS in (self._paste_bytes("text/html") or b"")
         return Capture(selected, from_selection=bool(selected), saved_clipboard=saved, clipboard_touched=True,
                        started=started, left=text, keys_at=keys_at, docs=docs)
+
+    def _leave_calc_copy(self, types: list[str], started: float, keys_at: float) -> float:
+        """Échap pour une cellule de Calc copiée (voir _CALC_CELL), une fois le focus revenu et si l'utilisateur
+        n'a rien fait depuis la copie. Rend l'heure de la dernière frappe simulée : l'Échap ne compte pas comme un
+        geste de l'utilisateur (voir _acted_since)."""
+        if _CALC_CELL not in types:
+            return keys_at
+        self._wait_for_keys(started)
+        if self._acted_since(keys_at):
+            log.info("Cellule de Calc copiée, mais activité depuis : pas d'Échap.")
+            return keys_at
+        log.info("Cellule de Calc copiée : Échap pour quitter son mode copie.")
+        self._send_keys("escape")
+        return time.monotonic()
 
     def _copy_limit(self) -> float:
         """Temps laissé à l'application pour copier sa sélection après le Ctrl+Inser simulé."""
@@ -1471,6 +1500,8 @@ class WaylandBridge(Bridge):
         text = self._paste(primary=False)
         capture.owner = None
         self._borrow(capture, text if text is not None else "")
+        if text is not None:
+            capture.keys_at = self._leave_calc_copy(self._clipboard_types() or [], 0.0, capture.keys_at)
         return text
 
     def focused_capture(self) -> Capture | None:
