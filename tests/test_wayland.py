@@ -919,18 +919,27 @@ def test_blocked_clipboard_is_said_unreadable(setup):
 
 
 
-def test_google_docs_whole_document_gets_no_extra_paragraphs(setup):
-    """L-15 : Google Docs, tout le document sélectionné : le texte copié finit par deux retours à la ligne, recollés
-    à chaque correction (deux paragraphes vides de plus à chaque fois). Ailleurs, rien ne change."""
-    wl, desktop, clock = setup()
-    desktop.set_text("témoin")
-    desktop.selected = "Je les ai mit au frigo.\n\n"
-    desktop.selected_html = b'<meta charset="utf-8"><b id="docs-internal-guid-12ab">Je les ai mit au frigo.</b>'
-    capture, (ok, _) = express(wl, "Je les ai mis au frigo.\n\n")
-    assert capture.docs and ok and desktop.pasted == ["Je les ai mis au frigo."]
+def test_google_docs_gets_no_extra_paragraphs(setup):
+    """L-15 : Google Docs met un retour à la ligne par fin de paragraphe sélectionnée (un de plus pour tout le
+    document), et la fin de paragraphe qui termine la sélection reste au collage : recollés, ils ajoutaient des
+    paragraphes vides, au document entier comme à un paragraphe du milieu (Début, Maj+Bas). Ailleurs, rien ne change,
+    et le HTML n'est lu que pour une copie de Chromium."""
+    docs = {"chromium/x-web-custom-data": b"\x10\0\0\0",
+            "text/html": b'<meta charset="utf-8"><b id="docs-internal-guid-12ab">Je les ai mit au frigo.</b>'}
+    for copied, fixed in (("Je les ai mit au frigo.\n\n", "Je les ai mis au frigo.\n\n"),
+                          ("Les enfants on faim.\n", "Les enfants ont faim.\n")):
+        wl, desktop, clock = setup()
+        desktop.set_text("témoin")
+        desktop.selected = copied
+        desktop.selected_formats = docs
+        capture, (ok, _) = express(wl, fixed)
+        assert capture.docs and ok and desktop.pasted == [fixed.rstrip("\n")]
+        clock.advance(10)  # restauration faite avant le bureau suivant (même horloge)
 
     wl, desktop, clock = setup()
     desktop.set_text("témoin")
     desktop.selected = "Ligne un\n\n"  # éditeur de texte : les lignes vides sélectionnées restent
+    desktop.selected_formats = {"text/html": b"<p>Ligne un</p>"}
     capture, (ok, _) = express(wl, "Ligne une\n\n")
     assert not capture.docs and desktop.pasted == ["Ligne une\n\n"]
+    assert desktop.ran("wl-paste", "text/html") == []
