@@ -172,7 +172,8 @@ pendant qu'elle se fait, rien n'est collé : la sélection a pu bouger, et le te
 correcteur le dit, et vous rend votre presse-papiers. Sous Linux, le moindre geste compte : sous GNOME, un simple
 mouvement de souris pendant la correction suffit pour qu'elle ne soit pas collée (relire la sélection ferait perdre
 une touche, voir plus bas) ; sous X11, le correcteur attend une courte pause, relit la sélection, et colle si elle
-n'a pas changé. Sans sélection, VS Code et Notepad++ copient la ligne entière : le correcteur le repère et
+n'a pas changé. Un nouvel appui sur le raccourci pendant la correction la fait reprendre sur la sélection du
+moment. Sans sélection, VS Code et Notepad++ copient la ligne entière : le correcteur le repère et
 répond « Aucun texte sélectionné » au lieu de coller cette ligne au curseur. Sous Windows, ses messages s'affichent
 dans une bulle à lui, visible même en mode « Ne pas déranger ».
 
