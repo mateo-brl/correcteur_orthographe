@@ -173,7 +173,7 @@ class Settings:
 
 
 # Ponctuation finale du message, restée dans les libellés notés par la 0.1.14 et la 0.1.15 : « Pléonasme. : « … » ».
-_LABEL_END_RE = re.compile(r"[.,;:!?]+ : « ")
+_LABEL_END_RE = re.compile(r"\s*[.,;:!?]+ : « ")
 
 
 def _tidy_rule_label(label: str) -> str:

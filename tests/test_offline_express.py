@@ -38,6 +38,8 @@ FIXED = [
     ("Je leurs parle.", "Je leur parle."),
     ("Il faut mangé.", "Il faut manger."),
     ("Sa va ?", "Ça va ?"),
+    # Espace après une virgule devant une élision : la suggestion « j » précédée d'une espace ne coupe aucun mot.
+    ("Oui,j'arrive tout de suite.", "Oui, j'arrive tout de suite."),
     ("Quand à lui, il reste.", "Quant à lui, il reste."),
     ("Il viendra peut être demain.", "Il viendra peut-être demain."),
     ("Il pense a toi.", "Il pense à toi."),
