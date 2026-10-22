@@ -813,22 +813,24 @@ def test_rules_sharing_a_label_are_one_line(qapp, home):
     settings = Settings()
     settings.ignored_rules = [pleo, "ANCIENNE", lt, "AUTRE"]
     old = "Pléonasme. : « au jour d'aujourd'hui »"  # noté par la 0.1.15
-    settings.rule_labels = {pleo: old, lt: old}
+    asked = "Erreur de frappe ? : « 1a »"  # message terminé par « ? » (typographie française)
+    settings.rule_labels = {pleo: old, lt: old, "AUTRE": asked}
     controller = FakeController(settings, PersonalDictionary())
     dialog = SettingsDialog(settings, controller)
     items = [dialog.rules.item(i) for i in range(dialog.rules.count())]
-    assert [i.text() for i in items] == ["Pléonasme : « au jour d'aujourd'hui »", "ANCIENNE", "AUTRE"]
+    assert [i.text() for i in items] == ["Pléonasme : « au jour d'aujourd'hui »", "ANCIENNE",
+                                         "Erreur de frappe : « 1a »"]
     assert items[0].toolTip() == f"{pleo}\n{lt}" and items[1].toolTip() == "ANCIENNE"
     dialog.rules.takeItem(1)
     dialog._accept()
     assert controller.settings.ignored_rules == [pleo, lt, "AUTRE"]
-    assert controller.settings.rule_labels == {pleo: old, lt: old}
+    assert controller.settings.rule_labels == {pleo: old, lt: old, "AUTRE": asked}
 
     dialog = SettingsDialog(controller.settings, controller)
     assert dialog.rules.count() == 2
     dialog.rules.takeItem(0)
     dialog._accept()
-    assert controller.settings.ignored_rules == ["AUTRE"] and controller.settings.rule_labels == {}
+    assert controller.settings.ignored_rules == ["AUTRE"] and controller.settings.rule_labels == {"AUTRE": asked}
 
 
 def test_rule_label_drops_the_final_punctuation():
@@ -844,6 +846,12 @@ def test_rule_label_drops_the_final_punctuation():
     assert rule_label(long, text) == "a" * 77 + "… : « Au »"
     inserted = Issue(2, 2, "Il manque une virgule.", [","], Category.TYPOGRAPHY, "X", "languagetool")
     assert rule_label(inserted, text) == "Il manque une virgule"
+    # Hors ligne, la zone est réduite à ce qui change : l'exemple reprend les mots entiers.
+    narrowed = Issue(0, 10, "Pléonasme.", ["Aujourd'hui"], Category.STYLE, "PLEO", "grammalecte")
+    assert rule_label(narrowed, text) == "Pléonasme : « Au jour d'aujourd'hui »"
+    rain = "Il pleut au jour d'aujourd'hui."
+    assert rule_label(Issue(3, 9, "Pluie.", [], Category.STYLE, "X", "grammalecte"), rain) == "Pluie : « pleut »"
+    assert rule_label(Issue(4, 7, "Pluie.", [], Category.STYLE, "X", "grammalecte"), rain) == "Pluie : « pleut »"
 
 
 def test_long_shortcut_error_is_shown_whole(qapp, home):

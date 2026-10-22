@@ -829,3 +829,7 @@ def test_splits_off_a_letter():
     assert not _splits_off_a_letter("10h", "10 h")          # unité après un nombre
     assert not _splits_off_a_letter("chevals", "cheva ls")  # deux lettres
     assert not _splits_off_a_letter("chevals", "chevals ")
+    assert not _splits_off_a_letter("j", " j")             # espace ajoutée après une virgule (« Oui,j'arrive »)
+    assert not _splits_off_a_letter("rayonsX", "rayons X")  # désignation en majuscule
+    assert not _splits_off_a_letter("planB", "plan B")
+    assert _splits_off_a_letter("CEG", "CE G")

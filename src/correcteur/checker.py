@@ -528,13 +528,15 @@ _ONE_LETTER_WORDS = frozenset("aàeéèioóôuy")
 def _splits_off_a_letter(original: str, replacement: str) -> bool:
     """La suggestion ne fait que couper le mot fautif par une espace, à côté d'une lettre seule qui n'est pas un
     mot : « chevals » -> « cheval s » (LanguageTool, PLURIEL_AL2). « apriori » -> « a priori », « parceque » ->
-    « parce que » et « 10h » -> « 10 h » restent."""
+    « parce que » et « 10h » -> « 10 h » restent, comme une espace ajoutée au bord du mot (« Oui,j'arrive » ->
+    « j » précédé d'une espace) et une majuscule qui désigne quelque chose (« rayons X », « plan B »)."""
     if not original.isalpha() or len(replacement) != len(original) + 1:
         return False
     left, space, right = replacement.partition(" ")
-    if not space or (left + right).casefold() != original.casefold():
+    if not (left and space and right) or (left + right).casefold() != original.casefold():
         return False
-    return any(len(part) == 1 and part.lower() not in _ONE_LETTER_WORDS for part in (left, right))
+    return any(len(part) == 1 and part.lower() not in _ONE_LETTER_WORDS and not (part.isupper() and not other.isupper())
+               for part, other in ((left, right), (right, left)))
 
 
 def _distinct(replacements: list[str]) -> list[str]:
