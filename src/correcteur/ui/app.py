@@ -351,9 +351,11 @@ class Controller(QObject):
         self.gnomeShortcutsRead.connect(self._gnome_shortcuts_read, Qt.ConnectionType.QueuedConnection)
         self._capturing = False
         self._express_replaced_at = float("-inf")  # dernière correction express collée (time.monotonic())
-        self._express_ended_at = float("-inf")     # fin de la dernière correction express, collée ou non
+        self._express_refused_at = float("-inf")   # dernière correction express dont le collage a été refusé
         self._express_asked_at = float("-inf")     # dernier appui de la correction express, accepté ou non
+        self._express_started_at = float("-inf")   # appui accepté qui a lancé la capture en cours
         self._express_repeat = False               # la capture en cours suit de près un autre appui (rafale)
+        self._express_pasting = False              # collage d'une correction express en cours (voir _express_done)
         self._ready_pending = False  # message « Correcteur prêt » en attente des raccourcis GNOME
         # Raccourcis qui fonctionnent réellement, pour le menu de l'icône (voir _menu_label).
         self._hotkeys_active = False
@@ -623,10 +625,13 @@ class Controller(QObject):
         if command == "verifier-selection":
             self._capture_for(command, from_menu=data == "menu")
         elif command == "correction-express":
-            if self._busy_express:
+            if self._express_pasting:
+                # Reçu pendant le collage : le bilan, qui suit, y répond (« déjà en cours » le remplaçait).
+                log.info("Correction express demandée pendant un collage : ignorée.")
+            elif self._busy_express:
                 self.notify("Correction express déjà en cours, un instant…")
             else:
-                self._express_repeat = repeat
+                self._express_repeat, self._express_started_at = repeat, self._express_asked_at
                 self._capture_for(command, from_menu=data == "menu")
         elif command == "presse-papiers":
             self.window.open_with(self.bridge.clipboard_text(), None)
@@ -688,15 +693,16 @@ class Controller(QObject):
 
     def _quiet_no_selection(self, command: str) -> bool:
         """« Aucun texte sélectionné » à taire ? Juste après une correction express collée : la sélection vient
-        d'être remplacée. En correction express, aussi juste après une correction express non collée, ou quand
-        l'appui en suivait un autre de près : en rafale, la sélection change pendant la lecture (copie simulée
-        jusqu'à une seconde après l'appui sous Wayland), et le message ferait croire à un échec. Un appui isolé
-        le garde."""
+        d'être remplacée. En correction express, aussi juste après un collage refusé, ou quand l'appui en suivait un
+        autre de près ou qu'un autre est arrivé pendant la lecture : en rafale, la sélection change pendant la
+        lecture (copie simulée jusqu'à une seconde après l'appui sous Wayland), et le message ferait croire à un
+        échec. Un appui isolé le garde."""
         now = time.monotonic()
         if now - self._express_replaced_at < _QUIET_AFTER_EXPRESS_S:
             return True
         return command == "correction-express" and (
-            self._express_repeat or now - self._express_ended_at < _QUIET_AFTER_EXPRESS_S)
+            self._express_repeat or self._express_asked_at > self._express_started_at
+            or now - self._express_refused_at < _QUIET_AFTER_EXPRESS_S)
 
     def _express(self, capture: Capture) -> None:
         if self._busy_express:
@@ -739,22 +745,23 @@ class Controller(QObject):
                 self.release_capture(capture)
                 self.notify(text, error=error)
                 return
+            self._express_pasting = True
             ok, message = self.bridge.replace(capture, new_text)
             if ok:
                 self._express_replaced_at = time.monotonic()
                 self.notify(f"{text}\n{message}" if message else text)
             else:
+                self._express_refused_at = time.monotonic()
                 self.notify(message, error=True)
         finally:
-            self._express_ended_at = time.monotonic()
-            # Correction en cours jusqu'à la fin du collage : replace() bloque le fil de l'interface (quelques
-            # secondes au plus sous Wayland), et les appuis reçus pendant ce temps, rangés dans la file avant ce
-            # signal, disent « déjà en cours » au lieu de lancer ensuite une capture en retard (qui lisait la
-            # sélection faite après l'appui, ou rien).
+            # Correction en cours jusqu'à la fin du collage : replace() bloque le fil de l'interface (jusqu'à une
+            # seconde sous Wayland), et les appuis reçus pendant ce temps, rangés dans la file avant ce signal, sont
+            # ignorés au lieu de lancer ensuite une capture en retard (qui lisait la sélection faite après l'appui,
+            # ou rien).
             self.expressFinished.emit()
 
     def _express_finished(self) -> None:
-        self._busy_express = False
+        self._busy_express = self._express_pasting = False
 
     def _no_engine_reason(self, text: str) -> str:
         """Pourquoi aucun moteur n'a même été lancé sur ce texte."""
