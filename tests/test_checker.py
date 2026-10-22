@@ -261,6 +261,18 @@ def test_agreed_fixes_that_are_still_wrong_are_not_sure():
     assert solo_context_ok(text, word_issue(text, "fait", ["fais"], "grammalecte", rule), agreed=True)
 
 
+def test_agreed_ai_is_not_sure_after_reflexive_me():
+    """« Je me l'est demandé » : les deux moteurs veulent « ai », mais un verbe pronominal prend « suis » (« me le »
+    ou « me la » ?). Sans « me », « ai » reste possible."""
+    from correcteur.checker import solo_context_ok
+
+    rule = "g2__conj_je__b3_a1_1"
+    text = "Je me l'est demandé."
+    assert not solo_context_ok(text, word_issue(text, "est", ["ai", "aie", "suis"], "grammalecte", rule), agreed=True)
+    text = "Je l'est demandé."
+    assert solo_context_ok(text, word_issue(text, "est", ["ai", "aie", "suis"], "grammalecte", rule), agreed=True)
+
+
 def test_languagetool_homophone_sure_when_grammalecte_has_nothing_to_say(home):
     """« Je me suis fait mal a la main » : LanguageTool seul, et Grammalecte ne signale rien, ni avant ni après.
     Pas pour « a l'air » (« Patrick a l'air sombre ») ni « a toutes les chances » : « a » est le verbe."""

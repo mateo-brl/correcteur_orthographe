@@ -693,16 +693,36 @@ def _cleft_qui(words: list[Mot], s: int) -> bool:
     return k >= 2 and words[k - 1].low in ("est", "sont", "était", "étaient") and words[k - 2].low in ("c'", "ce")
 
 
+def _verb_with_pronoun(words: list[Mot], k: int, lex: Lexique) -> bool:
+    """Le mot k est-il le verbe conjugué d'un pronom sujet : « Il dit | que », « Il nous a dit | que », « Je ne sais
+    pas | où » ? « dit », « note », « demande » sont aussi des noms, et « que » après un nom est relatif."""
+    if k >= 1 and words[k].low in ("pas", "plus", "jamais", "point", "guère"):
+        k -= 1
+    if k >= 1 and words[k - 1].low in AVOIR and lex.participle(words[k].text):
+        k -= 1  # « a dit »
+    if not lex.finite_verb(words[k].text):
+        return False
+    n = k - 1
+    while n >= 0 and words[n].low not in SUBJECTS and words[n].low in CLITICS - DETERMINERS and k - n <= 3:
+        n -= 1  # « le », « la », « les » mis à part : « Je lis le livre que… »
+    return n >= 0 and words[n].low in SUBJECTS
+
+
 def _main_clause_subject(text: str, words: list[Mot], s: int, lex: Lexique) -> bool:
     """Le sujet en position s ouvre-t-il la proposition principale, et non une relative ou une subordonnée dont
     le verbe principal pourrait être le « a » qui suit ?"""
     if words[s].low == "qui":
-        return _cleft_qui(words, s)
+        # « Je sais qui a laissé son sac a la gare », « Qui a laissé son sac a la gare ? » : interrogatif, pas
+        # relatif (« Qui a bu boira »).
+        return _cleft_qui(words, s) or (s >= 1 and _verb_with_pronoun(words, s - 1, lex)) or (
+            _sentence_start(words, s, text) and re.match(r"[^.!?…\n]*\?", text[words[s].end:]) is not None)
     if s == 0 or re.search(r"[.!?;:,(«»]", text[words[s - 1].end:words[s].start]):
         return True
     before = words[s - 1].low
     if before in ("dont", "où"):
-        return False  # « L'homme dont elle aime le fils a la grippe », « La maison où il passe ses vacances a… »
+        # « L'homme dont elle aime le fils a la grippe », « La maison où il passe ses vacances a… » ; mais « Je sais
+        # où il a laissé son sac a la gare ».
+        return before == "où" and s >= 2 and _verb_with_pronoun(words, s - 2, lex)
     if before in _SUBORDINATE_BEFORE_SUBJECT:
         # En tête de phrase, la principale peut suivre sans virgule (« Quand il pleut la rivière a… ») ; après
         # un verbe, non : « Je ne sais pas s'il a mis son sac a la gare ».
@@ -710,9 +730,10 @@ def _main_clause_subject(text: str, words: list[Mot], s: int, lex: Lexique) -> b
                     or words[s - 2].low in _COORDINATORS or words[s - 2].low in ("que", "qu'"))
     if before in ("que", "qu'") and s >= 2:
         # « que » relatif (« le livre que tu lis ») ou d'une subordonnée (« bien que », « pendant que ») ;
-        # « Je crois qu'il a laissé son sac a la gare » reste : « que » suit un verbe.
+        # « Je crois qu'il a laissé son sac a la gare », « Il dit qu'il… » restent : « que » suit un verbe.
         prev = words[s - 2]
-        return not (lex.is_noun(prev.text) or prev.low in _ANTECEDENTS or prev.low in _BEFORE_ADVERBIAL_QUE)
+        return _verb_with_pronoun(words, s - 2, lex) or not (
+            lex.is_noun(prev.text) or prev.low in _ANTECEDENTS or prev.low in _BEFORE_ADVERBIAL_QUE)
     return True
 
 
@@ -776,14 +797,15 @@ def _verb_and_object_before(text: str, words: list[Mot], i: int, lex: Lexique) -
         return _main_clause_subject(text, words, s, lex)
     if s != v - 1 or not _nominal_subject(text, words, s, lex):
         return False
-    # Après un nom, le verbe ne doit pas pouvoir se lire comme un nom, un adjectif ou un participe (« La porte
-    # ferme la pièce », « Le livre écrit la nuit a la couverture rouge »), et doit pouvoir avoir un complément
-    # d'objet (« Le soleil brille la mer a la couleur de l'encre » : une virgule oubliée).
+    # Après un nom, le verbe ne doit avoir aucune autre lecture : ni nom, adjectif ou participe (« La porte ferme
+    # la pièce », « Le livre écrit la nuit a la couverture rouge »), ni préposition ou conjonction (« La maison
+    # entre les arbres a la porte bleue », « Le directeur puis le maire a la parole »). Il doit aussi pouvoir
+    # avoir un complément d'objet (« Le soleil brille la mer a la couleur de l'encre » : une virgule oubliée).
     first = words[v]
     if first.low in AVOIR or first.low in ETRE:
         return True
-    return _object_verb(first, lex) and not (
-        lex.is_noun(first.text) or lex.has(first.text, ":A") or lex.has(first.text, ":Q"))
+    return (_object_verb(first, lex) and not lex.has(first.text, ":Q")
+            and all("/:V" in m for m in lex.morph(first.text)))
 
 
 _HOUR_UNITS = frozenset("heure heures h".split())
@@ -1452,39 +1474,65 @@ def regle_pluriel_aux(text: str, words: list[Mot], lex: Lexique) -> Iterable[Fau
                         Category.SPELLING)
 
 
-# Après le participe, un déterminant et l'un de ces noms disent quand, pas ce qu'on a fait : « Je ne suis pas
-# fatigué le soir », « Je suis passé la semaine dernière », « Je suis occupé la plupart du temps ».
-_TIME_NOUNS = frozenset("""matin matins soir soirs nuit nuits jour jours journée journées soirée matinée semaine
-    semaines mois an ans année années lendemain veille midi minuit heure heures minute minutes fois temps printemps été
-    automne hiver week-end lundi mardi mercredi jeudi vendredi samedi dimanche plupart reste""".split())
+# Après le participe, un déterminant et l'un de ces noms disent quand ou combien de temps, pas ce qu'on a fait :
+# « Je ne suis pas fatigué le soir », « Je ne suis pas occupé cet après-midi », « Je suis occupé la plupart du
+# temps ».
+_TIME_NOUNS = frozenset("""matin matins soir soirs nuit nuits jour jours journée journées soirée soirées matinée
+    matinées après-midi semaine semaines quinzaine mois trimestre trimestres semestre semestres an ans année années
+    saison saisons session sessions période périodes époque moment moments instant instants lendemain surlendemain
+    veille midi minuit heure heures minute minutes seconde secondes fois temps printemps été automne hiver week-end
+    week-ends lundi mardi mercredi jeudi vendredi samedi dimanche date fin début moitié partie plupart reste
+    totalité""".split())
+# « Je ne suis pas payé un centime », « Je suis payé une misère » : un prix, pas un complément.
+_PRICE_NOUNS = frozenset("salaire prix somme misère fortune centime centimes euro euros".split())
 # « Je suis assis les jambes croisées », « Je suis entré la tête haute » : une manière d'être, pas un complément.
 _BODY_NOUNS = frozenset("tête main mains bras jambe jambes pied pieds yeux bouche ventre dos cheveux cœur nez".split())
-_OBJECT_DETERMINERS_AFTER = DETERMINERS - {"de", "d'", "du", "des"}
+# « toute la journée », « chaque soir » : un moment, presque toujours.
+_OBJECT_DETERMINERS_AFTER = DETERMINERS - {"de", "d'", "du", "des", "tout", "toute", "tous", "toutes", "chaque"}
+# « J'est envie de partir » : « Je suis envie » n'existe pas ; « Je suis mal », « Je suis froid », si.
+_AVOIR_ONLY_NOUNS = AVOIR_NOUNS - {"mal", "froid", "chaud"}
+# Suivis d'un infinitif, ces participes ne vont qu'avec avoir : « J'ai pu venir », « J'ai dû partir », « J'ai cru
+# rêver ». Seuls, non : « Je suis dû pour des vacances » (Québec), « Je suis cru ». Pas « envoyer », « emmener » :
+# « Je suis envoyé chercher du pain ».
+_MODAL_VERBS = frozenset("""pouvoir devoir vouloir savoir oser faillir aimer préférer espérer souhaiter désirer croire
+    penser""".split())
 
 
 def _object_after(text: str, words: list[Mot], j: int, lex: Lexique) -> bool:
     """Un complément d'objet direct suit le participe en position j : « fini mon travail », « vu ce film ».
-    Pas un infinitif (« passé la voir »), un nom qui est aussi adjectif (« rentré le dernier »), une indication
-    de temps (« fatigué le soir ») ; ni « de », « du », « des » (« fatigué des vacances »)."""
+    Pas un infinitif (« passé la voir »), un nom qui est aussi adjectif (« rentré le dernier ») ou déterminant
+    (« toute la journée » : « la » est aussi une note), une indication de temps ou de prix (« fatigué le soir ») ;
+    ni « de », « du », « des » (« fatigué des vacances »)."""
     if j + 2 >= len(words) or not (_joined(text, words[j], words[j + 1]) and _joined(text, words[j + 1], words[j + 2])):
         return False
     det, noun = words[j + 1], words[j + 2]
     return (det.low in _OBJECT_DETERMINERS_AFTER and lex.is_noun(noun.text) and noun.low not in _TIME_NOUNS
-            and noun.low not in _BODY_NOUNS and not lex.has(noun.text, ":A") and not lex.has(noun.text, ":Y")
-            and not noun.text[:1].isupper())
+            and noun.low not in _PRICE_NOUNS and noun.low not in _BODY_NOUNS and noun.low not in DETERMINERS
+            and not lex.has(noun.text, ":A") and not lex.has(noun.text, ":Y") and not noun.text[:1].isupper())
+
+
+def _infinitive_after(text: str, words: list[Mot], j: int, lex: Lexique) -> bool:
+    """Un infinitif suit le participe en position j, ses pronoms compléments sautés : « pu venir », « voulu
+    t'appeler »."""
+    n = j + 1
+    while n < len(words) and words[n].low in CLITICS and n - j <= 3:
+        n += 1
+    return n < len(words) and lex.has(words[n].text, ":Y") and all(
+        _joined(text, words[m], words[m + 1]) for m in range(j, n))
 
 
 def regle_je_ai(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
     """« Je les aient vus » -> « Je les ai vus », « Je n'est pas fini mon travail » -> « Je n'ai pas fini »,
     « J'est allé » -> « Je suis allé » : auxiliaire de « je » devant un participe. « ai » seulement quand avoir
-    est sûr : complément d'objet placé avant (« les ») ou après (« mon travail »), ou verbe qui n'en a jamais
-    (« dormi ») ; « Je suis fatigué », « Je suis passé te voir », « Je vous suis obligé » restent possibles."""
+    est sûr : complément d'objet placé avant (« les ») ou après (« mon travail »), participe qui ne peut être ni
+    adjectif ni passif (« dormi », « eu », « pu »), infinitif après « pu », « dû », « voulu »… ; « Je suis
+    fatigué », « Je suis passé te voir », « Je vous suis obligé », « Je suis perdu » restent possibles."""
     for k, subject in enumerate(words):
         if subject.low not in ("je", "j'"):
             continue
         before = text[max(0, subject.start - 40):subject.start]
-        if re.search(r"(?i)\bqu(?:e\s*|['’])$", before):
-            continue  # « que j'aie » : subjonctif possible
+        if re.search(r"(?i)\b(?:quoi)?qu(?:e\s*|['’])(?:moi\s*,?\s*)?$", before):
+            continue  # « que j'aie », « quoique j'aie », « que moi, j'aie » : subjonctif possible
         j = k + 1
         if j < len(words) and words[j].low in ("ne", "n'"):
             j += 1
@@ -1498,9 +1546,16 @@ def regle_je_ai(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
         if words[p].low in ("pas", "plus", "jamais", "rien", "point", "guère") and p + 1 < len(words):
             p += 1  # « Je n'est pas fini », « J'est pas fini » : la négation entre l'auxiliaire et le participe
         nxt = words[p]
+        if not all(_joined(text, words[n], words[n + 1]) for n in range(k, p)):
+            continue
+        if nxt.low in _AVOIR_ONLY_NOUNS:
+            if clitics <= {"en"}:
+                yield Faute(words[j].start, words[j].end, "ai", "Auxiliaire à la 1re personne : « je ai ».",
+                            "corr_je_ai")
+            continue
         part = lex.participle(nxt.text)
-        if part is None or any(lemma != part[0] for lemma, _, _ in lex.verbs(nxt.text)) or nxt.low in SUBJECTS or (
-                nxt.low in CLITICS or not all(_joined(text, words[n], words[n + 1]) for n in range(k, p))):
+        if (part is None or any(lemma != part[0] for lemma, _, _ in lex.verbs(nxt.text)) or nxt.low in SUBJECTS
+                or nxt.low in CLITICS):
             continue  # « les pronoms “je” et “tu” » : « tu » n'est pas le participe de « taire » ; « fait » : faire
         vtyp = part[1]
         if len(vtyp) < 9:
@@ -1511,15 +1566,19 @@ def regle_je_ai(text: str, words: list[Mot], lex: Lexique) -> Iterable[Faute]:
             # « Je suis monté » ou « J'ai monté les valises » : on ne choisit pas. Le dictionnaire ne donne que
             # avoir à « descendre », « entrer », « passer » (« Je suis passé la tête haute »).
             continue
-        elif (clitics & {"le", "la", "l'", "les"} or _object_after(text, words, p, lex) or words[p - 1].low == "rien"
-              or (vtyp[3] != "t" and not lex.has(nxt.text, ":A"))):
+        elif (clitics & {"le", "la", "l'", "les"} or words[p - 1].low == "rien" or not lex.has(nxt.text, ":A")
+              or (part[0] in _MODAL_VERBS and _infinitive_after(text, words, p, lex))
+              or _object_after(text, words, p, lex)):
             fix = "ai"
         else:
             continue  # « Je suis fatigué » (adjectif), « Je vous suis présenté » (passif) : pas sûr
         aux, start = words[j], words[j].start
         elided = words[j - 1]
-        if fix == "suis" and elided.low in ("j'", "n'", "m'") and elided.end == aux.start:
-            start, fix = elided.start, elided.text[0] + "e " + fix  # « J'est allé » -> « Je suis allé »
+        if fix == "suis" and elided.end == aux.start:
+            if elided.low == "l'":
+                continue  # « Je me l'est demandé » : « me le » ou « me la » ? On ne choisit pas.
+            if elided.low in ("j'", "n'", "m'", "t'"):
+                start, fix = elided.start, elided.text[0] + "e " + fix  # « J'est allé » -> « Je suis allé »
         yield Faute(start, aux.end, fix, "Auxiliaire à la 1re personne : « je " + fix.split()[-1] + " ».", "corr_je_ai")
 
 

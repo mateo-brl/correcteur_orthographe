@@ -1019,6 +1019,9 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         return False
     if family.startswith("conj_") and re.search(r"[\"“«]\s*\w+\s*[\"”»]\s*$", text[max(0, issue.start - 20):issue.start]):
         return False  # « les pronoms “je” est “tu” » : « je » cité, pas sujet
+    if family == "conj_je" and first == "ai" and any(w == "me" or w.startswith("m'")
+                                                     for w in _words_before(text, issue.start, 3)):
+        return False  # « Je me l'est demandé » : pronominal, donc « suis » (« me le » ou « me la » ?), jamais « ai »
     if family.startswith("conj_"):
         m = _QUE_SUBJECT_RE.search(text, max(0, issue.start - 80), issue.start)
         if m:

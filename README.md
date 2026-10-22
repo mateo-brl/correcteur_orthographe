@@ -237,8 +237,8 @@ sa sortie suit la page de code de la console (que lisent cmd, PowerShell 5, `fin
   « parmis ») ont leur correction dans le moteur du correcteur ; pour les autres, la bonne suggestion n'est pas
   toujours en tête.
 - Sans LanguageTool, certaines fautes restent signalées sans être corrigées d'office, faute d'indice pour choisir :
-  « Quels changement » (« Quel changement » ou « Quels changements » ?). D'autres ne sont pas signalées du tout hors
-  ligne : « Je les ai vu » (« vus » ou « vues » ?).
+  « Quels changement » (« Quel changement » ou « Quels changements » ?), « J'est perdu » (« J'ai perdu » ou « Je suis
+  perdu » ?). D'autres ne sont pas signalées du tout hors ligne : « Je les ai vu » (« vus » ou « vues » ?).
 - Le mode LanguageTool en ligne est limité à environ 20 vérifications par minute.
 
 ## Moteurs et confidentialité
