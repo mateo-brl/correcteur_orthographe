@@ -859,6 +859,8 @@ def run_app(initial_command: str | None = None, startup: bool = False, debug: bo
     install_crash_log()
     log.info("%s %s démarré (Python %s, %s, session %s)", APP_NAME, __version__, sys.version.split()[0],
              sys.platform, " ".join(part for part in (session_type(), desktop_name()) if part))
+    if ipc is not None and not ipc.listening and not ipc.other_instance and ipc.error:
+        log.warning("%s", ipc.error)  # canal ouvert avant le journal : son échec n'y était pas
     QApplication.setApplicationName(APP_NAME)
     QApplication.setApplicationVersion(__version__)
     QApplication.setQuitOnLastWindowClosed(False)
