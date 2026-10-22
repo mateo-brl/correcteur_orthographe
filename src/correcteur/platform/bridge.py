@@ -192,9 +192,11 @@ class Capture:
 
 
 def pasted_text(capture: Capture, text: str) -> str:
-    """Texte à coller pour `capture`. Google Docs ajoute deux retours à la ligne à la copie d'un document entier
-    (Ctrl+A) : recollés, ils ajoutaient deux paragraphes vides à chaque correction."""
-    if capture.docs and capture.text.endswith("\n\n"):
+    """Texte à coller pour `capture`. Google Docs met un retour à la ligne par fin de paragraphe sélectionnée, et un
+    de plus pour un document entier (Ctrl+A) ; la fin de paragraphe qui termine la sélection reste au collage. Recollés,
+    ces retours à la ligne ajoutaient des paragraphes vides à chaque correction : deux pour le document entier, deux
+    pour un paragraphe du milieu sélectionné par Début puis Maj+Bas (L-15). Ils ne sont pas recollés."""
+    if capture.docs and capture.text.endswith("\n"):
         return text.rstrip("\n")
     return text
 
@@ -890,7 +892,7 @@ class X11Bridge(Bridge):
             if text.strip():
                 # Aucune frappe simulée : l'activité compte à partir du relâchement des touches du raccourci.
                 return Capture(text, target=target, from_selection=True, started=started,
-                               keys_at=started + _KEYS_RELEASE_S)
+                               keys_at=started + _KEYS_RELEASE_S, docs=self._inspect(text, "PRIMARY")[1])
         # Pas de sélection primaire de l'application active : copie simulée (Ctrl+Inser). Le presse-papiers n'est
         # marqué (voir _clipboard_marker) que s'il ne contient que du texte qu'on a pu lire ; sinon, on compare avec
         # son contenu d'avant.
@@ -921,33 +923,37 @@ class X11Bridge(Bridge):
             if text and text != before:
                 break
         changed = bool(text) and text != before
-        selected = changed and not self._copied_line(text)
+        line, docs = self._inspect(text) if changed else (False, False)
+        selected = changed and not line
         return Capture(text if selected else "", target=target, from_selection=selected,
                        saved_clipboard=saved, clipboard_touched=changed or marked, started=started,
-                       left=text if changed else (marker if marked else None), keys_at=keys_at)
+                       left=text if changed else (marker if marked else None), keys_at=keys_at,
+                       docs=docs and selected)
 
-    def _copied_line(self, text: str) -> bool:
-        """Ligne entière copiée faute de sélection (voir _EMPTY_SELECTION) ? Regardé seulement quand le texte finit
-        par un retour à la ligne, comme la copie d'une cellule de Calc, qui reçoit alors Échap (voir _CALC_CELL)."""
+    def _inspect(self, text: str, selection: str = "CLIPBOARD") -> tuple[bool, bool]:
+        """(ligne entière copiée faute de sélection, copie de Google Docs) d'après les formats de `selection`,
+        regardés seulement quand le texte finit par un retour à la ligne (voir _EMPTY_SELECTION et pasted_text). Une
+        cellule de Calc copiée reçoit Échap (voir _CALC_CELL) ; la sélection primaire, lue sans copie simulée, n'en
+        a pas besoin."""
         if not text.endswith("\n"):
-            return False
+            return False, False
         try:
             from correcteur.platform.x11_selection import read_target, selection_targets
         except ImportError:
-            return False
-        targets = selection_targets("CLIPBOARD") or []
-        if _CALC_CELL in targets:
+            return False, False
+        targets = selection_targets(selection) or []
+        if selection == "CLIPBOARD" and _CALC_CELL in targets:
             log.info("Cellule de Calc copiée : Échap pour quitter son mode copie.")
             try:
                 self._send_keys("escape")
             except Exception:
                 pass
         if _WEB_CUSTOM_DATA not in targets:
-            return False
-        if _EMPTY_SELECTION not in (read_target("CLIPBOARD", _WEB_CUSTOM_DATA) or b""):
-            return False
-        log.info("Ligne entière copiée faute de sélection : ignorée.")
-        return True
+            return False, False
+        if _EMPTY_SELECTION in (read_target(selection, _WEB_CUSTOM_DATA) or b""):
+            log.info("Ligne entière copiée faute de sélection : ignorée.")
+            return True, False
+        return False, "text/html" in targets and _GOOGLE_DOCS in (read_target(selection, "text/html") or b"")
 
     def _idle_ms(self) -> int | None:
         """Temps depuis la dernière frappe ou le dernier mouvement de souris (extension MIT-SCREEN-SAVER), None si
@@ -1032,6 +1038,7 @@ class X11Bridge(Bridge):
     def replace(self, capture: Capture, text: str) -> tuple[bool, str]:
         if capture.saved_clipboard is None and not capture.clipboard_touched:
             capture.saved_clipboard = self._saved_text()
+        text = pasted_text(capture, text)
         problem = self._selection_moved(capture) if capture.express else ""
         if problem:
             self._give_back(capture)
@@ -1416,26 +1423,22 @@ class WaylandBridge(Bridge):
     def _copied(self, text: str, saved: Any, started: float, keys_at: float) -> Capture:
         """Capture de `text`, copié par l'application. Ses formats ne sont regardés que s'il finit par un retour à la
         ligne (sous GNOME, chaque lecture prend le focus un instant) : ligne entière copiée faute de sélection (voir
-        _EMPTY_SELECTION), ou cellule de Calc, qui reçoit Échap (voir _CALC_CELL)."""
+        _EMPTY_SELECTION), copie de Google Docs (voir pasted_text), ou cellule de Calc, qui reçoit Échap (voir
+        _CALC_CELL)."""
         types = (self._clipboard_types() or []) if text.endswith("\n") else []
         if _CALC_CELL in types:
             log.info("Cellule de Calc copiée : Échap pour quitter son mode copie.")
             self._wait_for_keys(started)
             self._send_keys("escape")
-        selected = text
-        if _WEB_CUSTOM_DATA in types and _EMPTY_SELECTION in (self._paste_bytes(_WEB_CUSTOM_DATA) or b""):
-            log.info("Ligne entière copiée faute de sélection : ignorée.")
-            selected = ""
+        selected, docs = text, False
+        if _WEB_CUSTOM_DATA in types:  # copie faite par Chromium : VS Code, Google Docs
+            if _EMPTY_SELECTION in (self._paste_bytes(_WEB_CUSTOM_DATA) or b""):
+                log.info("Ligne entière copiée faute de sélection : ignorée.")
+                selected = ""
+            elif "text/html" in types:
+                docs = _GOOGLE_DOCS in (self._paste_bytes("text/html") or b"")
         return Capture(selected, from_selection=bool(selected), saved_clipboard=saved, clipboard_touched=True,
-                       started=started, left=text, keys_at=keys_at, docs=self._from_docs(selected))
-
-    def _from_docs(self, text: str | None) -> bool:
-        """Copie faite dans Google Docs ? Regardé seulement quand le texte finit par deux retours à la ligne (voir
-        pasted_text) : sous GNOME, chaque lecture prend le focus un instant."""
-        if not text or not text.endswith("\n\n"):
-            return False
-        html = self._paste_bytes("text/html")
-        return bool(html) and b"docs-internal-guid" in html
+                       started=started, left=text, keys_at=keys_at, docs=docs)
 
     def _copy_limit(self) -> float:
         """Temps laissé à l'application pour copier sa sélection après le Ctrl+Inser simulé."""

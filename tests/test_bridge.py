@@ -361,6 +361,25 @@ def test_x11_calc_cell_copy_mode_is_left_at_once(monkeypatch, clock):
     assert capture.text == "Les enfants on faim.\n" and desk.keys == ["copy", "escape"]
 
 
+def test_x11_google_docs_gets_no_extra_paragraphs(monkeypatch, clock):
+    """L-15 sous X11 : la copie de Google Docs (Chromium, HTML avec docs-internal-guid) est reconnue, et ses retours
+    à la ligne finaux ne sont pas recollés."""
+    from correcteur.platform import x11_selection
+
+    x11 = X11Bridge(lambda ms, fn: None)
+    desk = FakeX11(clock, monkeypatch, x11)
+    monkeypatch.setattr(x11, "_primary_from", lambda window: False)
+    x11._owner = SimpleNamespace(owns=lambda: desk.clipboard is None)
+    desk.selection = "Les enfants on faim.\n"
+    monkeypatch.setattr(x11_selection, "selection_targets", lambda selection: ["TARGETS", "UTF8_STRING"] + (
+        ["chromium/x-web-custom-data", "text/html"] if desk.clipboard == desk.selection else []))
+    formats = {"chromium/x-web-custom-data": b"\x10\0\0\0", "text/html": b'<b id="docs-internal-guid-1">x</b>'}
+    monkeypatch.setattr(x11_selection, "read_target", lambda selection, target: formats[target])
+    capture = x11.capture(express=True)
+    assert capture.docs
+    assert x11.replace(capture, "Les enfants ont faim.\n")[0] and desk.pasted == ["Les enfants ont faim."]
+
+
 def test_x11_line_copied_without_selection_is_no_selection(monkeypatch, clock):
     """VS Code sous X11, sans sélection : la copie prend la ligne entière (données « isFromEmptySelection »)."""
     from correcteur.platform import x11_selection
@@ -785,6 +804,14 @@ def test_windows_google_docs_gets_plain_text(clock):
     ok, _ = win.replace(capture, "Je les ai mis au frigo.\n\n")
     # Sans les deux retours à la ligne ajoutés par la copie de Docs (deux paragraphes vides de plus à chaque fois).
     assert ok and FakeWin.HTML not in w.clipboard and w.document == ["Je les ai mis au frigo."]
+
+    # L-15 : paragraphe du milieu sélectionné par Début puis Maj+Bas : une fin de paragraphe copiée, qui reste.
+    w = FakeWin("Les enfants on faim.\n", (header + body).encode())
+    w.classes[100] = "Chrome_WidgetWin_1"
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.docs and win.replace(capture, "Les enfants ont faim.\n")[0]
+    assert w.document == ["Les enfants ont faim."]
 
 
 def test_windows_line_copied_without_selection_is_no_selection(clock):
