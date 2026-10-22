@@ -9,18 +9,13 @@ import sys
 # qu'il demande et termine le processus, au lieu de passer ces arguments à notre ligne de commande.
 multiprocessing.freeze_support()
 
-# Chemins de Qt dans le paquet, que posait le crochet de PyInstaller pour PySide6. Ce crochet, retiré (voir
-# correcteur.spec), importait aussi Qt à chaque lancement (0,1 s), même pour la ligne de commande qui n'en a pas
-# besoin : « correcteur selection » de chaque raccourci sous Wayland, « correcteur corriger ».
-if sys.platform == "win32":
-    _qt = os.path.join(sys._MEIPASS, "PySide6")
-    os.environ["PATH"] = sys._MEIPASS + os.pathsep + os.environ.get("PATH", "")
-else:
-    _qt = os.path.join(sys._MEIPASS, "PySide6", "Qt")
-os.environ["QT_PLUGIN_PATH"] = os.path.join(_qt, "plugins")
-os.environ["QML2_IMPORT_PATH"] = os.path.join(_qt, "qml")
-
 if sys.platform.startswith("linux"):
+    # Chemins de Qt dans le paquet, que posait le crochet de PyInstaller pour PySide6. Ce crochet, retiré sous Linux
+    # (voir correcteur.spec), importait aussi Qt à chaque lancement (0,1 s), même pour la ligne de commande qui n'en a
+    # pas besoin : « correcteur selection » de chaque raccourci sous Wayland, « correcteur corriger ».
+    _qt = os.path.join(sys._MEIPASS, "PySide6", "Qt")
+    os.environ["QT_PLUGIN_PATH"] = os.path.join(_qt, "plugins")
+    os.environ["QML2_IMPORT_PATH"] = os.path.join(_qt, "qml")
     # Le lanceur de PyInstaller place les bibliothèques du paquet en tête de LD_LIBRARY_PATH (l'original est
     # dans LD_LIBRARY_PATH_ORIG). Les programmes du système lancés ensuite (gsettings, wl-copy, ydotool, java,
     # le navigateur) chargeraient alors notre vieille libglib au lieu de la leur, et gsettings échoue sous
