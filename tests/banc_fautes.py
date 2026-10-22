@@ -267,6 +267,11 @@ FAUTES = [
     ("Je n'est pas fini mon travail.", "Je n'ai pas fini mon travail."),
     ("Ils se sont trompé de chemin hier soir.", "Ils se sont trompés de chemin hier soir."),
     ("J'est allé au marché.", "Je suis allé au marché."),
+    ("J'est eu peur.", "J'ai eu peur."),
+    ("J'est pu venir.", "J'ai pu venir."),
+    ("J'est envie de partir.", "J'ai envie de partir."),
+    ("Il dit qu'il a laissé son sac a la gare.", "Il dit qu'il a laissé son sac à la gare."),
+    ("Qui a laissé son sac a la gare ?", "Qui a laissé son sac à la gare ?"),
 ]
 
 # Phrases justes (ou sans correction certaine) : rien ne doit y être changé d'office.
@@ -483,4 +488,11 @@ PIEGES = [
     "Je n'est pas content.",
     "J'est fatigué.",
     "Ils se sont servi de l'eau.",
+    # Préposition ou conjonction prise pour le verbe du sujet ; complément de temps ; « me l' » + « suis ».
+    "La maison entre les arbres a la porte bleue.",
+    "L'espace entre les dents a la largeur d'un cheveu.",
+    "Le directeur puis le maire a la parole.",
+    "Je n'est pas occupé cet après-midi.",
+    "Je n'est pas retenu toute la journée.",
+    "Je me l'est demandé.",
 ]

@@ -83,6 +83,15 @@ FIXED = [
     ("Je n'est pas fini mon travail.", "Je n'ai pas fini mon travail."),
     ("Je n'est pas allé à l'école.", "Je ne suis pas allé à l'école."),
     ("Ils se sont trompé de chemin hier soir.", "Ils se sont trompés de chemin hier soir."),
+    # Relecture : « ai » sûr (« Je suis eu », « Je suis pu », « Je suis envie » n'existent pas) ; « a » après
+    # « Il dit que » (« dit » est aussi un nom) et dans une question.
+    ("J'est eu peur.", "J'ai eu peur."),
+    ("J'est pu venir.", "J'ai pu venir."),
+    ("J'est dû partir.", "J'ai dû partir."),
+    ("J'est envie de partir.", "J'ai envie de partir."),
+    ("Il dit qu'il a laissé son sac a la gare.", "Il dit qu'il a laissé son sac à la gare."),
+    ("Je sais où il a laissé son sac a la gare.", "Je sais où il a laissé son sac à la gare."),
+    ("Qui a laissé son sac a la gare ?", "Qui a laissé son sac à la gare ?"),
 ]
 
 UNTOUCHED = [
@@ -119,7 +128,20 @@ UNTOUCHED = [
     "Je n'est pas content.",
     "J'est fatigué.",
     "J'est passé te voir.",
+    "J'est perdu.",
+    "J'est compris.",
+    "Je n'est pas occupé cet après-midi.",
+    "Je n'est pas retenu toute la journée.",
+    "Je me l'est demandé.",               # « me le » ou « me la » ?
+    "J'est ici.",                          # « ici » finit comme un participe ; c'est « Je suis ici »
+    "J'est aussi fatigué.",
+    # « entre », « puis » ne sont pas le verbe de « La maison », « Le directeur » (relecture).
+    "La maison entre les arbres a la porte bleue.",
+    "Le directeur puis le maire a la parole.",
 ]
+
+# Laissées, mais signalées : « ai » et « suis » parmi les suggestions.
+FLAGGED = ["J'est perdu.", "Je n'est pas occupé cet après-midi.", "Je me l'est demandé."]
 
 
 @pytest.fixture(scope="module")
@@ -142,6 +164,12 @@ def test_offline_express_fixes(offline, text, expected):
 @pytest.mark.parametrize("text", UNTOUCHED)
 def test_offline_express_leaves_doubtful_text_alone(offline, text):
     assert offline.autocorrect(text)[0] == text
+
+
+@pytest.mark.parametrize("text", FLAGGED)
+def test_offline_express_still_flags_what_it_leaves(offline, text):
+    [issue] = [i for i in offline.check(text).issues if text[i.start:i.end] == "est"]
+    assert {"ai", "suis"} <= set(issue.replacements)
 
 
 def test_offline_express_never_picks_a_reading_at_random(offline):
