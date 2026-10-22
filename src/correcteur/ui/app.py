@@ -351,11 +351,11 @@ class Controller(QObject):
         self.gnomeShortcutsRead.connect(self._gnome_shortcuts_read, Qt.ConnectionType.QueuedConnection)
         self._capturing = False
         self._express_replaced_at = float("-inf")  # dernière correction express collée (time.monotonic())
-        self._express_refused_at = float("-inf")   # dernière correction express dont le collage a été refusé
         self._express_asked_at = float("-inf")     # dernier appui de la correction express, accepté ou non
-        self._express_started_at = float("-inf")   # appui accepté qui a lancé la capture en cours
         self._express_repeat = False               # la capture en cours suit de près un autre appui (rafale)
         self._express_pasting = False              # collage d'une correction express en cours (voir _express_done)
+        self._express_again = False                # nouvel appui pendant une correction express : elle reprend
+        self._capture_command = ""                 # commande de la capture en cours
         self._ready_pending = False  # message « Correcteur prêt » en attente des raccourcis GNOME
         # Raccourcis qui fonctionnent réellement, pour le menu de l'icône (voir _menu_label).
         self._hotkeys_active = False
@@ -612,11 +612,18 @@ class Controller(QObject):
             self._show_ready()
 
     def _on_command(self, command: str, data: str) -> None:
-        repeat = False
-        if command == "correction-express":
+        repeat = data == "reprise"
+        if command == "correction-express" and not repeat:
             # Heure de chaque appui, même refusé : voir _quiet_no_selection.
             now = time.monotonic()
             repeat, self._express_asked_at = now - self._express_asked_at < _EXPRESS_REPEAT_S, now
+        # Nouvel appui pendant une correction express : il compte comme une frappe de l'utilisateur (Raw Input sous
+        # Windows, compteur d'inactivité sous Linux), qui ferait refuser le collage. La correction reprend donc,
+        # une fois, sur la sélection du moment (voir _on_captured et _express_done).
+        again = command == "correction-express" and not data and not self._express_pasting and (
+            self._busy_express or (self._capturing and self._capture_command == command))
+        if again:
+            self._express_again = True
         if self._capturing and command in ("verifier-selection", "correction-express", "presse-papiers"):
             # Souvent une 2e frappe du raccourci, parce que rien n'apparaît encore. La rejouer ensuite lancerait
             # un 2e Ctrl+C sur une sélection qui a pu changer, ou sur la fenêtre qui vient de s'ouvrir.
@@ -626,12 +633,13 @@ class Controller(QObject):
             self._capture_for(command, from_menu=data == "menu")
         elif command == "correction-express":
             if self._express_pasting:
-                # Reçu pendant le collage : le bilan, qui suit, y répond (« déjà en cours » le remplaçait).
+                # Reçu pendant le collage (replace() bloque le fil de l'interface), donc traité après lui : le bilan
+                # y répond.
                 log.info("Correction express demandée pendant un collage : ignorée.")
             elif self._busy_express:
-                self.notify("Correction express déjà en cours, un instant…")
+                self.notify("Nouvel appui : la correction express reprendra sur la sélection actuelle, un instant…")
             else:
-                self._express_repeat, self._express_started_at = repeat, self._express_asked_at
+                self._express_repeat = repeat
                 self._capture_for(command, from_menu=data == "menu")
         elif command == "presse-papiers":
             self.window.open_with(self.bridge.clipboard_text(), None)
@@ -654,7 +662,7 @@ class Controller(QObject):
             if capture is not None:
                 self._on_captured(command, capture)
                 return
-        self._capturing = True
+        self._capturing, self._capture_command = True, command
         self.bridge.begin_capture()
         express = command == "correction-express"
         if not self.bridge.capture_in_thread:
@@ -676,6 +684,12 @@ class Controller(QObject):
             self.bridge.end_capture(capture)
         if not capture.text.strip():
             self.release_capture(capture)
+            if command == "correction-express" and self._express_again:
+                # Rien de lu, et un autre appui pendant la lecture : on relit une fois, sans rien dire (en rafale, la
+                # sélection suivante ; sinon, la relecture dira elle-même qu'il n'y a rien).
+                self._express_again, self._express_repeat = False, False
+                self._capture_for(command)
+                return
             if capture.problem:
                 self.notify(capture.problem, error=True)
                 return
@@ -693,16 +707,12 @@ class Controller(QObject):
 
     def _quiet_no_selection(self, command: str) -> bool:
         """« Aucun texte sélectionné » à taire ? Juste après une correction express collée : la sélection vient
-        d'être remplacée. En correction express, aussi juste après un collage refusé, ou quand l'appui en suivait un
-        autre de près ou qu'un autre est arrivé pendant la lecture : en rafale, la sélection change pendant la
-        lecture (copie simulée jusqu'à une seconde après l'appui sous Wayland), et le message ferait croire à un
-        échec. Un appui isolé le garde."""
-        now = time.monotonic()
-        if now - self._express_replaced_at < _QUIET_AFTER_EXPRESS_S:
+        d'être remplacée. En correction express, aussi quand l'appui en suivait un autre de près, ou pour une
+        reprise : en rafale, la sélection change pendant la lecture (copie simulée jusqu'à une seconde après l'appui
+        sous Wayland), et le message ferait croire à un échec. Un appui isolé le garde."""
+        if time.monotonic() - self._express_replaced_at < _QUIET_AFTER_EXPRESS_S:
             return True
-        return command == "correction-express" and (
-            self._express_repeat or self._express_asked_at > self._express_started_at
-            or now - self._express_refused_at < _QUIET_AFTER_EXPRESS_S)
+        return command == "correction-express" and self._express_repeat
 
     def _express(self, capture: Capture) -> None:
         if self._busy_express:
@@ -735,7 +745,16 @@ class Controller(QObject):
 
     def _express_done(self, capture: Capture, outcome) -> None:
         self._express_progress.stop()
+        again = False
         try:
+            if self._express_again and not isinstance(outcome, Exception) and outcome[1]:
+                # Nouvel appui pendant la correction : elle reprend sur la sélection du moment (le collage de
+                # celle-ci serait refusé, l'appui comptant comme une frappe).
+                log.info("Nouvel appui pendant la correction express : elle reprend.")
+                self.release_capture(capture)
+                again = True
+                return
+            self._express_again = False
             if isinstance(outcome, Exception):
                 self.release_capture(capture)
                 self.notify(f"Correction impossible : {outcome}", error=True)
@@ -751,14 +770,15 @@ class Controller(QObject):
                 self._express_replaced_at = time.monotonic()
                 self.notify(f"{text}\n{message}" if message else text)
             else:
-                self._express_refused_at = time.monotonic()
                 self.notify(message, error=True)
         finally:
             # Correction en cours jusqu'à la fin du collage : replace() bloque le fil de l'interface (jusqu'à une
-            # seconde sous Wayland), et les appuis reçus pendant ce temps, rangés dans la file avant ce signal, sont
-            # ignorés au lieu de lancer ensuite une capture en retard (qui lisait la sélection faite après l'appui,
-            # ou rien).
+            # seconde sous Wayland), et les appuis reçus pendant ce temps, rangés dans la file avant ce signal, ne
+            # lancent pas ensuite une capture en retard (qui lisait la sélection faite après l'appui, ou rien).
             self.expressFinished.emit()
+            self._express_again = False
+            if again:
+                self.command.emit("correction-express", "reprise")  # après expressFinished, dans la file
 
     def _express_finished(self) -> None:
         self._busy_express = self._express_pasting = False
@@ -892,6 +912,12 @@ class Controller(QObject):
         self.app.quit()
 
 
+def log_command_channel(ipc: IpcServer | None) -> None:
+    """Échec du canal de commande au journal : ouvert avant lui (voir cli.main), il ne pouvait pas l'y écrire."""
+    if ipc is not None and not ipc.listening and not ipc.other_instance and ipc.error:
+        log.warning("%s", ipc.error)
+
+
 def run_app(initial_command: str | None = None, startup: bool = False, debug: bool | None = None,
             ipc: IpcServer | None = None) -> int:
     """`debug` : journal détaillé ; par défaut, celui de la ligne de commande (option --debug). `ipc` : canal de
@@ -902,8 +928,7 @@ def run_app(initial_command: str | None = None, startup: bool = False, debug: bo
     install_crash_log()
     log.info("%s %s démarré (Python %s, %s, session %s)", APP_NAME, __version__, sys.version.split()[0],
              sys.platform, " ".join(part for part in (session_type(), desktop_name()) if part))
-    if ipc is not None and not ipc.listening and not ipc.other_instance and ipc.error:
-        log.warning("%s", ipc.error)  # canal ouvert avant le journal : son échec n'y était pas
+    log_command_channel(ipc)
     QApplication.setApplicationName(APP_NAME)
     QApplication.setApplicationVersion(__version__)
     QApplication.setQuitOnLastWindowClosed(False)

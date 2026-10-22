@@ -126,6 +126,29 @@ def test_warmup_prepares_the_http_client(settings):
     engine.close()
 
 
+def test_closing_during_a_request_ends_on_an_engine_error(settings):
+    """Application quittée pendant le démarrage du serveur local : la requête en cours finit sur une erreur du moteur,
+    pas sur « Erreur interne » avec Traceback (client HTTP fermé entre-temps)."""
+    import threading
+    import time
+
+    settings.languagetool.mode = "local"
+    settings.languagetool.local_port = 9  # rien n'écoute : connexion refusée tout de suite
+
+    class SlowServer:
+        def can_run(self):
+            return True, ""
+
+        def ensure_started(self):
+            time.sleep(0.3)
+
+    engine = LanguageToolEngine(settings, server=SlowServer())
+    engine._http()
+    threading.Timer(0.1, engine.close).start()
+    with pytest.raises(EngineError, match="serveur LanguageTool local"):
+        engine._request("Les enfant jouent.", "fr")
+
+
 def test_long_text_is_split_in_chunks(settings):
     paragraph = "Les enfant jouent dans le jardin pendant que les parents discutent. " * 20 + "\n"
     text = paragraph * 20  # ~27 000 caractères > limite de l'API publique

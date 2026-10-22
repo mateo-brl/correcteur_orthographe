@@ -127,6 +127,21 @@ def test_commands_received_before_the_interface_are_handled(qapp, make_controlle
     assert controller.window.editor.toPlainText() == "Les enfant joue."
 
 
+def test_command_channel_failure_goes_to_the_log(caplog):
+    """Le canal de commande s'ouvre avant le journal (cli.main) : son échec y est écrit ensuite, en WARNING, que le
+    testeur cherche. Une autre instance qui écoute déjà n'est pas une erreur."""
+    from types import SimpleNamespace
+
+    from correcteur.ui.app import log_command_channel
+
+    broken = SimpleNamespace(listening=False, other_instance=False, error="Canal de commande indisponible (x) : refus")
+    with caplog.at_level(logging.WARNING, logger="correcteur.ui.app"):
+        log_command_channel(broken)
+        log_command_channel(SimpleNamespace(listening=False, other_instance=True, error="autre instance"))
+        log_command_channel(None)
+    assert [r.getMessage() for r in caplog.records] == ["Canal de commande indisponible (x) : refus"]
+
+
 def test_copy_text_reports_failure(make_controller):
     """copy_text renvoyait None : la fenêtre ne pouvait pas signaler une copie ratée."""
     controller, _ = make_controller()
@@ -557,8 +572,9 @@ def test_press_during_the_express_paste_says_it_is_running(qapp, make_controller
 def test_no_empty_selection_message_in_an_express_burst(qapp, make_controller, monkeypatch):
     """L-19 : en rafale (ligne suivante sélectionnée 0,6 s après chaque Ctrl+Alt+X), la copie simulée tombait
     parfois pendant que la sélection changeait : « Aucun texte sélectionné ». Plus de message juste après une
-    correction express collée ou refusée, ni pour un appui qui en suit un autre de près ou qu'un autre suit pendant
-    la lecture (premier appui d'une rafale). Un appui isolé le garde, même après « Aucune faute trouvée »."""
+    correction express collée, ni pour un appui qui en suit un autre de près. Un appui qu'un autre suit pendant la
+    lecture est relu une fois (en rafale, la ligne suivante ; sinon, le message). Un appui isolé garde le message,
+    même après un collage refusé ou « Aucune faute trouvée »."""
     from correcteur.ui import app as app_module
 
     monkeypatch.setattr(app_module, "_app_focused", lambda: False)
@@ -570,29 +586,27 @@ def test_no_empty_selection_message_in_an_express_burst(qapp, make_controller, m
     controller._on_command("correction-express", "")
     bridge.allow_capture.set()
     assert wait_until(qapp, lambda: not controller._capturing)
-    assert notes == [("Lecture de la sélection en cours, un instant…", False)]  # premier appui d'une rafale
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 2)  # relu une fois, toujours rien
+    assert notes == [("Lecture de la sélection en cours, un instant…", False), _NO_SELECTION]
 
     notes.clear()
     controller._on_command("correction-express", "")  # moins de 1,5 s après l'appui précédent
-    assert wait_until(qapp, lambda: bridge.calls.count("end") == 2)
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 3)
     assert notes == []
     controller._express_asked_at -= 2.0
     controller._on_command("correction-express", "")
-    assert wait_until(qapp, lambda: bridge.calls.count("end") == 3)
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 4)
     assert notes == [_NO_SELECTION]
 
-    # Correction express non collée (la sélection changeait) : rien pendant 3 s, puis le message revient.
+    # Correction express non collée : un appui isolé ensuite, sans sélection, a son message.
     bridge.replace = lambda capture, text: (False, _MOVED)
     _express_with_correction(controller)
     assert wait_until(qapp, lambda: not controller._busy_express)
     notes.clear()
-    controller._on_captured("correction-express", Capture(""))
-    assert notes == []
-    controller._on_captured("verifier-selection", Capture(""))  # Ctrl+Alt+C : rien n'a été remplacé
+    controller._express_asked_at -= 2.0
+    controller._on_command("correction-express", "")
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 5)
     assert notes == [_NO_SELECTION]
-    controller._express_refused_at -= 3.5
-    controller._on_captured("correction-express", Capture(""))
-    assert notes == [_NO_SELECTION] * 2
 
     # « Aucune faute trouvée » : rien n'a été remplacé, un appui isolé sans sélection garde son message.
     notes.clear()
@@ -600,8 +614,32 @@ def test_no_empty_selection_message_in_an_express_burst(qapp, make_controller, m
     assert wait_until(qapp, lambda: not controller._busy_express)
     controller._express_asked_at -= 2.0
     controller._on_command("correction-express", "")
-    assert wait_until(qapp, lambda: bridge.calls.count("end") == 4)
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 6)
     assert notes == [("Aucune faute trouvée ✓", False), _NO_SELECTION]
+
+
+def test_new_press_during_the_express_correction_resumes_it(qapp, make_controller, monkeypatch):
+    """Un 2e Ctrl+Alt+X pendant la vérification compte comme une frappe de l'utilisateur (compteur d'inactivité
+    sous GNOME, Raw Input sous Windows) : le collage était refusé avec un message inquiétant (« une touche a pu se
+    perdre »). La correction reprend sur la sélection du moment, et c'est elle qui est collée."""
+    from correcteur.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "_app_focused", lambda: False)
+    controller, notes = make_controller()
+    bridge = controller.bridge
+    pasted = []
+    bridge.replace = lambda capture, text: pasted.append(text) or (True, "")
+    controller._busy_express = True
+    controller._on_command("correction-express", "")  # pendant la vérification
+    assert notes == [("Nouvel appui : la correction express reprendra sur la sélection actuelle, un instant…", False)]
+    bridge.next_capture = Capture("Ces un test", from_selection=True)
+    result = CheckResult("Ces un test", [], {"grammalecte": EngineStatus("grammalecte", True)}, ())
+    controller.checker.autocorrect = lambda text: ("C'est un test", [object()], [], result)
+    _express_with_correction(controller)  # fin de la première vérification : pas collée
+    assert pasted == []
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 1)  # reprise : nouvelle capture
+    assert wait_until(qapp, lambda: pasted == ["C'est un test"], timeout=10)
+    assert not controller._express_again
 
 
 def test_ready_message_names_the_gnome_shortcuts(qapp, make_controller, monkeypatch):
