@@ -67,6 +67,8 @@ def test_text_contrast(theme):
     pairs += [("warn", "bg"), ("warn", "surface")]
     # Boutons principaux, première suggestion, texte sélectionné.
     pairs += [("accent_text", "accent")]
+    # Boutons enfoncés : fond « border » pour les boutons ordinaires, « muted » pour ceux remplis d'encre.
+    pairs += [("text", "border"), ("accent_text", "muted")]
     assert failures(theme, pairs, TEXT_MIN) == []
 
 
@@ -119,3 +121,35 @@ def test_stylesheet_uses_accessible_tokens(theme):
     for selector in ("QPushButton#primary:focus", 'QPushButton#suggestion[first="true"]:focus'):
         assert f"border: 2px solid {theme.outline}" in css[selector], selector
     assert f"color: {theme.muted}" in css["QLabel#tag"]
+    # « Remplacer » grisé ne doit plus avoir l'air actif (#primary l'emportait sur :disabled).
+    assert f"background: {theme.surface2}" in css["QPushButton#primary:disabled"]
+    assert f"color: {theme.muted}" in css["QPushButton#primary:disabled"]
+    # Chaque bouton montre qu'il est enfoncé.
+    for selector in ("QPushButton:pressed", "QPushButton#primary:pressed", 'QPushButton#suggestion[first="true"]:pressed',
+                     "QPushButton#link:pressed", "QToolButton:pressed"):
+        assert "background:" in css[selector], selector
+
+
+@pytest.mark.parametrize("theme", THEMES)
+@pytest.mark.parametrize("radio", [False, True], ids=["case", "radio"])
+def test_unchecked_indicators_have_a_visible_outline(qapp, theme, radio):
+    """Fusion tirait le contour des cases du fond assombri : sur le thème sombre, il était presque invisible."""
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QColor, QImage, QPainter
+    from PySide6.QtWidgets import QStyle, QStyleOptionButton
+
+    from correcteur.ui.theme import ThemedStyle
+
+    image = QImage(24, 24, QImage.Format.Format_RGB32)
+    image.fill(QColor(theme.bg))
+    option = QStyleOptionButton()
+    option.rect = QRect(4, 4, 16, 16)
+    option.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Off
+    element = (QStyle.PrimitiveElement.PE_IndicatorRadioButton if radio
+               else QStyle.PrimitiveElement.PE_IndicatorCheckBox)
+    painter = QPainter(image)
+    ThemedStyle(theme).drawPrimitive(element, option, painter)
+    painter.end()
+    # Bord gauche, autour de la mi-hauteur : le pixel le plus marqué (l'anticrénelage adoucit ceux d'un cercle).
+    edge = max((image.pixelColor(4, y).name() for y in range(9, 16)), key=lambda c: contrast(c, theme.bg))
+    assert contrast(edge, theme.bg) >= NON_TEXT_MIN

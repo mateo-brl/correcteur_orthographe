@@ -4,6 +4,7 @@ globaux, fenêtre de correction et correction express."""
 from __future__ import annotations
 
 import faulthandler
+import html
 import logging
 import os
 import re
@@ -252,14 +253,18 @@ class Toast(QLabel):
     """Bulle du correcteur, en bas à droite de l'écran où se trouve le pointeur. Sous Windows, elle remplace les
     notifications du système, que « Ne pas déranger » et les applications en plein écran rendent invisibles :
     « Aucun texte sélectionné » doit se voir au moment où l'on appuie sur le raccourci. Ne prend jamais le
-    focus ; un clic la ferme."""
+    focus ; un clic la ferme.
+
+    Le titre est en gras, comme dans les notifications du système qu'elle remplace. Une erreur porte le
+    triangle ▲ des avertissements de la fenêtre de correction : elle se lit sans dépendre de la couleur du
+    cadre, et le rouge reste à l'orthographe."""
 
     def __init__(self) -> None:
         super().__init__(None, Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setWordWrap(True)
-        self.setTextFormat(Qt.TextFormat.PlainText)  # le texte cite des extraits de l'utilisateur
+        self.setTextFormat(Qt.TextFormat.RichText)  # pour le titre ; le texte, qui cite l'utilisateur, est échappé
         self.setMargin(12)
         self.setMaximumWidth(440)
         self._timer = QTimer(self)
@@ -268,11 +273,19 @@ class Toast(QLabel):
 
     def show_message(self, text: str, ms: int = 3500, theme=None, error: bool = False, title: str = "") -> None:
         if theme is not None:
-            border = theme.spelling if error else theme.outline
+            border = theme.warn if error else theme.outline
             self.setStyleSheet(f"QLabel {{ background: {theme.surface}; color: {theme.text}; "
                                f"border: 2px solid {border}; border-radius: 8px; }}")
-        self.setText(f"{title}\n{text}" if title else text)
-        self.setMinimumWidth(0)
+        body = html.escape(text, quote=False).replace("\n", "<br>")
+        if title:
+            mark = ""
+            if error:
+                mark = f"<span style='color:{theme.warn}'>▲</span> " if theme is not None else "▲ "
+            body = f"{mark}<b>{html.escape(title, quote=False)}</b><br>{body}"
+        self.setText(body)
+        # Assez large pour qu'un message court tienne sur une ou deux lignes : sans minimum, Qt le repliait
+        # en colonne étroite (« Aucun texte sélectionné » sur trois lignes).
+        self.setMinimumWidth(320)
         self.adjustSize()
         screen = QGuiApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         if screen is not None:
@@ -494,7 +507,9 @@ class Controller(QObject):
         self._express_action = menu.addAction("Correction express",
                                               lambda: self.command.emit("correction-express", "menu"))
         menu.addAction("Vérifier le presse-papiers", lambda: self.command.emit("presse-papiers", ""))
-        menu.addAction("Ouvrir le correcteur", lambda: self.command.emit("ouvrir", ""))
+        # En gras : c'est ce que fait un clic sur l'icône (voir _tray_activated), comme l'entrée par défaut
+        # des menus d'icône de Windows.
+        menu.setDefaultAction(menu.addAction("Ouvrir le correcteur", lambda: self.command.emit("ouvrir", "")))
         menu.addSeparator()
         menu.addAction("Paramètres…", self.open_settings)
         menu.addAction("Quitter", self.quit)

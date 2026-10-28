@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import html
 import sys
 import threading
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QKeySequence
+from PySide6.QtGui import QGuiApplication, QKeySequence, QPainter, QPalette
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -54,6 +55,24 @@ LT_MODES = [
     ("premium", "Compte LanguageTool Premium"),
 ]
 
+
+class ListWithHint(QListWidget):
+    """Liste qui dit, quand elle est vide, ce qui viendra s'y ranger : un cadre blanc ne disait pas si c'était
+    normal, ni comment la remplir."""
+
+    def __init__(self, hint: str) -> None:
+        super().__init__()
+        self._hint = hint
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.count():
+            return
+        painter = QPainter(self.viewport())
+        painter.setPen(self.palette().color(QPalette.ColorRole.PlaceholderText))
+        area = self.viewport().rect().adjusted(16, 8, -16, -8)
+        painter.drawText(area, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self._hint)
+        painter.end()
 
 
 class HotkeyEdit(QKeySequenceEdit):
@@ -179,11 +198,12 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, controller, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Paramètres du correcteur")
-        self.setMinimumWidth(600)
+        # Pas de largeur minimale fixe : celle de la mise en page garde chaque case à cocher entière. À 600 px,
+        # « Corriger automatiquement… » et « Mode exigeant… » étaient coupées.
         self.controller = controller
         self.settings = settings.copy()
 
-        tabs = QTabWidget()
+        tabs = self.tabs = QTabWidget()
         tabs.addTab(self._general_tab(), "Général")
         tabs.addTab(self._engines_tab(), "Moteurs")
         tabs.addTab(self._dictionary_tab(), "Dictionnaire")
@@ -288,9 +308,7 @@ class SettingsDialog(QDialog):
     def _error_label(self) -> QLabel:
         label = QLabel("")
         label.setWordWrap(True)
-        theme = getattr(self.controller, "theme", None)
-        if theme is not None:
-            label.setStyleSheet(f"color: {theme.spelling};")
+        label.setTextFormat(Qt.TextFormat.RichText)
         label.hide()
         return label
 
@@ -304,7 +322,16 @@ class SettingsDialog(QDialog):
         return box
 
     def _show_error(self, label: QLabel, text: str) -> None:
-        label.setText(text)
+        # Comme les avertissements de la fenêtre de correction : le triangle et le texte disent l'erreur. Le rouge
+        # reste à l'orthographe (DESIGN.md : les couleurs vives sont celles des catégories de fautes).
+        theme = getattr(self.controller, "theme", None)
+        mark = f"<span style='color:{theme.warn}'>▲</span> " if theme is not None else "▲ "
+        label.setText(mark + html.escape(text, quote=False))
+        # « Enregistrer » cliqué depuis un autre onglet : l'erreur restait sur l'onglet Général, caché, et la
+        # fenêtre semblait ne rien faire.
+        for index in range(self.tabs.count()):
+            if self.tabs.widget(index).isAncestorOf(label):
+                self.tabs.setCurrentIndex(index)
         label.show()
         # Message sur deux lignes : la fenêtre grandit pour l'afficher en entier (sa 2e ligne était coupée).
         QTimer.singleShot(0, lambda: self._fit_label(label))
@@ -385,13 +412,37 @@ class SettingsDialog(QDialog):
         l_layout.addLayout(form)
         layout.addWidget(lbox)
         layout.addStretch(1)
+
+        # Réglages propres à un mode, avec leur libellé : modifiables seulement quand ce mode est choisi.
+        self._lt_mode_fields = {
+            "local": [self.lt_status, self.lt_install, self.lt_ram, form.labelForField(local_row),
+                      form.labelForField(self.lt_ram)],
+            "perso": [self.lt_url, form.labelForField(self.lt_url)],
+            "premium": [self.lt_user, self.lt_key, form.labelForField(self.lt_user), form.labelForField(self.lt_key)],
+        }
+        self.lt_enabled.toggled.connect(self._sync_lt_fields)
+        self.lt_mode.buttonToggled.connect(lambda *_: self._sync_lt_fields())
+        self._sync_lt_fields()
         return page
+
+    def _sync_lt_fields(self) -> None:
+        """Seuls les réglages du mode choisi restent modifiables : les cinq champs ouverts à la fois laissaient
+        croire qu'il fallait tous les remplir. Grisés plutôt que cachés, pour que la fenêtre ne change pas de
+        forme à chaque choix."""
+        on = self.lt_enabled.isChecked()
+        for radio in self._lt_radios.values():
+            radio.setEnabled(on)
+        self.lt_picky.setEnabled(on)
+        for code, widgets in self._lt_mode_fields.items():
+            for widget in widgets:
+                widget.setEnabled(on and self._lt_radios[code].isChecked())
 
     def _dictionary_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(QLabel("Mots acceptés (noms propres, jargon…) :"))
-        self.words = QListWidget()
+        self.words = ListWithHint("Aucun mot pour l'instant. Tapez-en un ci-dessous, ou choisissez « Ajouter au "
+                                  "dictionnaire » sur une faute d'orthographe.")
         dictionary = self.controller.dictionary
         self._opened_words = list(dictionary.words() if dictionary else [])
         self.words.addItems(self._opened_words)
@@ -408,9 +459,15 @@ class SettingsDialog(QDialog):
         remove.clicked.connect(lambda: [self.words.takeItem(self.words.row(i)) for i in self.words.selectedItems()])
         row.addWidget(remove)
         layout.addLayout(row)
+        # Grisés tant qu'ils n'ont rien sur quoi agir : un clic sans effet ne disait pas pourquoi.
+        add.setEnabled(False)
+        self.new_word.textChanged.connect(lambda text: add.setEnabled(bool(text.strip())))
+        remove.setEnabled(False)
+        self.words.itemSelectionChanged.connect(lambda: remove.setEnabled(bool(self.words.selectedItems())))
 
         layout.addWidget(QLabel("Règles désactivées :"))
-        self.rules = QListWidget()
+        self.rules = ListWithHint("Aucune règle désactivée. « Ne plus signaler cette règle », dans le menu ⋯ "
+                                  "d'une remarque, en ajoute une ici.")
         for rule in self.settings.ignored_rules:
             # La description si elle est connue (règle coupée depuis la 0.1.14), l'identifiant en infobulle.
             item = QListWidgetItem(self.settings.rule_labels.get(rule) or rule)
@@ -420,7 +477,13 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.rules, 1)
         restore = QPushButton("Réactiver la règle sélectionnée")
         restore.clicked.connect(lambda: [self.rules.takeItem(self.rules.row(i)) for i in self.rules.selectedItems()])
-        layout.addWidget(restore)
+        restore.setEnabled(False)
+        self.rules.itemSelectionChanged.connect(lambda: restore.setEnabled(bool(self.rules.selectedItems())))
+        # À droite, à la place de « Supprimer » pour les mots : la même action (retirer de la liste) au même endroit.
+        restore_row = QHBoxLayout()
+        restore_row.addStretch(1)
+        restore_row.addWidget(restore)
+        layout.addLayout(restore_row)
         return page
 
     @staticmethod
@@ -439,7 +502,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(label)
         open_dir = QPushButton("Ouvrir le dossier des paramètres")
         open_dir.clicked.connect(self._open_config_dir)
-        layout.addWidget(open_dir)
+        layout.addWidget(open_dir, 0, Qt.AlignmentFlag.AlignLeft)  # largeur du libellé, comme les boutons du système
         layout.addStretch(1)
         return page
 
@@ -489,6 +552,14 @@ class SettingsDialog(QDialog):
         if word and not self.words.findItems(word, Qt.MatchFlag.MatchExactly):
             self.words.addItem(word)
         self.new_word.clear()
+
+    def keyPressEvent(self, event) -> None:
+        # Entrée dans « Nouveau mot » ajoute le mot (returnPressed), puis remontait jusqu'ici et déclenchait
+        # « Enregistrer » : les paramètres se fermaient après le premier mot.
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.focusWidget() is self.new_word:
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _hotkey(self, edit: QKeySequenceEdit, fallback: str) -> str:
         seq = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)

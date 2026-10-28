@@ -320,6 +320,8 @@ class IssueCard(QFrame):
             actions.addWidget(add)
         more = QToolButton()
         more.setText("⋯")
+        more.setToolTip("Plus d'actions")
+        more.setAccessibleName("Plus d'actions")  # sinon un lecteur d'écran ne lit que « ⋯ »
         more.setAutoRaise(True)
         more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         menu = QMenu(more)
@@ -385,7 +387,9 @@ class CorrectionWindow(QWidget):
 
         self.setWindowTitle("Correcteur")
         self.resize(640, 540)
-        self.setMinimumSize(420, 360)
+        # Hauteur seulement : la largeur minimale est celle des boutons du bas, que la mise en page calcule.
+        # Fixée à 420 px, elle rognait « Corrections sûres (2) » et « Corriger et remplacer ».
+        self.setMinimumHeight(360)
 
         self.runner = CheckRunner(checker)
         self.runner.updated.connect(self._on_result)
@@ -419,6 +423,7 @@ class CorrectionWindow(QWidget):
         gear = QToolButton()
         gear.setText("⚙")
         gear.setToolTip("Paramètres")
+        gear.setAccessibleName("Paramètres")
         gear.setAutoRaise(True)
         gear.clicked.connect(self.settingsRequested.emit)
         head.addWidget(gear)
@@ -913,7 +918,8 @@ class CorrectionWindow(QWidget):
             elif ok:
                 text = "✓ Aucune faute trouvée."
             elif failed:
-                text = "\n".join(["Aucun moteur n'a pu vérifier le texte."] + failed)
+                text = "\n".join(["Aucun moteur n'a pu vérifier le texte."] + failed
+                                 + ["F5 pour réessayer, ou réglez les moteurs dans les paramètres (onglet Moteurs)."])
             elif self._no_engine:
                 text = "Aucun moteur actif pour ce texte (Paramètres, onglet Moteurs)."
         self.placeholder.setText(text)

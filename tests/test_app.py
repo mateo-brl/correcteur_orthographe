@@ -634,7 +634,10 @@ def test_own_toast_is_used_on_windows(qapp, make_controller, monkeypatch):
     toast = app_module.Toast()
     toast.show_message("Aucun texte sélectionné", app_module.toast_duration("Aucun texte sélectionné"), LIGHT, True,
                        "Correcteur")
-    assert toast.isVisible() and toast.text() == "Correcteur\nAucun texte sélectionné"
+    assert toast.isVisible() and "<b>Correcteur</b><br>Aucun texte sélectionné" in toast.text()
+    assert "▲" in toast.text()  # une erreur ne se signale pas par la seule couleur du cadre
+    toast.show_message("« <b>gras</b> » & co", 3500, LIGHT, False, "Correcteur")
+    assert "&lt;b&gt;gras&lt;/b&gt;" in toast.text() and "▲" not in toast.text()  # extraits de l'utilisateur échappés
     QTest.mouseClick(toast, Qt.MouseButton.LeftButton, pos=QPoint(5, 5))
     assert not toast.isVisible()
     assert app_module.toast_duration("x") == 3500 and app_module.toast_duration("x" * 1000) == 10_000

@@ -369,7 +369,8 @@ def test_all_engines_failed_lists_causes(qapp, make_window):
     assert w.placeholder.text() == (
         "Aucun moteur n'a pu vérifier le texte.\n"
         "Grammalecte n'est pas installé.\n"
-        "Limite de l'API publique LanguageTool atteinte, réessayez dans une minute."
+        "Limite de l'API publique LanguageTool atteinte, réessayez dans une minute.\n"
+        "F5 pour réessayer, ou réglez les moteurs dans les paramètres (onglet Moteurs)."
     )
     assert not w.placeholder.isHidden()
     assert w.notice.isHidden()  # les causes sont déjà dans la liste
@@ -833,3 +834,143 @@ def test_tab_order_follows_the_screen(qapp, window):
     first_card_button = window._cards[0].findChildren(__import__("PySide6.QtWidgets").QtWidgets.QAbstractButton)[0]
     assert order.index(first_card_button) < order.index(window.fix_sure) < order.index(window.replace_btn)
     assert window.scroll not in order
+
+
+@pytest.fixture
+def styled(qapp):
+    """Feuille de style de l'application : ses marges intérieures élargissent les boutons."""
+    from correcteur.ui.theme import LIGHT, stylesheet
+
+    qapp.setStyleSheet(stylesheet(LIGHT))
+    yield
+    qapp.setStyleSheet("")
+
+
+def test_footer_buttons_are_never_cut(qapp, make_window, styled):
+    """À la largeur minimale (420 px fixés), « Corrections sûres (2) » et « Corriger et copier » étaient rognés."""
+    w = make_window(grammalecte=dict(found=g_issues), languagetool=dict(found=lt_issues))
+    open_and_wait(qapp, w)
+    assert w.replace_btn.text().startswith("Corriger")  # le libellé le plus long
+    w.resize(1, w.height())
+    qapp.processEvents()
+    for button in (w.fix_sure, w.more_btn, w.copy_btn, w.replace_btn):
+        assert button.width() >= button.sizeHint().width(), button.text()
+
+
+def test_settings_checkboxes_are_never_cut(qapp, home, styled):
+    """La largeur minimale fixe (600 px) coupait « Corriger automatiquement… » et « Mode exigeant… » dès que
+    le texte du système était un peu plus grand."""
+    from PySide6.QtWidgets import QTabWidget
+
+    from correcteur.ui.settings import SettingsDialog
+    from correcteur.ui.theme import LIGHT, stylesheet
+
+    qapp.setStyleSheet(stylesheet(LIGHT) + "QWidget { font-size: 13pt; }")
+    settings = Settings()
+    dialog = SettingsDialog(settings, FakeController(settings, PersonalDictionary()))
+    dialog.show()
+    dialog.resize(1, dialog.height())
+    for tab, box in ((0, dialog.auto_correct), (1, dialog.lt_picky)):
+        dialog.findChild(QTabWidget).setCurrentIndex(tab)  # un onglet caché n'est pas mis en page
+        qapp.processEvents()
+        assert box.width() >= box.sizeHint().width(), box.text()
+    dialog.close()
+
+
+def test_only_the_chosen_languagetool_mode_is_editable(qapp, home):
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    dialog = SettingsDialog(settings, FakeController(settings, PersonalDictionary()))
+    dialog._lt_radios["public"].setChecked(True)
+    assert not dialog.lt_url.isEnabled() and not dialog.lt_key.isEnabled() and not dialog.lt_ram.isEnabled()
+    assert dialog.lt_picky.isEnabled()  # vaut pour tous les modes
+    dialog._lt_radios["perso"].setChecked(True)
+    assert dialog.lt_url.isEnabled() and not dialog.lt_user.isEnabled()
+    dialog._lt_radios["premium"].setChecked(True)
+    assert dialog.lt_user.isEnabled() and dialog.lt_key.isEnabled() and not dialog.lt_url.isEnabled()
+    dialog._lt_radios["local"].setChecked(True)
+    assert dialog.lt_ram.isEnabled() and dialog.lt_install.isEnabled()
+    dialog.lt_enabled.setChecked(False)
+    assert not dialog.lt_ram.isEnabled() and not dialog._lt_radios["public"].isEnabled()
+    assert not dialog.lt_picky.isEnabled()
+    # Grisés, mais enregistrés tels quels.
+    dialog.lt_enabled.setChecked(True)
+    dialog._lt_radios["public"].setChecked(True)
+    dialog.lt_url.setText("http://serveur:8081")
+    dialog._accept()
+    assert dialog.controller.settings.languagetool.url == "http://serveur:8081"
+
+
+def test_dictionary_buttons_wait_for_something_to_act_on(qapp, home):
+    from PySide6.QtWidgets import QPushButton
+
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    settings.ignored_rules = ["REGLE"]
+    dialog = SettingsDialog(settings, FakeController(settings, PersonalDictionary()))
+    buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
+    add, remove, restore = buttons["Ajouter"], buttons["Supprimer"], buttons["Réactiver la règle sélectionnée"]
+    assert not add.isEnabled() and not remove.isEnabled() and not restore.isEnabled()
+    dialog.new_word.setText("  ")
+    assert not add.isEnabled()
+    dialog.new_word.setText("Zorglub")
+    assert add.isEnabled()
+    add.click()
+    assert dialog._items(dialog.words) == ["Zorglub"] and not add.isEnabled()
+    dialog.words.item(0).setSelected(True)
+    assert remove.isEnabled()
+    remove.click()
+    assert dialog.words.count() == 0 and not remove.isEnabled()
+    dialog.rules.item(0).setSelected(True)
+    assert restore.isEnabled()
+    restore.click()
+    assert dialog.rules.count() == 0 and not restore.isEnabled()
+
+
+def test_a_taken_hotkey_shows_its_tab_when_saving_from_another(qapp, home, styled):
+    """« Enregistrer » depuis l'onglet Dictionnaire : l'erreur restait sur l'onglet Général, caché, et la fenêtre
+    semblait ne rien faire."""
+    from PySide6.QtGui import QKeySequence
+    from PySide6.QtWidgets import QTabWidget
+
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    controller = FakeController(settings, PersonalDictionary())
+    controller.bridge.hotkey_free = lambda combo: combo != "<ctrl>+<alt>+k"
+    dialog = SettingsDialog(settings, controller)
+    dialog.hk_express.setKeySequence(QKeySequence("Ctrl+Alt+K"))
+    dialog.show()
+    tabs = dialog.findChild(QTabWidget)
+    tabs.setCurrentIndex(2)
+    qapp.processEvents()
+    dialog._accept()
+    label = dialog.hk_express_error
+    assert tabs.currentIndex() == 0 and label.isVisible()
+    assert wait_until(qapp, lambda: label.height() >= label.heightForWidth(label.width()))
+    dialog.close()
+
+
+def test_enter_in_the_word_field_adds_the_word_and_keeps_the_settings_open(qapp, home):
+    """Entrée dans « Nouveau mot » ajoutait le mot, puis enregistrait et fermait les paramètres."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QTabWidget
+
+    from correcteur.ui.settings import SettingsDialog
+
+    settings = Settings()
+    controller = FakeController(settings, PersonalDictionary())
+    dialog = SettingsDialog(settings, controller)
+    dialog.show()
+    dialog.findChild(QTabWidget).setCurrentIndex(2)
+    dialog.new_word.setFocus()
+    for word in ("Zorglub", "Bidule"):
+        QTest.keyClicks(dialog.new_word, word)
+        QTest.keyClick(dialog.new_word, Qt.Key.Key_Return)
+    assert dialog._items(dialog.words) == ["Zorglub", "Bidule"]
+    assert dialog.isVisible() and not hasattr(controller, "applied_words")  # rien d'enregistré
+    dialog.words.setFocus()
+    QTest.keyClick(dialog.words, Qt.Key.Key_Return)  # ailleurs, Entrée enregistre toujours
+    assert not dialog.isVisible() and controller.applied_words == ["Zorglub", "Bidule"]
