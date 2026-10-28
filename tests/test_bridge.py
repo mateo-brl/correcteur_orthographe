@@ -267,6 +267,12 @@ class FakeX11:
                          ("_idle_ms", lambda: int((self.clock.now - self.last_input) * 1000)),
                          ("_saved_text", lambda: self.clipboard), ("_activate", lambda wid: True)):
             monkeypatch.setattr(x11, name, fn)
+        # Formats du presse-papiers relus après une copie simulée (_inspect) : du texte seul. Sans cela, le test
+        # interrogeait le vrai serveur X (Linux), ou échouait faute de python-xlib (Windows).
+        from correcteur.platform import x11_selection
+
+        monkeypatch.setattr(x11_selection, "selection_targets", lambda selection="CLIPBOARD", timeout=1.0: [])
+        monkeypatch.setattr(x11_selection, "read_target", lambda selection, target, timeout=1.0: None)
 
     def write(self, text, qt_fallback=True):
         self.clipboard = text
