@@ -37,8 +37,10 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s %(threadName)s %(name)s : %(message)s"
 _GNOME_MISSING = ("Raccourcis clavier inactifs : sous Wayland, ils passent par GNOME, et ceux du correcteur n'y "
                   "sont pas. Créez-les dans Paramètres > Général (« Créer les raccourcis GNOME automatiquement »).")
 # Après une correction express réussie, la sélection a été remplacée : une 2e frappe rapide du raccourci ne trouve
-# plus rien, et « Aucun texte sélectionné » ferait croire à un échec.
+# plus rien, et « Aucun texte sélectionné » ferait croire à un échec (voir aussi Controller._quiet_no_selection).
 _QUIET_AFTER_EXPRESS_S = 3.0
+# Appuis de la correction express plus rapprochés que ça : une rafale, où la sélection change pendant la lecture.
+_EXPRESS_REPEAT_S = 1.5
 # Correction express plus longue que ça (long texte, LanguageTool lent) : « Correction en cours… ».
 _EXPRESS_PROGRESS_MS = 1000
 _crash_file = None  # plantages.log, ouvert pour toute la vie du processus (voir install_crash_log)
@@ -307,13 +309,22 @@ def toast_duration(text: str) -> int:
 class Controller(QObject):
     command = Signal(str, str)            # commandes venant des raccourcis ou de l'IPC (autres threads)
     expressDone = Signal(object, object)  # (capture, (texte corrigé, nombre appliqué, bilan, erreur ?) ou exception)
+    expressFinished = Signal()            # correction express finie, collage compris (voir _express_done)
     captured = Signal(str, object)        # (commande, capture) : sélection lue dans un fil de travail
     notifyRequested = Signal(str, bool)   # notification demandée depuis un fil de travail
     gnomeShortcutsRead = Signal(object, bool)  # (raccourcis GNOME du correcteur ou None, prévenir s'il en manque)
 
-    def __init__(self, app: QApplication, startup: bool = False) -> None:
+    def __init__(self, app: QApplication, startup: bool = False, ipc: IpcServer | None = None) -> None:
         super().__init__()
         self.app = app
+        # Canal de commande ouvert avant les travaux lents (fenêtres, icône), ou dès le lancement par la ligne de
+        # commande (voir cli.main) : les commandes reçues attendent la boucle d'événements.
+        self.command.connect(self._on_command, Qt.ConnectionType.QueuedConnection)
+        if ipc is None:
+            ipc = IpcServer()
+            ipc.start()
+        self.ipc = ipc
+        ipc.set_handler(lambda cmd, data: self.command.emit(cmd, data))
         self.store = SettingsStore()
         self.settings: Settings = self.store.load()
         self._sync_autostart()
@@ -346,13 +357,18 @@ class Controller(QObject):
         if scheme_changed is not None:
             scheme_changed.connect(lambda *_: self._follow_theme())
 
-        self.command.connect(self._on_command, Qt.ConnectionType.QueuedConnection)
         self.expressDone.connect(self._express_done, Qt.ConnectionType.QueuedConnection)
+        self.expressFinished.connect(self._express_finished, Qt.ConnectionType.QueuedConnection)
         self.captured.connect(self._on_captured, Qt.ConnectionType.QueuedConnection)
         self.notifyRequested.connect(self.notify, Qt.ConnectionType.QueuedConnection)
         self.gnomeShortcutsRead.connect(self._gnome_shortcuts_read, Qt.ConnectionType.QueuedConnection)
         self._capturing = False
         self._express_replaced_at = float("-inf")  # dernière correction express collée (time.monotonic())
+        self._express_asked_at = float("-inf")     # dernier appui de la correction express, accepté ou non
+        self._express_repeat = False               # la capture en cours suit de près un autre appui (rafale)
+        self._express_pasting = False              # collage d'une correction express en cours (voir _express_done)
+        self._express_again = False                # nouvel appui pendant une correction express : elle reprend
+        self._capture_command = ""                 # commande de la capture en cours
         self._ready_pending = False  # message « Correcteur prêt » en attente des raccourcis GNOME
         # Raccourcis qui fonctionnent réellement, pour le menu de l'icône (voir _menu_label).
         self._hotkeys_active = False
@@ -368,8 +384,7 @@ class Controller(QObject):
             self._create_tray_menu()
             self.tray.show()
 
-        self.ipc = IpcServer(lambda cmd, data: self.command.emit(cmd, data))
-        if not self.ipc.start():
+        if not self.ipc.listening:
             if self.ipc.other_instance:
                 QTimer.singleShot(0, self.quit)  # lancée en même temps qu'une autre : celle-là répond déjà
             else:
@@ -612,6 +627,18 @@ class Controller(QObject):
             self._show_ready()
 
     def _on_command(self, command: str, data: str) -> None:
+        repeat = data == "reprise"
+        if command == "correction-express" and not repeat:
+            # Heure de chaque appui, même refusé : voir _quiet_no_selection.
+            now = time.monotonic()
+            repeat, self._express_asked_at = now - self._express_asked_at < _EXPRESS_REPEAT_S, now
+        # Nouvel appui pendant une correction express : il compte comme une frappe de l'utilisateur (Raw Input sous
+        # Windows, compteur d'inactivité sous Linux), qui ferait refuser le collage. La correction reprend donc,
+        # une fois, sur la sélection du moment (voir _on_captured et _express_done).
+        again = command == "correction-express" and not data and not self._express_pasting and (
+            self._busy_express or (self._capturing and self._capture_command == command))
+        if again:
+            self._express_again = True
         if self._capturing and command in ("verifier-selection", "correction-express", "presse-papiers"):
             # Souvent une 2e frappe du raccourci, parce que rien n'apparaît encore. La rejouer ensuite lancerait
             # un 2e Ctrl+C sur une sélection qui a pu changer, ou sur la fenêtre qui vient de s'ouvrir.
@@ -620,9 +647,14 @@ class Controller(QObject):
         if command == "verifier-selection":
             self._capture_for(command, from_menu=data == "menu")
         elif command == "correction-express":
-            if self._busy_express:
-                self.notify("Correction express déjà en cours, un instant…")
+            if self._express_pasting:
+                # Reçu pendant le collage (replace() bloque le fil de l'interface), donc traité après lui : le bilan
+                # y répond.
+                log.info("Correction express demandée pendant un collage : ignorée.")
+            elif self._busy_express:
+                self.notify("Nouvel appui : la correction express reprendra sur la sélection actuelle, un instant…")
             else:
+                self._express_repeat = repeat
                 self._capture_for(command, from_menu=data == "menu")
         elif command == "presse-papiers":
             self.window.open_with(self.bridge.clipboard_text(), None)
@@ -645,7 +677,7 @@ class Controller(QObject):
             if capture is not None:
                 self._on_captured(command, capture)
                 return
-        self._capturing = True
+        self._capturing, self._capture_command = True, command
         self.bridge.begin_capture()
         express = command == "correction-express"
         if not self.bridge.capture_in_thread:
@@ -667,11 +699,18 @@ class Controller(QObject):
             self.bridge.end_capture(capture)
         if not capture.text.strip():
             self.release_capture(capture)
+            if command == "correction-express" and self._express_again:
+                # Rien de lu, et un autre appui pendant la lecture : on relit une fois, sans rien dire (en rafale, la
+                # sélection suivante ; sinon, la relecture dira elle-même qu'il n'y a rien).
+                self._express_again, self._express_repeat = False, False
+                self._capture_for(command)
+                return
             if capture.problem:
                 self.notify(capture.problem, error=True)
                 return
-            if time.monotonic() - self._express_replaced_at < _QUIET_AFTER_EXPRESS_S:
-                log.info("Aucun texte sélectionné juste après une correction express : pas de message.")
+            if self._quiet_no_selection(command):
+                log.info("Aucun texte sélectionné juste après une correction express ou un autre appui : "
+                         "pas de message.")
                 return
             # Pas de fenêtre vide sans explication : l'utilisateur sait tout de suite quoi faire.
             self.notify("Aucun texte sélectionné : sélectionnez un texte, puis recommencez.")
@@ -680,6 +719,15 @@ class Controller(QObject):
             self.window.open_with(capture.text, capture)
         else:
             self._express(capture)
+
+    def _quiet_no_selection(self, command: str) -> bool:
+        """« Aucun texte sélectionné » à taire ? Juste après une correction express collée : la sélection vient
+        d'être remplacée. En correction express, aussi quand l'appui en suivait un autre de près, ou pour une
+        reprise : en rafale, la sélection change pendant la lecture (copie simulée jusqu'à une seconde après l'appui
+        sous Wayland), et le message ferait croire à un échec. Un appui isolé le garde."""
+        if time.monotonic() - self._express_replaced_at < _QUIET_AFTER_EXPRESS_S:
+            return True
+        return command == "correction-express" and self._express_repeat
 
     def _express(self, capture: Capture) -> None:
         if self._busy_express:
@@ -711,23 +759,44 @@ class Controller(QObject):
         return new_text, len(applied), message, error
 
     def _express_done(self, capture: Capture, outcome) -> None:
-        self._busy_express = False
         self._express_progress.stop()
-        if isinstance(outcome, Exception):
-            self.release_capture(capture)
-            self.notify(f"Correction impossible : {outcome}", error=True)
-            return
-        new_text, applied, text, error = outcome
-        if not applied:
-            self.release_capture(capture)
-            self.notify(text, error=error)
-            return
-        ok, message = self.bridge.replace(capture, new_text)
-        if ok:
-            self._express_replaced_at = time.monotonic()
-            self.notify(f"{text}\n{message}" if message else text)
-        else:
-            self.notify(message, error=True)
+        again = False
+        try:
+            if self._express_again and not isinstance(outcome, Exception) and outcome[1]:
+                # Nouvel appui pendant la correction : elle reprend sur la sélection du moment (le collage de
+                # celle-ci serait refusé, l'appui comptant comme une frappe).
+                log.info("Nouvel appui pendant la correction express : elle reprend.")
+                self.release_capture(capture)
+                again = True
+                return
+            self._express_again = False
+            if isinstance(outcome, Exception):
+                self.release_capture(capture)
+                self.notify(f"Correction impossible : {outcome}", error=True)
+                return
+            new_text, applied, text, error = outcome
+            if not applied:
+                self.release_capture(capture)
+                self.notify(text, error=error)
+                return
+            self._express_pasting = True
+            ok, message = self.bridge.replace(capture, new_text)
+            if ok:
+                self._express_replaced_at = time.monotonic()
+                self.notify(f"{text}\n{message}" if message else text)
+            else:
+                self.notify(message, error=True)
+        finally:
+            # Correction en cours jusqu'à la fin du collage : replace() bloque le fil de l'interface (jusqu'à une
+            # seconde sous Wayland), et les appuis reçus pendant ce temps, rangés dans la file avant ce signal, ne
+            # lancent pas ensuite une capture en retard (qui lisait la sélection faite après l'appui, ou rien).
+            self.expressFinished.emit()
+            self._express_again = False
+            if again:
+                self.command.emit("correction-express", "reprise")  # après expressFinished, dans la file
+
+    def _express_finished(self) -> None:
+        self._busy_express = self._express_pasting = False
 
     def _no_engine_reason(self, text: str) -> str:
         """Pourquoi aucun moteur n'a même été lancé sur ce texte."""
@@ -858,14 +927,23 @@ class Controller(QObject):
         self.app.quit()
 
 
-def run_app(initial_command: str | None = None, startup: bool = False, debug: bool | None = None) -> int:
-    """`debug` : journal détaillé ; par défaut, celui de la ligne de commande (option --debug)."""
+def log_command_channel(ipc: IpcServer | None) -> None:
+    """Échec du canal de commande au journal : ouvert avant lui (voir cli.main), il ne pouvait pas l'y écrire."""
+    if ipc is not None and not ipc.listening and not ipc.other_instance and ipc.error:
+        log.warning("%s", ipc.error)
+
+
+def run_app(initial_command: str | None = None, startup: bool = False, debug: bool | None = None,
+            ipc: IpcServer | None = None) -> int:
+    """`debug` : journal détaillé ; par défaut, celui de la ligne de commande (option --debug). `ipc` : canal de
+    commande déjà ouvert (voir cli.main)."""
     if debug is None:
         debug = logging.getLogger().isEnabledFor(logging.DEBUG)
     install_log(debug)
     install_crash_log()
     log.info("%s %s démarré (Python %s, %s, session %s)", APP_NAME, __version__, sys.version.split()[0],
              sys.platform, " ".join(part for part in (session_type(), desktop_name()) if part))
+    log_command_channel(ipc)
     QApplication.setApplicationName(APP_NAME)
     QApplication.setApplicationVersion(__version__)
     QApplication.setQuitOnLastWindowClosed(False)
@@ -879,7 +957,7 @@ def run_app(initial_command: str | None = None, startup: bool = False, debug: bo
     app = QApplication(sys.argv[:1])
     collector = MainThreadGarbageCollector(app)  # noqa: F841 (actif jusqu'à la fin de app.exec())
     load_qt_translation(app)
-    controller = Controller(app, startup=startup)
+    controller = Controller(app, startup=startup, ipc=ipc)
     app.aboutToQuit.connect(controller.checker.close)
     # Arrêt normal noté au journal : sans cette ligne, une fin brutale (plantage, session fermée) se repère.
     app.aboutToQuit.connect(lambda: log.info("%s arrêté normalement.", APP_NAME))

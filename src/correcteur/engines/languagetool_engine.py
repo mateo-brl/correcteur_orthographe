@@ -132,6 +132,9 @@ class LanguageToolEngine(Engine):
     def warmup(self) -> None:
         if self.mode == "local" and self.server is not None:
             self.server.ensure_started()
+        # Client HTTP prêt avant la première vérification (import de httpx, certificats) : sinon elle attendait
+        # aussi ce chargement avant d'envoyer le texte.
+        self._http()
 
     def close(self) -> None:
         with self._client_lock:

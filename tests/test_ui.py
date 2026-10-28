@@ -805,6 +805,56 @@ def test_disabled_rules_are_listed_by_description(qapp, home):
     assert controller.settings.rule_labels == {"esp_avant_après_tiret": "Espace avant un tiret : « – »"}
 
 
+def test_rules_sharing_a_label_are_one_line(qapp, home):
+    """L-20 : « au jour d'aujourd'hui », coupé chez Grammalecte et LanguageTool, était listé deux fois sous le même
+    libellé, noté avec la ponctuation du message : « Pléonasme. : « … » ». Une ligne, qui réactive les deux."""
+    from correcteur.ui.settings import SettingsDialog
+
+    pleo, lt = "g2__pleo_locutions__b7_a1_1", "AU_JOUR_D_AUJOURD_HUI"
+    settings = Settings()
+    settings.ignored_rules = [pleo, "ANCIENNE", lt, "AUTRE"]
+    old = "Pléonasme. : « au jour d'aujourd'hui »"  # noté par la 0.1.15
+    asked = "Erreur de frappe ? : « 1a »"  # message terminé par « ? » (typographie française)
+    settings.rule_labels = {pleo: old, lt: old, "AUTRE": asked}
+    controller = FakeController(settings, PersonalDictionary())
+    dialog = SettingsDialog(settings, controller)
+    items = [dialog.rules.item(i) for i in range(dialog.rules.count())]
+    assert [i.text() for i in items] == ["Pléonasme : « au jour d'aujourd'hui »", "ANCIENNE",
+                                         "Erreur de frappe : « 1a »"]
+    assert items[0].toolTip() == f"{pleo}\n{lt}" and items[1].toolTip() == "ANCIENNE"
+    dialog.rules.takeItem(1)
+    dialog._accept()
+    assert controller.settings.ignored_rules == [pleo, lt, "AUTRE"]
+    assert controller.settings.rule_labels == {pleo: old, lt: old, "AUTRE": asked}
+
+    dialog = SettingsDialog(controller.settings, controller)
+    assert dialog.rules.count() == 2
+    dialog.rules.takeItem(0)
+    dialog._accept()
+    assert controller.settings.ignored_rules == ["AUTRE"] and controller.settings.rule_labels == {"AUTRE": asked}
+
+
+def test_rule_label_drops_the_final_punctuation():
+    """L-20 : « Pléonasme. : « au jour d'aujourd'hui » », un point puis deux-points."""
+    from correcteur.ui.popup import rule_label
+
+    text = "Au jour d'aujourd'hui, il pleut."
+    pleo = Issue(0, 21, "Pléonasme.", ["Aujourd'hui"], Category.STYLE, "PLEO", "grammalecte")
+    assert rule_label(pleo, text) == "Pléonasme : « Au jour d'aujourd'hui »"
+    asked = Issue(0, 2, "Faute de frappe ?", [], Category.GRAMMAR, "X", "languagetool")
+    assert rule_label(asked, text) == "Faute de frappe : « Au »"
+    long = Issue(0, 2, "a" * 77 + ", et la suite du message.", [], Category.GRAMMAR, "X", "languagetool")
+    assert rule_label(long, text) == "a" * 77 + "… : « Au »"
+    inserted = Issue(2, 2, "Il manque une virgule.", [","], Category.TYPOGRAPHY, "X", "languagetool")
+    assert rule_label(inserted, text) == "Il manque une virgule"
+    # Hors ligne, la zone est réduite à ce qui change : l'exemple reprend les mots entiers.
+    narrowed = Issue(0, 10, "Pléonasme.", ["Aujourd'hui"], Category.STYLE, "PLEO", "grammalecte")
+    assert rule_label(narrowed, text) == "Pléonasme : « Au jour d'aujourd'hui »"
+    rain = "Il pleut au jour d'aujourd'hui."
+    assert rule_label(Issue(3, 9, "Pluie.", [], Category.STYLE, "X", "grammalecte"), rain) == "Pluie : « pleut »"
+    assert rule_label(Issue(4, 7, "Pluie.", [], Category.STYLE, "X", "grammalecte"), rain) == "Pluie : « pleut »"
+
+
 def test_long_shortcut_error_is_shown_whole(qapp, home):
     """W-07 : le message « … est déjà pris par une autre application… » avait sa 2e ligne coupée."""
     from correcteur.ui.settings import SettingsDialog

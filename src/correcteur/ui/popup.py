@@ -133,13 +133,28 @@ def card_key(issue: Issue, text: str) -> tuple:
 
 def rule_label(issue: Issue, text: str) -> str:
     """Description d'une règle coupée, pour les Paramètres : son message et l'exemple qui l'a montrée."""
-    message = " ".join(issue.message.split())
+    # Sans sa ponctuation finale, qui donnait « Pléonasme. : « au jour d'aujourd'hui » » (L-20).
+    message = " ".join(issue.message.split()).rstrip(" .,;:!?")
     if len(message) > 80:
-        message = message[:79] + "…"
-    example = " ".join(text[issue.start:issue.end].split())
+        message = message[:79].rstrip(" .,;:!?") + "…"
+    start, end = issue.start, issue.end
+    if end > start:
+        # Mots entiers : hors ligne, la zone est réduite à ce qui change (« au jour d' »).
+        while start > 0 and _inside_word(text, start) and _inside_word(text, start - 1):
+            start -= 1
+        while end < len(text) and _inside_word(text, end - 1) and _inside_word(text, end):
+            end += 1
+    example = " ".join(text[start:end].split())
     if len(example) > 40:
         example = example[:39] + "…"
     return f"{message} : « {example} »" if example else message
+
+
+def _inside_word(text: str, i: int) -> bool:
+    """Le caractère i fait-il partie d'un mot ? Une apostrophe ou un trait d'union seulement entre deux lettres."""
+    if text[i].isalnum():
+        return True
+    return text[i] in "'’-" and 0 < i < len(text) - 1 and text[i - 1].isalnum() and text[i + 1].isalnum()
 
 
 def can_ignore_rule(issue: Issue) -> bool:

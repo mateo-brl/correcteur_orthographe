@@ -662,7 +662,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Erreur : {exc}", file=sys.stderr)
             return 2
 
-    from correcteur.platform.ipc import send_command
+    from correcteur.platform.ipc import IpcServer, send_command
 
     if args.commande == "quitter":
         return 0 if send_command("quitter") else 1
@@ -671,9 +671,15 @@ def main(argv: list[str] | None = None) -> int:
     forwarded = "ping" if args.demarrage else (gui_command or "ouvrir")
     if send_command(forwarded, timeout=1.5):
         return 0
+    # Canal de commande ouvert avant de charger Qt et l'interface (0,2 à 0,3 s) : un raccourci tapé pendant ce temps
+    # attend que l'application soit prête, au lieu de lancer une 2e instance qui le perdait.
+    ipc = IpcServer()
+    if not ipc.start() and ipc.other_instance:
+        # Une autre instance s'est lancée entre-temps : c'est elle qui reçoit la commande.
+        return 0 if send_command(forwarded, timeout=1.5) else 1
     from correcteur.ui.app import run_app
 
-    return run_app(initial_command=gui_command, startup=args.demarrage)
+    return run_app(initial_command=gui_command, startup=args.demarrage, ipc=ipc)
 
 
 def main_gui() -> int:

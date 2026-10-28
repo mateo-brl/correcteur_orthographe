@@ -370,10 +370,12 @@ class Checker:
                 return None
             if self.settings.general.accept_abbreviations and word.lower() in COMMON_ABBREVIATIONS:
                 return None
-        had = bool(issue.replacements)
+        # « cheval s » écartée avant le reste : une faute qui n'avait que ce genre de suggestion reste signalée.
+        candidates = [rep for rep in issue.replacements if not _splits_off_a_letter(original, rep)]
+        had = bool(candidates)
         seen: set[str] = set()
         replacements = []
-        for rep in issue.replacements:
+        for rep in candidates:
             if not strict:
                 rep = adapt_to_user_style(rep, text, original)
             if issue.category is Category.SPELLING and rep.casefold() != original.casefold():
@@ -519,6 +521,24 @@ class Checker:
         return current, applied_all, remaining, result
 
 
+# Mots d'une lettre : a, à, y, ô en français ; e, é, è, i, o, ó, u en espagnol, italien ou portugais ; I en anglais.
+_ONE_LETTER_WORDS = frozenset("aàeéèioóôuy")
+
+
+def _splits_off_a_letter(original: str, replacement: str) -> bool:
+    """La suggestion ne fait que couper le mot fautif par une espace, à côté d'une lettre seule qui n'est pas un
+    mot : « chevals » -> « cheval s » (LanguageTool, PLURIEL_AL2). « apriori » -> « a priori », « parceque » ->
+    « parce que » et « 10h » -> « 10 h » restent, comme une espace ajoutée au bord du mot (« Oui,j'arrive » ->
+    « j » précédé d'une espace) et une majuscule qui désigne quelque chose (« rayons X », « plan B »)."""
+    if not original.isalpha() or len(replacement) != len(original) + 1:
+        return False
+    left, space, right = replacement.partition(" ")
+    if not (left and space and right) or (left + right).casefold() != original.casefold():
+        return False
+    return any(len(part) == 1 and part.lower() not in _ONE_LETTER_WORDS and not (part.isupper() and not other.isupper())
+               for part, other in ((left, right), (right, left)))
+
+
 def _distinct(replacements: list[str]) -> list[str]:
     """Sans doublons, à la typographie près (« C’est » et « C'est ») : la première forme est gardée."""
     seen: set[str] = set()
@@ -566,11 +586,15 @@ _FEMININE_DETERMINERS = frozenset("la une cette ma ta sa".split())
 
 def _solo_pick(text: str, issue: Issue) -> str | None:
     """Parmi plusieurs suggestions, celle que le contexte impose, quand il l'impose : l'auxiliaire devant un
-    participe (« Je vous est envoyé » -> « ai », pas « aie » ni « suis »), le genre du déterminant qui suit
-    (« Quelque soit le temps » -> « Quel que soit »)."""
+    participe (« Tu a mangé » -> « as »), le genre du déterminant qui suit (« Quelque soit le temps » -> « Quel
+    que soit »)."""
     family = rule_family(issue.rule_id)
     first = issue.replacements[0]
     if family in ("conj_je", "conj_tu") and first in ("ai", "as") and _PARTICIPLE_AFTER_RE.match(text, issue.end):
+        if family == "conj_je" and "suis" in issue.replacements:
+            # « J'est fatigué » : « suis » aussi possible. La règle du correcteur (regle_je_ai) tranche quand le
+            # contexte le permet (« Je vous est envoyé le dossier » -> « ai »).
+            return None
         return first
     if family.endswith("_non_verbe") and text[issue.start:issue.end].lower() == "et" and "est" in issue.replacements:
         return "est"  # « Il et sorti » : « est », pas « ait » ni « hait »
@@ -995,6 +1019,9 @@ def solo_context_ok(text: str, issue: Issue, agreed: bool = False) -> bool:
         return False
     if family.startswith("conj_") and re.search(r"[\"“«]\s*\w+\s*[\"”»]\s*$", text[max(0, issue.start - 20):issue.start]):
         return False  # « les pronoms “je” est “tu” » : « je » cité, pas sujet
+    if family == "conj_je" and first == "ai" and any(w == "me" or w.startswith("m'")
+                                                     for w in _words_before(text, issue.start, 3)):
+        return False  # « Je me l'est demandé » : pronominal, donc « suis » (« me le » ou « me la » ?), jamais « ai »
     if family.startswith("conj_"):
         m = _QUE_SUBJECT_RE.search(text, max(0, issue.start - 80), issue.start)
         if m:

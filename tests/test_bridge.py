@@ -345,6 +345,79 @@ def test_x11_express_checks_activity_just_before_the_paste(monkeypatch, clock):
     assert not ok and "clavier ou souris" in message and desk.pasted == [] and desk.clipboard == "témoin"
 
 
+@pytest.mark.parametrize("copied", ["Les enfants on faim.", "Les enfants on faim.\nIl pense à toi.\n"])
+def test_x11_calc_cell_copy_mode_is_left_at_once(monkeypatch, clock, copied):
+    """L-03 sous X11 : la copie d'une cellule de Calc hors édition (cellule seule, sans retour à la ligne, ou plage)
+    met Calc en mode copie (Entrée collerait le presse-papiers du moment) : Échap juste après la copie. L'Échap
+    simulé, même 0,1 s après la copie, n'est pas un geste de l'utilisateur : la correction est collée sans nouvelle
+    copie, qui remettrait Calc en mode copie."""
+    from correcteur.platform import x11_selection
+
+    deferred = []
+    x11 = X11Bridge(lambda ms, fn: deferred.append(fn))
+    desk = FakeX11(clock, monkeypatch, x11)
+    monkeypatch.setattr(x11, "_primary_from", lambda window: False)
+    x11._owner = SimpleNamespace(owns=lambda: desk.clipboard is None)
+    desk.selection = copied
+
+    def targets(selection):
+        clock.sleep(0.1)  # aller-retour X11
+        return ["TARGETS", "UTF8_STRING"] + (["application/x-libreoffice-tsvc"] if desk.clipboard == copied else [])
+
+    monkeypatch.setattr(x11_selection, "selection_targets", targets)
+    capture = x11.capture(express=True)
+    assert capture.text == copied and desk.keys == ["copy", "escape"]
+    clock.sleep(1.0)
+    assert x11.replace(capture, copied.replace("on faim", "ont faim"))[0]
+    assert desk.keys == ["copy", "escape", "paste"]
+
+
+def test_x11_calc_escape_never_follows_the_user(monkeypatch, clock):
+    """Frappe de l'utilisateur entre la copie de la cellule et l'Échap : pas d'Échap, qui annulerait sa saisie."""
+    from correcteur.platform import x11_selection
+
+    x11 = X11Bridge(lambda ms, fn: None)
+    desk = FakeX11(clock, monkeypatch, x11)
+    monkeypatch.setattr(x11, "_primary_from", lambda window: False)
+    x11._owner = SimpleNamespace(owns=lambda: desk.clipboard is None)
+    desk.selection = "Les enfants on faim."
+
+    def targets(selection):
+        clock.sleep(0.1)
+        desk.last_input = clock.now  # frappe pendant la lecture des formats
+        return ["TARGETS", "UTF8_STRING", "application/x-libreoffice-tsvc"]
+
+    monkeypatch.setattr(x11_selection, "selection_targets", targets)
+    x11.capture(express=True)
+    assert desk.keys == ["copy"]
+
+
+def test_x11_google_docs_gets_no_extra_paragraphs(monkeypatch, clock):
+    """L-15 sous X11 : la copie de Google Docs (Chromium, HTML avec docs-internal-guid) est reconnue, et ses retours
+    à la ligne finaux ne sont pas recollés."""
+    from correcteur.platform import x11_selection
+
+    x11 = X11Bridge(lambda ms, fn: None)
+    desk = FakeX11(clock, monkeypatch, x11)
+    monkeypatch.setattr(x11, "_primary_from", lambda window: False)
+    x11._owner = SimpleNamespace(owns=lambda: desk.clipboard is None)
+    desk.selection = "Les enfants on faim.\n"
+    monkeypatch.setattr(x11_selection, "selection_targets", lambda selection: ["TARGETS", "UTF8_STRING"] + (
+        ["chromium/x-web-custom-data", "text/html"] if desk.clipboard == desk.selection else []))
+    formats = {"chromium/x-web-custom-data": b"\x10\0\0\0", "text/html": b'<b id="docs-internal-guid-1">x</b>'}
+    monkeypatch.setattr(x11_selection, "read_target", lambda selection, target: formats[target])
+    capture = x11.capture(express=True)
+    assert capture.docs
+    assert x11.replace(capture, "Les enfants ont faim.\n")[0] and desk.pasted == ["Les enfants ont faim."]
+
+    # Docs dans Firefox : ses données de page sont sous application/x-moz-custom-clipdata.
+    desk.clipboard, desk.pasted = "témoin", []
+    monkeypatch.setattr(x11_selection, "selection_targets", lambda selection: ["TARGETS", "UTF8_STRING"] + (
+        ["application/x-moz-custom-clipdata", "text/html"] if desk.clipboard == desk.selection else []))
+    capture = x11.capture(express=True)
+    assert capture.docs
+
+
 def test_x11_line_copied_without_selection_is_no_selection(monkeypatch, clock):
     """VS Code sous X11, sans sélection : la copie prend la ligne entière (données « isFromEmptySelection »)."""
     from correcteur.platform import x11_selection
@@ -435,6 +508,7 @@ class FakeWin:
         self.terminal, self.in_menu = False, False
         self.rewrite_after_paste = False  # l'Explorateur réécrit le presse-papiers après un collage
         self.line_copy = False  # sans sélection, l'application copie la ligne entière (VS Code, Notepad++)
+        self.cells = False  # la sélection est une cellule de tableur hors édition (format Biff8)
 
     # presse-papiers
     @staticmethod
@@ -472,6 +546,12 @@ class FakeWin:
 
     def copied_line(self):
         return self.line_copy
+
+    def copied_cells(self):
+        return self.cells and 13 in self.clipboard and self.get_clipboard_text() == self.selection.replace("\n", "\r\n")
+
+    def send_escape(self):
+        self.keys.append("échap")
 
     # fenêtres et clavier
     def foreground_window(self):
@@ -763,6 +843,14 @@ def test_windows_google_docs_gets_plain_text(clock):
     # Sans les deux retours à la ligne ajoutés par la copie de Docs (deux paragraphes vides de plus à chaque fois).
     assert ok and FakeWin.HTML not in w.clipboard and w.document == ["Je les ai mis au frigo."]
 
+    # L-15 : paragraphe du milieu sélectionné par Début puis Maj+Bas : une fin de paragraphe copiée, qui reste.
+    w = FakeWin("Les enfants on faim.\n", (header + body).encode())
+    w.classes[100] = "Chrome_WidgetWin_1"
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.docs and win.replace(capture, "Les enfants ont faim.\n")[0]
+    assert w.document == ["Les enfants ont faim."]
+
 
 def test_windows_line_copied_without_selection_is_no_selection(clock):
     """VS Code, Notepad++ : sans sélection, la copie prend la ligne entière. Corrigée, elle était collée au curseur,
@@ -782,6 +870,35 @@ def test_windows_line_copied_without_selection_is_no_selection(clock):
     w = FakeWin(selection="Ces un test\n")
     win, _ = _windows(w)
     assert _capture(win).text == "Ces un test\n"
+
+
+@pytest.mark.parametrize("copied", ["Les enfants on faim.", "Les enfants on faim.\nIl pense à toi.\n"])
+def test_windows_spreadsheet_cell_copy_mode_is_left_at_once(clock, copied):
+    """L-03 sous Windows : une cellule de Calc copiée hors édition (cellule seule, sans retour à la ligne, ou plage)
+    met Calc en mode copie, où Entrée colle le presse-papiers du moment (le témoin, une fois remis) : Échap juste
+    après la copie. Pas après une frappe de l'utilisateur, ni pour le texte d'une cellule en édition."""
+    w = FakeWin(selection=copied)
+    w.cells = True
+    w.classes[100] = "SALFRAME"
+    win, _ = _windows(w)
+    capture = _capture(win)
+    assert capture.text == copied and w.keys == ["copie:insert", "échap"]
+    w = FakeWin(selection=copied)  # texte d'une cellule en édition : pas d'Échap
+    win, _ = _windows(w)
+    _capture(win)
+    assert w.keys == ["copie:insert"]
+    w = FakeWin(selection=copied)
+    w.cells = True
+    send_copy = w.send_copy
+
+    def copy_while_typing(keys="insert"):
+        send_copy(keys)
+        win._watch.acted = "frappe"  # l'utilisateur tape pendant la copie
+
+    w.send_copy = copy_while_typing
+    win, _ = _windows(w)
+    _capture(win)
+    assert w.keys == ["copie:insert"]
 
 
 def test_windows_tray_menu_goes_back_to_the_last_window(clock):

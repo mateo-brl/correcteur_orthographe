@@ -261,6 +261,17 @@ FAUTES = [
     ("Je suis contant de te voir.", "Je suis content de te voir."),
     ("Elle est contante de partir.", "Elle est contente de partir."),
     ("Il est très contant.", "Il est très content."),
+    # Campagne 0.1.15 (test Linux de la 0.1.15)
+    ("Mes cousins on une maison a la campagne depuis 21 ans.", "Mes cousins ont une maison à la campagne depuis 21 ans."),
+    ("Les promeneurs ont soif a la fontaine.", "Les promeneurs ont soif à la fontaine."),
+    ("Je n'est pas fini mon travail.", "Je n'ai pas fini mon travail."),
+    ("Ils se sont trompé de chemin hier soir.", "Ils se sont trompés de chemin hier soir."),
+    ("J'est allé au marché.", "Je suis allé au marché."),
+    ("J'est eu peur.", "J'ai eu peur."),
+    ("J'est pu venir.", "J'ai pu venir."),
+    ("J'est envie de partir.", "J'ai envie de partir."),
+    ("Il dit qu'il a laissé son sac a la gare.", "Il dit qu'il a laissé son sac à la gare."),
+    ("Qui a laissé son sac a la gare ?", "Qui a laissé son sac à la gare ?"),
 ]
 
 # Phrases justes (ou sans correction certaine) : rien ne doit y être changé d'office.
@@ -456,4 +467,32 @@ PIEGES = [
     "Il se tord la cheville en tombant.",
     "Il raconte en contant des histoires.",
     "Le conteur, contant ses légendes, captive la salle.",
+    # Campagne 0.1.15 : « a » verbe après un sujet nominal, une relative, une coordination, un participe.
+    "Le chien qui aboie a peur du noir.",
+    "Ce que tu dis a la valeur d'un aveu.",
+    "La porte a la poignée cassée.",
+    "Il mange et a la grippe.",
+    "Le livre posé sur la table a la couverture rouge.",
+    "Le train a 21 heures de retard.",
+    "Son frère a la grippe.",
+    "Il y a la mer.",
+    "La marche a la cote.",
+    "Le chien qui mange un os a la queue coupée.",
+    "Celui qui a le ballon a la priorité.",
+    "L'homme dont elle aime le fils a la grippe.",
+    "Le livre que tu lis le soir a la couverture rouge.",
+    "La maison où il passe ses vacances a la forme d'un bateau.",
+    "Le livre écrit la nuit a la couverture rouge.",
+    "Ma tante ferme la porte et a la clé.",
+    # « Je n'est pas content » n'est pas « n'ai » ; « J'est fatigué » : « ai » ou « suis » ? Rien d'office.
+    "Je n'est pas content.",
+    "J'est fatigué.",
+    "Ils se sont servi de l'eau.",
+    # Préposition ou conjonction prise pour le verbe du sujet ; complément de temps ; « me l' » + « suis ».
+    "La maison entre les arbres a la porte bleue.",
+    "L'espace entre les dents a la largeur d'un cheveu.",
+    "Le directeur puis le maire a la parole.",
+    "Je n'est pas occupé cet après-midi.",
+    "Je n'est pas retenu toute la journée.",
+    "Je me l'est demandé.",
 ]

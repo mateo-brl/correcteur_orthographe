@@ -100,9 +100,9 @@ def make_controller(qapp, home, monkeypatch):
     monkeypatch.setattr(app_module, "Checker", lambda s, d: Checker(s, d, engines=[QuietEngine(s)]))
     made = []
 
-    def make(bridge_factory=FakeBridge, startup=True):
+    def make(bridge_factory=FakeBridge, startup=True, ipc=None):
         monkeypatch.setattr(app_module, "create_bridge", lambda defer: bridge_factory(defer))
-        controller = app_module.Controller(qapp, startup=startup)
+        controller = app_module.Controller(qapp, startup=startup, ipc=ipc)
         made.append(controller)
         return controller, notes
 
@@ -110,6 +110,36 @@ def make_controller(qapp, home, monkeypatch):
     for controller in made:
         controller.window.close()
         controller.quit()
+
+
+def test_commands_received_before_the_interface_are_handled(qapp, make_controller):
+    """Canal ouvert par la ligne de commande avant le chargement de Qt (cli.main) : la commande reçue pendant ce
+    temps est traitée une fois l'interface prête."""
+    from correcteur.platform.ipc import IpcServer, send_command
+
+    server = IpcServer()
+    assert server.start(), server.error
+    assert send_command("ouvrir", "Les enfant joue.")
+    assert wait_until(qapp, lambda: server._waiting, timeout=3)
+    controller, _ = make_controller(ipc=server)
+    assert controller.ipc is server
+    assert wait_until(qapp, controller.window.isVisible)
+    assert controller.window.editor.toPlainText() == "Les enfant joue."
+
+
+def test_command_channel_failure_goes_to_the_log(caplog):
+    """Le canal de commande s'ouvre avant le journal (cli.main) : son échec y est écrit ensuite, en WARNING, que le
+    testeur cherche. Une autre instance qui écoute déjà n'est pas une erreur."""
+    from types import SimpleNamespace
+
+    from correcteur.ui.app import log_command_channel
+
+    broken = SimpleNamespace(listening=False, other_instance=False, error="Canal de commande indisponible (x) : refus")
+    with caplog.at_level(logging.WARNING, logger="correcteur.ui.app"):
+        log_command_channel(broken)
+        log_command_channel(SimpleNamespace(listening=False, other_instance=True, error="autre instance"))
+        log_command_channel(None)
+    assert [r.getMessage() for r in caplog.records] == ["Canal de commande indisponible (x) : refus"]
 
 
 def test_copy_text_reports_failure(make_controller):
@@ -497,6 +527,121 @@ def test_no_empty_selection_message_right_after_an_express_correction(make_contr
     assert notes and notes[-1][0].startswith("Aucun texte sélectionné")
 
 
+_NO_SELECTION = ("Aucun texte sélectionné : sélectionnez un texte, puis recommencez.", False)
+_MOVED = "Correction non collée : la sélection a changé pendant qu'elle se faisait."
+
+
+def _express_with_correction(controller) -> None:
+    """Fin d'une correction express qui a trouvé une faute : _express_done, comme après _express."""
+    result = CheckResult("Ces un test", [], {"grammalecte": EngineStatus("grammalecte", True)}, ())
+    controller._busy_express = True
+    controller._express_done(Capture("Ces un test", from_selection=True),
+                             controller._express_outcome("Ces un test", ("C'est un test", [object()], [], result)))
+
+
+def test_press_during_the_express_paste_says_it_is_running(qapp, make_controller, monkeypatch):
+    """L-19 : replace() bloque le fil de l'interface (collage, relecture de la sélection). Un Ctrl+Alt+X reçu
+    pendant ce temps lançait, collage fini, une capture en retard, qui lisait la ligne sélectionnée ensuite ou
+    rien. Il est ignoré : le bilan, affiché ensuite, y répond (« déjà en cours » le remplaçait dans la bulle) ;
+    l'appui suivant lance bien une capture."""
+    from correcteur.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "_app_focused", lambda: False)
+    controller, notes = make_controller()
+    bridge = controller.bridge
+
+    def replace(capture, text):
+        # Appui reçu par le canal de commande (autre fil) pendant le collage.
+        sender = threading.Thread(target=lambda: controller.command.emit("correction-express", ""))
+        sender.start()
+        sender.join()
+        return False, _MOVED
+
+    bridge.replace = replace
+    _express_with_correction(controller)
+    assert controller._busy_express
+    assert wait_until(qapp, lambda: not controller._busy_express)
+    assert notes == [(_MOVED, True)]
+    assert bridge.calls == []
+    controller._on_command("correction-express", "")
+    assert wait_until(qapp, lambda: bridge.calls[-1:] == ["end"])
+    assert bridge.calls == ["begin", "capture", "end"]
+    assert notes == [(_MOVED, True)]  # rien de sélectionné, mais en pleine rafale : pas de message
+
+
+def test_no_empty_selection_message_in_an_express_burst(qapp, make_controller, monkeypatch):
+    """L-19 : en rafale (ligne suivante sélectionnée 0,6 s après chaque Ctrl+Alt+X), la copie simulée tombait
+    parfois pendant que la sélection changeait : « Aucun texte sélectionné ». Plus de message juste après une
+    correction express collée, ni pour un appui qui en suit un autre de près. Un appui qu'un autre suit pendant la
+    lecture est relu une fois (en rafale, la ligne suivante ; sinon, le message). Un appui isolé garde le message,
+    même après un collage refusé ou « Aucune faute trouvée »."""
+    from correcteur.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "_app_focused", lambda: False)
+    controller, notes = make_controller()
+    bridge = controller.bridge
+
+    bridge.allow_capture.clear()
+    controller._on_command("correction-express", "")
+    controller._on_command("correction-express", "")
+    bridge.allow_capture.set()
+    assert wait_until(qapp, lambda: not controller._capturing)
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 2)  # relu une fois, toujours rien
+    assert notes == [("Lecture de la sélection en cours, un instant…", False), _NO_SELECTION]
+
+    notes.clear()
+    controller._on_command("correction-express", "")  # moins de 1,5 s après l'appui précédent
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 3)
+    assert notes == []
+    controller._express_asked_at -= 2.0
+    controller._on_command("correction-express", "")
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 4)
+    assert notes == [_NO_SELECTION]
+
+    # Correction express non collée : un appui isolé ensuite, sans sélection, a son message.
+    bridge.replace = lambda capture, text: (False, _MOVED)
+    _express_with_correction(controller)
+    assert wait_until(qapp, lambda: not controller._busy_express)
+    notes.clear()
+    controller._express_asked_at -= 2.0
+    controller._on_command("correction-express", "")
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 5)
+    assert notes == [_NO_SELECTION]
+
+    # « Aucune faute trouvée » : rien n'a été remplacé, un appui isolé sans sélection garde son message.
+    notes.clear()
+    controller._express_done(Capture("Une phrase juste."), ("Une phrase juste.", 0, "Aucune faute trouvée ✓", False))
+    assert wait_until(qapp, lambda: not controller._busy_express)
+    controller._express_asked_at -= 2.0
+    controller._on_command("correction-express", "")
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 6)
+    assert notes == [("Aucune faute trouvée ✓", False), _NO_SELECTION]
+
+
+def test_new_press_during_the_express_correction_resumes_it(qapp, make_controller, monkeypatch):
+    """Un 2e Ctrl+Alt+X pendant la vérification compte comme une frappe de l'utilisateur (compteur d'inactivité
+    sous GNOME, Raw Input sous Windows) : le collage était refusé avec un message inquiétant (« une touche a pu se
+    perdre »). La correction reprend sur la sélection du moment, et c'est elle qui est collée."""
+    from correcteur.ui import app as app_module
+
+    monkeypatch.setattr(app_module, "_app_focused", lambda: False)
+    controller, notes = make_controller()
+    bridge = controller.bridge
+    pasted = []
+    bridge.replace = lambda capture, text: pasted.append(text) or (True, "")
+    controller._busy_express = True
+    controller._on_command("correction-express", "")  # pendant la vérification
+    assert notes == [("Nouvel appui : la correction express reprendra sur la sélection actuelle, un instant…", False)]
+    bridge.next_capture = Capture("Ces un test", from_selection=True)
+    result = CheckResult("Ces un test", [], {"grammalecte": EngineStatus("grammalecte", True)}, ())
+    controller.checker.autocorrect = lambda text: ("C'est un test", [object()], [], result)
+    _express_with_correction(controller)  # fin de la première vérification : pas collée
+    assert pasted == []
+    assert wait_until(qapp, lambda: bridge.calls.count("end") == 1)  # reprise : nouvelle capture
+    assert wait_until(qapp, lambda: pasted == ["C'est un test"], timeout=10)
+    assert not controller._express_again
+
+
 def test_ready_message_names_the_gnome_shortcuts(qapp, make_controller, monkeypatch):
     """Sous GNOME, « Correcteur prêt » nommait la commande « correcteur selection » même quand les raccourcis
     GNOME du correcteur existaient : il attend leur lecture et nomme les vraies touches."""
@@ -730,3 +875,33 @@ def test_ready_message_follows_the_settings(qapp, make_controller, monkeypatch):
     monkeypatch.setattr(app_module, "session_type", lambda: "x11")
     controller.settings.general.hotkeys_enabled = True
     assert "(indisponibles sur ce système)" in controller._ready_message()
+
+
+def test_fault_cut_in_both_engines_is_one_line_in_the_settings(qapp, make_controller, monkeypatch):
+    """L-20 : « Ne plus signaler cette règle » sur « au jour d'aujourd'hui » coupe la règle de Grammalecte et celle de
+    LanguageTool. Les Paramètres les listaient deux fois, « Pléonasme. : « … » » ; la ligne réactive les deux."""
+    from correcteur.config import SettingsStore
+    from correcteur.models import Category, Issue
+    from correcteur.ui import app as app_module
+    from correcteur.ui.settings import SettingsDialog
+
+    monkeypatch.setattr(app_module, "desktop_name", lambda: "")
+    controller, _ = make_controller()
+    rules = ("g2__pleo_locutions__b7_a1_1", "AU_JOUR_D_AUJOURD_HUI")
+    text = "Au jour d'aujourd'hui, il pleut."
+    controller.window.open_with(text)
+    assert wait_until(qapp, lambda: not controller.window._running)
+    controller.window.ignore_rule(Issue(0, 21, "Pléonasme.", ["Aujourd'hui"], Category.STYLE, rules[0], "grammalecte",
+                                        sources=("grammalecte", "languagetool"), rules=rules))
+    saved = SettingsStore().load()
+    assert saved.ignored_rules == list(rules)
+    assert saved.rule_labels == dict.fromkeys(rules, "Pléonasme : « Au jour d'aujourd'hui »")
+
+    dialog = SettingsDialog(controller.settings, controller)
+    assert [dialog.rules.item(i).text() for i in range(dialog.rules.count())] == [
+        "Pléonasme : « Au jour d'aujourd'hui »"]
+    dialog.rules.takeItem(0)
+    dialog._accept()
+    saved = SettingsStore().load()
+    assert saved.ignored_rules == [] and saved.rule_labels == {}
+    assert controller.checker.settings.ignored_rules == []
