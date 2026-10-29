@@ -34,18 +34,11 @@ Trois phrases passées à la correction express, telles que le correcteur les re
 + Les filles sont parties tôt, car elles étaient fatiguées. Nous avons mangé des pommes et on a bien rigolé.
 ```
 
-La fenêtre de correction, ouverte par <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>C</kbd> :
+La fenêtre de correction, ouverte par <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>C</kbd> sur un texte sélectionné dans
+un éditeur. Six corrections sûres y sont déjà appliquées et surlignées ; la remarque de style reste au choix. La
+fenêtre suit le thème clair ou sombre du système.
 
-<table>
-  <tr>
-    <td><img src="docs/fenetre.png" alt="Fenêtre de correction, thème clair"></td>
-    <td><img src="docs/fenetre-sombre.png" alt="Fenêtre de correction, thème sombre"></td>
-  </tr>
-  <tr>
-    <td align="center"><sub>Thème clair</sub></td>
-    <td align="center"><sub>Thème sombre (suit le système)</sub></td>
-  </tr>
-</table>
+<img src="docs/fenetre.png" alt="Fenêtre de correction ouverte au-dessus d'un éditeur de texte : corrections surlignées et une remarque de style à trancher">
 
 ## Pourquoi Correcteur
 
@@ -259,7 +252,7 @@ sa sortie suit la page de code de la console (que lisent cmd, PowerShell 5, `fin
 Le serveur LanguageTool local est lancé en priorité basse, avec une mémoire plafonnée (réglable). Il s'arrête avec
 le correcteur, même en cas de fermeture brutale.
 
-<p align="center"><img src="docs/parametres.png" width="560" alt="Paramètres des moteurs"></p>
+<p align="center"><img src="docs/parametres.png" alt="Paramètres, onglet Moteurs"></p>
 
 ## Paramètres
 
