@@ -905,3 +905,17 @@ def test_fault_cut_in_both_engines_is_one_line_in_the_settings(qapp, make_contro
     saved = SettingsStore().load()
     assert saved.ignored_rules == [] and saved.rule_labels == {}
     assert controller.checker.settings.ignored_rules == []
+
+
+def test_settings_opened_from_the_window_stay_above_it(make_controller):
+    """⚙ dans la fenêtre de correction, toujours au premier plan : les paramètres s'ouvraient dessous."""
+    controller, _ = make_controller()
+    controller.window.show()
+    controller.open_settings()
+    dialog = controller._settings_dialog
+    assert dialog.parentWidget() is controller.window and dialog.isWindow()
+    dialog.close()
+    controller.window.hide()
+    controller.open_settings()  # depuis le menu de l'icône, fenêtre fermée : dialogue indépendant
+    assert controller._settings_dialog.parentWidget() is None
+    controller._settings_dialog.close()

@@ -846,7 +846,9 @@ class Controller(QObject):
         if self._settings_dialog is not None and self._settings_dialog.isVisible():
             self.bring_to_front(self._settings_dialog)
             return
-        dialog = SettingsDialog(self.settings, self)
+        # Depuis la fenêtre de correction (⚙), toujours au premier plan : sans elle pour parent, les paramètres
+        # s'ouvraient dessous, à moitié cachés. Un dialogue reste au-dessus de sa fenêtre parente.
+        dialog = SettingsDialog(self.settings, self, self.window if self.window.isVisible() else None)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)  # sinon chaque ouverture laissait un dialogue caché
         dialog.setWindowIcon(self.icon)
         self._settings_dialog = dialog
